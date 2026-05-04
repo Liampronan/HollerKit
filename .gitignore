@@ -1,0 +1,14 @@
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Environment
+.env
+.env.*

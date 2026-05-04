@@ -1,0 +1,24 @@
+{
+  "name": "hollerkit-server",
+  "version": "0.1.0",
+  "description": "Self-hosted server handler for HollerKit bug reports.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types tests/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "bug-reporting",
+    "github-issues",
+    "hollerkit"
+  ],
+  "license": "MIT"
+}
