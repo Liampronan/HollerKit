@@ -6,14 +6,12 @@
   <img src="./assets/hollerkit-banner.png" alt="HollerKit" width="200">
 </p>
 
-HollerKit is an open-source bug reporting toolkit for iOS apps.
+HollerKit is a simple user feedback SDK to let you easily collect screenshot-based feedback from users in your iOS app. 
 
 It is a combination of:
 
 - An iOS Swift Package for collecting reports, screenshots, breadcrumbs, metadata, and optional audio notes.
 - A small self-hosted server handler that validates reports, uploads attachments, and creates GitHub issues.
-
-The goal is simple: add a report button to your app and turn useful in-app feedback into GitHub issues without adopting another SaaS dashboard.
 
 Bonus: try optional audio-only bug reports, which transcribe a user's voice note into text for easier capture.
 
