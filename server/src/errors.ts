@@ -18,6 +18,8 @@ export function errorResponse(error: unknown): Response {
     )
   }
 
+  console.error('[hollerkit] unexpected handler error', error)
+
   return Response.json(
     { ok: false, error: { code: 'internal_error', message: 'Unexpected server error.' } },
     { status: 500 },

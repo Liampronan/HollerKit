@@ -107,6 +107,43 @@ test('rejects invalid signatures', async () => {
   assert.equal((await response.json()).error.code, 'invalid_signature')
 })
 
+test('rejects stale timestamps even with a valid signature', async () => {
+  const handler = createBugReportHandler({
+    appSecret: secret,
+    issue: fakeIssue(),
+    now: () => now,
+  })
+
+  const response = await handler(await signedRequest({
+    comment: 'Old request',
+    inputMode: 'text-only',
+    metadata: '{}',
+  }, { timestamp: Math.floor(now.getTime() / 1000 - 600).toString() }))
+
+  assert.equal(response.status, 401)
+  assert.equal((await response.json()).error.code, 'timestamp_out_of_range')
+})
+
+test('rejects oversized requests before reading the body', async () => {
+  const handler = createBugReportHandler({
+    appSecret: secret,
+    issue: fakeIssue(),
+    limits: { maxBodyBytes: 10 },
+    now: () => now,
+  })
+
+  const request = await signedRequest({
+    comment: 'This request is too large for the configured cap.',
+    inputMode: 'text-only',
+    metadata: '{}',
+  })
+
+  const response = await handler(request)
+
+  assert.equal(response.status, 413)
+  assert.equal((await response.json()).error.code, 'body_too_large')
+})
+
 test('enforces image count limits', async () => {
   const handler = createBugReportHandler({
     appSecret: secret,
@@ -155,6 +192,29 @@ test('renders transcript provenance in issue body', () => {
 
   assert.match(body, /apple-on-device/)
   assert.match(body, /It crashes after I tap save\./)
+})
+
+test('renders user comment and transcript inside fenced code blocks', () => {
+  const body = renderIssueBody({
+    report: {
+      id: 'report-markdown',
+      createdAt: now.toISOString(),
+      inputMode: 'text-and-audio',
+      comment: '@octocat <img src="https://attacker.example/track">',
+      transcript: {
+        text: '```nested fence```',
+        locale: 'en-US',
+        engine: 'manual',
+      },
+      metadata: {},
+      breadcrumbs: [],
+      files: { images: [] },
+    },
+    uploadedFiles: [],
+  })
+
+  assert.match(body, /## Comment\n\n```\n@octocat/)
+  assert.match(body, /````\n```nested fence```\n````/)
 })
 
 test('creates transcript-only audio reports without storage', async () => {
@@ -217,7 +277,10 @@ function fakeIssue(): IssueAdapter {
   }
 }
 
-async function signedRequest(fields: Record<string, string | File | File[]>): Promise<Request> {
+async function signedRequest(
+  fields: Record<string, string | File | File[]>,
+  options: { timestamp?: string } = {},
+): Promise<Request> {
   const form = new FormData()
   for (const [key, value] of Object.entries(fields)) {
     if (Array.isArray(value)) {
@@ -232,9 +295,10 @@ async function signedRequest(fields: Record<string, string | File | File[]>): Pr
     body: form,
   })
   const body = await unsigned.clone().arrayBuffer()
-  const timestamp = Math.floor(now.getTime() / 1000).toString()
+  const timestamp = options.timestamp ?? Math.floor(now.getTime() / 1000).toString()
   const signature = await hmacHex(secret, body, timestamp)
   const headers = new Headers(unsigned.headers)
+  headers.set('content-length', String(body.byteLength))
   headers.set('x-hollerkit-timestamp', timestamp)
   headers.set('x-hollerkit-signature', signature)
 

@@ -6,10 +6,14 @@ export type SupabaseStorageOptions = {
   bucket: string
   prefix?: string
   publicUrl?: (path: string) => string
+  signedUrlExpiresInSeconds?: number
 }
 
 export function supabaseStorage(options: SupabaseStorageOptions): StorageAdapter {
   const baseUrl = options.url.replace(/\/$/, '')
+  if (!options.publicUrl && options.signedUrlExpiresInSeconds == null) {
+    throw new Error('Supabase storage requires publicUrl or signedUrlExpiresInSeconds for GitHub issue links.')
+  }
 
   return {
     async upload(reportId: string, files: ReportFile[]): Promise<UploadedFile[]> {
@@ -37,15 +41,46 @@ export function supabaseStorage(options: SupabaseStorageOptions): StorageAdapter
           filename: file.filename,
           mimeType: file.mimeType,
           size: file.size,
-          url: options.publicUrl
-            ? options.publicUrl(path)
-            : `${baseUrl}/storage/v1/object/public/${options.bucket}/${encodePath(path)}`,
+          url: await resolveUrl(baseUrl, options, path),
         })
       }
 
       return uploaded
     },
   }
+}
+
+async function resolveUrl(baseUrl: string, options: SupabaseStorageOptions, path: string): Promise<string> {
+  if (options.publicUrl) return options.publicUrl(path)
+  if (options.signedUrlExpiresInSeconds != null) {
+    return createSignedUrl(baseUrl, options, path)
+  }
+
+  throw new Error('Supabase storage requires publicUrl or signedUrlExpiresInSeconds for GitHub issue links.')
+}
+
+async function createSignedUrl(baseUrl: string, options: SupabaseStorageOptions, path: string): Promise<string> {
+  const response = await fetch(`${baseUrl}/storage/v1/object/sign/${options.bucket}/${encodePath(path)}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${options.serviceRoleKey}`,
+      apikey: options.serviceRoleKey,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ expiresIn: options.signedUrlExpiresInSeconds }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Supabase signed URL creation failed with ${response.status}.`)
+  }
+
+  const payload = await response.json() as { signedURL?: string; signedUrl?: string }
+  const signedPath = payload.signedURL ?? payload.signedUrl
+  if (!signedPath) {
+    throw new Error('Supabase signed URL response did not include signedURL.')
+  }
+
+  return signedPath.startsWith('http') ? signedPath : `${baseUrl}${signedPath}`
 }
 
 function objectPath(prefix: string | undefined, reportId: string, file: ReportFile): string {

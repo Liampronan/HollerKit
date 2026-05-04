@@ -16,11 +16,12 @@ Deno.serve(createBugReportHandler({
     url: Deno.env.get('SUPABASE_URL')!,
     serviceRoleKey: Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     bucket: Deno.env.get('SUPABASE_BUCKET') ?? 'bug-report-assets',
+    signedUrlExpiresInSeconds: 60 * 60 * 24 * 7,
   }),
   dispatch: {
     when: { allowlist: (Deno.env.get('AGENT_ALLOWLIST') ?? '').split(',').filter(Boolean) },
     handler: dispatchers.comment({
-      template: (report) => `@codex please investigate this bug. Report ID: ${report.id}`,
+      template: (report) => `@your-bot-here please investigate this bug. Report ID: ${report.id}`,
     }),
   },
 }))

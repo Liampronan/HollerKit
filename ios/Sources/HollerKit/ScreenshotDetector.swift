@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 
 struct ScreenshotDetector: UIViewControllerRepresentable {
-    var onScreenshot: () -> Void
+    var onScreenshot: (HollerKitAttachment?) -> Void
 
     func makeUIViewController(context: Context) -> ScreenshotDetectorViewController {
         ScreenshotDetectorViewController(onScreenshot: onScreenshot)
@@ -16,10 +16,9 @@ struct ScreenshotDetector: UIViewControllerRepresentable {
 }
 
 final class ScreenshotDetectorViewController: UIViewController {
-    var onScreenshot: () -> Void
-    private var observer: NSObjectProtocol?
+    var onScreenshot: (HollerKitAttachment?) -> Void
 
-    init(onScreenshot: @escaping () -> Void) {
+    init(onScreenshot: @escaping (HollerKitAttachment?) -> Void) {
         self.onScreenshot = onScreenshot
         super.init(nibName: nil, bundle: nil)
     }
@@ -31,19 +30,50 @@ final class ScreenshotDetectorViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        observer = NotificationCenter.default.addObserver(
-            forName: UIApplication.userDidTakeScreenshotNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.onScreenshot()
-        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(userDidTakeScreenshot),
+            name: UIApplication.userDidTakeScreenshotNotification,
+            object: nil
+        )
     }
 
     deinit {
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc @MainActor private func userDidTakeScreenshot() {
+        onScreenshot(HollerKitScreenCapture.currentScreenshotAttachment())
+    }
+}
+
+enum HollerKitScreenCapture {
+    @MainActor
+    static func currentScreenshotAttachment() -> HollerKitAttachment? {
+        var keyWindow: UIWindow?
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            if let window = windowScene.windows.first(where: { $0.isKeyWindow }) {
+                keyWindow = window
+                break
+            }
         }
+
+        guard let window = keyWindow else { return nil }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = window.screen.scale
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
+        let image = renderer.image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+        }
+
+        guard let data = image.pngData() else { return nil }
+        return HollerKitAttachment(
+            filename: "screenshot-\(Int(Date().timeIntervalSince1970)).png",
+            mimeType: "image/png",
+            data: data
+        )
     }
 }
 #endif

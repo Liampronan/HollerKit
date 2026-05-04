@@ -101,10 +101,18 @@ struct MultipartBodyBuilder {
 
     private func appendFile(_ name: String, attachment: HollerKitAttachment, to body: inout Data) {
         body.appendString("--\(boundary)\r\n")
-        body.appendString("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(attachment.filename)\"\r\n")
+        body.appendString("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(Self.escapedMultipartFilename(attachment.filename))\"\r\n")
         body.appendString("Content-Type: \(attachment.mimeType)\r\n\r\n")
         body.append(attachment.data)
         body.appendString("\r\n")
+    }
+
+    static func escapedMultipartFilename(_ filename: String) -> String {
+        filename
+            .replacingOccurrences(of: "\"", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .replacingOccurrences(of: "\r", with: "_")
+            .replacingOccurrences(of: "\n", with: "_")
     }
 }
 

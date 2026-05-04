@@ -8,6 +8,7 @@ public struct HollerKitConfiguration: Sendable {
     public var audio: HollerKitAudioConfiguration
     public var userID: @Sendable () -> String?
     public var metadata: @Sendable () -> [String: String]
+    public var initialImages: @Sendable () -> [HollerKitAttachment]
     public var captureBreadcrumbs: Bool
 
     public init(
@@ -21,6 +22,7 @@ public struct HollerKitConfiguration: Sendable {
         ),
         userID: @escaping @Sendable () -> String? = { nil },
         metadata: @escaping @Sendable () -> [String: String] = { [:] },
+        initialImages: @escaping @Sendable () -> [HollerKitAttachment] = { [] },
         captureBreadcrumbs: Bool = true
     ) {
         self.endpoint = endpoint
@@ -30,6 +32,7 @@ public struct HollerKitConfiguration: Sendable {
         self.audio = audio
         self.userID = userID
         self.metadata = metadata
+        self.initialImages = initialImages
         self.captureBreadcrumbs = captureBreadcrumbs
     }
 }

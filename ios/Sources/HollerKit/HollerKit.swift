@@ -17,6 +17,7 @@ public enum HollerKit {
         ),
         userID: @escaping @Sendable () -> String? = { nil },
         metadata: @escaping @Sendable () -> [String: String] = { [:] },
+        initialImages: @escaping @Sendable () -> [HollerKitAttachment] = { [] },
         captureBreadcrumbs: Bool = true
     ) {
         state.configuration = HollerKitConfiguration(
@@ -27,6 +28,7 @@ public enum HollerKit {
             audio: audio,
             userID: userID,
             metadata: metadata,
+            initialImages: initialImages,
             captureBreadcrumbs: captureBreadcrumbs
         )
     }
@@ -52,11 +54,13 @@ public enum HollerKit {
     public static func presentationView() -> some View {
         BugReportSheet(
             configuration: state.configuration,
-            breadcrumbs: state.breadcrumbs
+            breadcrumbs: state.breadcrumbs,
+            invocationAttachments: presenterState.pendingAttachments
         )
     }
 
-    public static func present() {
+    public static func present(attachments: [HollerKitAttachment] = []) {
+        presenterState.pendingAttachments = attachments
         presenterState.isPresented = true
     }
 
@@ -66,6 +70,14 @@ public enum HollerKit {
 
     static var currentInvocation: HollerKitInvocation {
         state.configuration?.invocation ?? []
+    }
+
+    static var pendingPresentationAttachments: [HollerKitAttachment] {
+        presenterState.pendingAttachments
+    }
+
+    static func clearPresentationAttachments() {
+        presenterState.pendingAttachments = []
     }
 }
 
@@ -78,4 +90,5 @@ private struct HollerKitState {
 @MainActor
 final class HollerKitPresenterState: ObservableObject {
     @Published var isPresented = false
+    var pendingAttachments: [HollerKitAttachment] = []
 }

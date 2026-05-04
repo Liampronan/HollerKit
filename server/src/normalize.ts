@@ -61,17 +61,21 @@ export async function normalizeReport(input: {
     throw new HollerKitError(400, 'empty_report', 'Report must include a comment, transcript, image, or audio file.')
   }
 
-  return {
+  const files: NormalizedReport['files'] = { images }
+  if (audio) files.audio = audio
+
+  const report: NormalizedReport = {
     id: input.id,
     createdAt: input.now.toISOString(),
-    comment,
-    transcript,
     metadata,
     breadcrumbs,
-    files: { images, audio },
-    userIdHash,
+    files,
     inputMode,
   }
+  if (comment) report.comment = comment
+  if (transcript) report.transcript = transcript
+  if (userIdHash) report.userIdHash = userIdHash
+  return report
 }
 
 function parseInputMode(value: FormDataEntryValue | null): InputMode {
@@ -124,13 +128,14 @@ function parseTranscript(value: FormDataEntryValue | null): TranscriptPayload | 
     throw new HollerKitError(400, 'invalid_transcript', 'transcript has an invalid engine.')
   }
 
-  return {
+  const transcript: TranscriptPayload = {
     text: parsed.text,
     locale: parsed.locale,
     engine: parsed.engine as TranscriptPayload['engine'],
-    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : undefined,
-    durationSeconds: typeof parsed.durationSeconds === 'number' ? parsed.durationSeconds : undefined,
   }
+  if (typeof parsed.confidence === 'number') transcript.confidence = parsed.confidence
+  if (typeof parsed.durationSeconds === 'number') transcript.durationSeconds = parsed.durationSeconds
+  return transcript
 }
 
 function parseBreadcrumbs(value: FormDataEntryValue | null): Breadcrumb[] {
@@ -149,12 +154,13 @@ function parseBreadcrumbs(value: FormDataEntryValue | null): Breadcrumb[] {
       throw new HollerKitError(400, 'invalid_breadcrumbs', `breadcrumb ${index} is invalid.`)
     }
 
-    return {
+    const breadcrumb: Breadcrumb = {
       timestamp: typeof item.timestamp === 'string' ? item.timestamp : new Date(0).toISOString(),
-      category: typeof item.category === 'string' ? item.category : undefined,
       message: item.message,
-      metadata: isPlainObject(item.metadata) ? item.metadata : undefined,
     }
+    if (typeof item.category === 'string') breadcrumb.category = item.category
+    if (isPlainObject(item.metadata)) breadcrumb.metadata = item.metadata
+    return breadcrumb
   })
 }
 

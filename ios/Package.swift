@@ -12,7 +12,10 @@ let package = Package(
         .library(name: "HollerKit", targets: ["HollerKit"])
     ],
     targets: [
-        .target(name: "HollerKit"),
+        .target(
+            name: "HollerKit",
+            resources: [.process("PrivacyInfo.xcprivacy")]
+        ),
         .testTarget(name: "HollerKitTests", dependencies: ["HollerKit"])
     ]
 )

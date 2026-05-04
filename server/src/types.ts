@@ -100,6 +100,7 @@ export type DispatchWhen =
 
 export type LimitConfig = {
   timestampDriftSeconds: number
+  maxBodyBytes: number
   maxImages: number
   maxImageBytes: number
   maxAudioBytes: number

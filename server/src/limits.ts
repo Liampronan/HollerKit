@@ -3,6 +3,7 @@ import type { LimitConfig, NormalizedReport } from './types.ts'
 
 export const defaultLimits: LimitConfig = {
   timestampDriftSeconds: 5 * 60,
+  maxBodyBytes: 45_000_000,
   maxImages: 5,
   maxImageBytes: 8_000_000,
   maxAudioBytes: 2_000_000,
@@ -23,6 +24,19 @@ export function resolveLimits(overrides: Partial<LimitConfig> = {}): LimitConfig
       overrides.acceptedImageMimeTypes ?? defaultLimits.acceptedImageMimeTypes,
     acceptedAudioMimeTypes:
       overrides.acceptedAudioMimeTypes ?? defaultLimits.acceptedAudioMimeTypes,
+  }
+}
+
+export function validateContentLength(contentLengthHeader: string | null, limits: LimitConfig): void {
+  if (!contentLengthHeader) return
+
+  const contentLength = Number(contentLengthHeader)
+  if (!Number.isFinite(contentLength) || contentLength < 0) {
+    throw new HollerKitError(400, 'invalid_content_length', 'Content-Length must be a non-negative number.')
+  }
+
+  if (contentLength > limits.maxBodyBytes) {
+    throw new HollerKitError(413, 'body_too_large', 'Request body exceeds the configured byte limit.')
   }
 }
 

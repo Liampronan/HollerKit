@@ -23,6 +23,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install server dependencies
+        run: npm ci
+
+      - name: Typecheck server
+        run: npm run typecheck
 
       - name: Run server tests
         run: npm test
@@ -39,3 +47,19 @@ jobs:
 
       - name: Run Swift tests
         run: swift test
+
+  ios-demo:
+    name: iOS Demo Build
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build demo app
+        run: |
+          xcodebuild \
+            -project examples/ios-demo/HollerKitDemo.xcodeproj \
+            -scheme HollerKitDemo \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath /tmp/HollerKitDemoDerived \
+            build

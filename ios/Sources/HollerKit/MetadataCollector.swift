@@ -5,6 +5,8 @@ import UIKit
 #endif
 
 public enum MetadataCollector {
+    private static let launchDate = Date()
+
     public static func collect(extra: [String: String] = [:]) -> [String: String] {
         var metadata = extra
         metadata["locale"] = Locale.current.identifier
@@ -12,7 +14,7 @@ public enum MetadataCollector {
         metadata["appVersion"] = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
         metadata["appBuild"] = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
         metadata["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
-        metadata["appUptimeSeconds"] = String(Int(ProcessInfo.processInfo.systemUptime))
+        metadata["appUptimeSeconds"] = String(Int(Date().timeIntervalSince(launchDate)))
 
         #if canImport(UIKit)
         metadata["deviceModel"] = UIDevice.current.model

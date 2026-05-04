@@ -113,8 +113,8 @@ async function s3SigningKey(secret: string, dateStamp: string, region: string): 
 }
 
 async function hmacBytes(keyBytes: Uint8Array, value: string): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))
+  const key = await crypto.subtle.importKey('raw', bufferSource(keyBytes), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const signature = await crypto.subtle.sign('HMAC', key, bufferSource(new TextEncoder().encode(value)))
   return new Uint8Array(signature)
 }
 
@@ -137,4 +137,8 @@ function encodePath(path: string): string {
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function bufferSource(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
 }

@@ -14,14 +14,18 @@ export function renderIssueBody(input: {
   if (report.comment) {
     lines.push('## Comment')
     lines.push('')
-    lines.push(report.comment)
+    lines.push(...fencedMarkdown(report.comment))
     lines.push('')
   }
 
   if (report.transcript) {
     lines.push('## Transcript')
     lines.push('')
-    lines.push(report.transcript.text || '_No transcript text available._')
+    if (report.transcript.text) {
+      lines.push(...fencedMarkdown(report.transcript.text))
+    } else {
+      lines.push('_No transcript text available._')
+    }
     lines.push('')
     lines.push('| Field | Value |')
     lines.push('| --- | --- |')
@@ -98,6 +102,12 @@ export function renderIssueBody(input: {
 
 function escapeTable(value: string): string {
   return value.replaceAll('|', '\\|').replaceAll('\n', '<br>')
+}
+
+function fencedMarkdown(value: string): string[] {
+  const longestFence = Math.max(2, ...Array.from(value.matchAll(/`+/g), (match) => match[0].length))
+  const fence = '`'.repeat(longestFence + 1)
+  return [fence, value, fence]
 }
 
 function formatValue(value: unknown): string {

@@ -5,6 +5,7 @@ import {
   s3Storage,
 } from 'hollerkit-server'
 
+const maxBodyBytes = 45_000_000
 const handler = createBugReportHandler({
   appSecret: process.env.HOLLERKIT_APP_SECRET!,
   issue: githubIssues({
@@ -21,6 +22,13 @@ const handler = createBugReportHandler({
 })
 
 createServer(async (incoming, outgoing) => {
+  const contentLength = Number(incoming.headers['content-length'] ?? 0)
+  if (contentLength > maxBodyBytes) {
+    outgoing.writeHead(413, { 'content-type': 'application/json' })
+    outgoing.end(JSON.stringify({ ok: false, error: { code: 'body_too_large' } }))
+    return
+  }
+
   const request = new Request(`http://localhost${incoming.url}`, {
     method: incoming.method,
     headers: incoming.headers as HeadersInit,

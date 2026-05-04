@@ -39,12 +39,12 @@ function safeCompareHex(actual: string, expected: string): boolean {
 async function hmacHex(secret: string, data: Uint8Array): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
-    new TextEncoder().encode(secret),
+    bufferSource(new TextEncoder().encode(secret)),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign'],
   )
-  const signature = await crypto.subtle.sign('HMAC', key, data)
+  const signature = await crypto.subtle.sign('HMAC', key, bufferSource(data))
   return bytesToHex(new Uint8Array(signature))
 }
 
@@ -59,4 +59,8 @@ function concatBodyAndTimestamp(body: ArrayBuffer, timestamp: string): Uint8Arra
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function bufferSource(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
 }

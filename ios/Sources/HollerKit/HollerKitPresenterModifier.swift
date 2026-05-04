@@ -14,12 +14,21 @@ private struct HollerKitPresenterModifier: ViewModifier {
             .background {
                 InvocationObserver(
                     invocation: HollerKit.currentInvocation,
-                    onInvoke: {
+                    onShake: {
                         HollerKit.present()
+                    },
+                    onScreenshot: { attachment in
+                        if let attachment {
+                            HollerKit.present(attachments: [attachment])
+                        } else {
+                            HollerKit.present()
+                        }
                     }
                 )
             }
-            .sheet(isPresented: $presenter.isPresented) {
+            .sheet(isPresented: $presenter.isPresented, onDismiss: {
+                HollerKit.clearPresentationAttachments()
+            }) {
                 HollerKit.presentationView()
             }
     }
@@ -27,18 +36,19 @@ private struct HollerKitPresenterModifier: ViewModifier {
 
 private struct InvocationObserver: View {
     var invocation: HollerKitInvocation
-    var onInvoke: () -> Void
+    var onShake: () -> Void
+    var onScreenshot: (HollerKitAttachment?) -> Void
 
     var body: some View {
         #if canImport(UIKit)
         ZStack {
             if invocation.contains(.shake) {
-                ShakeDetector(onShake: onInvoke)
+                ShakeDetector(onShake: onShake)
                     .frame(width: 0, height: 0)
             }
 
             if invocation.contains(.screenshot) {
-                ScreenshotDetector(onScreenshot: onInvoke)
+                ScreenshotDetector(onScreenshot: onScreenshot)
                     .frame(width: 0, height: 0)
             }
         }

@@ -1,7 +1,7 @@
 import { errorResponse, HollerKitError } from './errors.ts'
 import { verifyHmac } from './hmac.ts'
 import { renderIssueBody } from './issueBody.ts'
-import { resolveLimits, validateReportLimits, validateTimestamp } from './limits.ts'
+import { resolveLimits, validateContentLength, validateReportLimits, validateTimestamp } from './limits.ts'
 import { normalizeReport } from './normalize.ts'
 import type {
   ClassifyResult,
@@ -22,6 +22,7 @@ export function createBugReportHandler(options: CreateBugReportHandlerOptions): 
         throw new HollerKitError(405, 'method_not_allowed', 'HollerKit only accepts POST requests.')
       }
 
+      validateContentLength(request.headers.get('content-length'), limits)
       const verified = await verifyHmac(request, options.appSecret)
       validateTimestamp(verified.timestamp, now(), limits)
 
