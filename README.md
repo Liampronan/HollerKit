@@ -1,5 +1,7 @@
 # HollerKit
 
+[![CI](https://github.com/Liampronan/HollerKit/actions/workflows/ci.yml/badge.svg)](https://github.com/Liampronan/HollerKit/actions/workflows/ci.yml)
+
 <p align="center">
   <img src="./assets/hollerkit-banner.png" alt="HollerKit" width="200">
 </p>
@@ -52,18 +54,36 @@ HollerKit.configure(
 )
 ```
 
-Present the report UI from your own button or menu:
+Choose how HollerKit can be invoked with the `invocation` option:
+
+```swift
+invocation: []                    // manual only
+invocation: [.shake]              // shake to report
+invocation: [.screenshot]         // prompt after a screenshot
+invocation: [.shake, .screenshot] // both
+```
+
+Install the presenter once near the root of your SwiftUI app. This is what allows HollerKit to open its sheet from shake and screenshot triggers:
+
+```swift
+@main
+struct MyApp: App {
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .hollerKitPresenter()
+        }
+    }
+}
+```
+
+You can also present the report UI from your own button or menu:
 
 ```swift
 struct SettingsView: View {
-    @State private var isReportingBug = false
-
     var body: some View {
         Button("Report a Bug") {
-            isReportingBug = true
-        }
-        .sheet(isPresented: $isReportingBug) {
-            HollerKit.presentationView()
+            HollerKit.present()
         }
     }
 }
@@ -89,7 +109,7 @@ If you enable audio, add the appropriate privacy strings to your app target:
 import {
   createBugReportHandler,
   githubIssues,
-  s3Storage,
+  supabaseStorage,
   dispatchers,
 } from 'hollerkit-server'
 
@@ -100,12 +120,17 @@ export const handler = createBugReportHandler({
     repo: 'owner/repo',
     labels: ['user-report', 'needs-triage'],
   }),
-  storage: s3Storage({
-    endpoint: process.env.S3_ENDPOINT!,
-    bucket: process.env.S3_BUCKET!,
-    accessKeyId: process.env.S3_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
+
+  // Required for screenshots and annotated images.
+  // Audio reports are transcript-only by default, so raw audio upload is not required.
+  // Text-only reports can omit storage.
+  storage: supabaseStorage({
+    url: process.env.SUPABASE_URL!,
+    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    bucket: 'bug-report-assets',
   }),
+
+  // Optional. This example adds a GitHub comment tagging Codex on every issue.
   dispatch: {
     when: 'always',
     handler: dispatchers.comment({
@@ -115,7 +140,15 @@ export const handler = createBugReportHandler({
 })
 ```
 
-The server expects signed `multipart/form-data` requests. Attachments are uploaded through a storage adapter, and GitHub Issues is the default issue destination.
+The server expects signed `multipart/form-data` requests. GitHub Issues is the default issue destination.
+
+Screenshots and annotated images are uploaded through a `StorageAdapter` before the GitHub issue is created. Supabase Storage is the easiest starting point if you already use Supabase; S3-compatible storage such as S3, R2, or Backblaze is a good production default. Text-only reports and transcript-only audio reports can run without storage.
+
+To use Supabase Storage, create a private bucket such as `bug-report-assets` and keep the service role key on the server only.
+
+Raw audio upload is intentionally opt-in. By default, audio reporting transcribes the user's voice note and sends the transcript text in the issue.
+
+Dispatchers are optional post-issue actions. Use them when you want HollerKit to comment, label, assign, or call a webhook after an issue is created.
 
 ## What You Need
 
@@ -123,7 +156,7 @@ The server expects signed `multipart/form-data` requests. Attachments are upload
 - A deployed server endpoint using `createBugReportHandler`.
 - A shared HollerKit app secret on the client and server.
 - A GitHub token with permission to create issues in your target repo.
-- Storage for screenshots and audio attachments, such as S3-compatible storage or Supabase Storage.
+- Attachment storage for screenshots and annotated images, using Supabase Storage or any S3-compatible provider.
 
 ## Development
 

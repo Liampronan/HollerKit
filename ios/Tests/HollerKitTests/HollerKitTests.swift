@@ -26,4 +26,39 @@ final class HollerKitTests: XCTestCase {
 
         XCTAssertEqual(signature, "b35166f39a9ce2767342b3153007692e1de6b1c68394e4abb57f806dc23486bd")
     }
+
+    func testDefaultAudioModeIsTranscriptOnly() {
+        let configuration = HollerKitConfiguration(
+            endpoint: URL(string: "https://example.com/bug-report")!,
+            appSecret: "secret"
+        )
+
+        switch configuration.audio {
+        case .transcriptOnly(let maxDuration, let requireOnDeviceTranscription):
+            XCTAssertEqual(maxDuration, 60)
+            XCTAssertFalse(requireOnDeviceTranscription)
+        default:
+            XCTFail("Default audio mode should avoid raw audio upload.")
+        }
+    }
+
+    @MainActor
+    func testConfigureStoresInvocationTriggers() {
+        HollerKit.configure(
+            endpoint: URL(string: "https://example.com/bug-report")!,
+            appSecret: "secret",
+            invocation: [.shake, .screenshot]
+        )
+
+        XCTAssertTrue(HollerKit.currentInvocation.contains(.shake))
+        XCTAssertTrue(HollerKit.currentInvocation.contains(.screenshot))
+    }
+
+    @MainActor
+    func testManualPresentationRequestsSheet() {
+        HollerKit.presenterState.isPresented = false
+        HollerKit.present()
+
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+    }
 }

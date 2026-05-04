@@ -15,10 +15,9 @@ public struct HollerKitConfiguration: Sendable {
         appSecret: String,
         invocation: HollerKitInvocation = [],
         inputMode: HollerKitInputMode = .textAndAudio,
-        audio: HollerKitAudioConfiguration = .transcriptAndAttachment(
+        audio: HollerKitAudioConfiguration = .transcriptOnly(
             maxDuration: 60,
-            requireOnDeviceTranscription: false,
-            maxAttachmentBytes: 2_000_000
+            requireOnDeviceTranscription: false
         ),
         userID: @escaping @Sendable () -> String? = { nil },
         metadata: @escaping @Sendable () -> [String: String] = { [:] },

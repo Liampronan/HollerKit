@@ -157,6 +157,58 @@ test('renders transcript provenance in issue body', () => {
   assert.match(body, /It crashes after I tap save\./)
 })
 
+test('creates transcript-only audio reports without storage', async () => {
+  const issueBodies: string[] = []
+  const handler = createBugReportHandler({
+    appSecret: secret,
+    issue: {
+      async createIssue(input) {
+        issueBodies.push(input.body)
+        return { url: 'https://github.com/acme/app/issues/125', number: 125 }
+      },
+    },
+    now: () => now,
+    idGenerator: () => 'report-4',
+  })
+
+  const response = await handler(await signedRequest({
+    inputMode: 'audio-only',
+    transcript: JSON.stringify({
+      text: 'The profile screen freezes after upload.',
+      locale: 'en-US',
+      engine: 'apple-on-device',
+      durationSeconds: 8,
+    }),
+    metadata: '{}',
+  }))
+
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    issueUrl: 'https://github.com/acme/app/issues/125',
+    reportId: 'report-4',
+  })
+  assert.match(issueBodies[0], /The profile screen freezes after upload\./)
+})
+
+test('requires storage when image files are submitted', async () => {
+  const handler = createBugReportHandler({
+    appSecret: secret,
+    issue: fakeIssue(),
+    now: () => now,
+  })
+
+  const response = await handler(await signedRequest({
+    comment: 'Screenshot attached',
+    inputMode: 'text-and-audio',
+    metadata: '{}',
+    image: new File([new Uint8Array([1, 2, 3])], 'screen.png', { type: 'image/png' }),
+  }))
+
+  assert.equal(response.status, 500)
+  assert.equal((await response.json()).error.code, 'missing_storage_adapter')
+})
+
 function fakeIssue(): IssueAdapter {
   return {
     async createIssue() {

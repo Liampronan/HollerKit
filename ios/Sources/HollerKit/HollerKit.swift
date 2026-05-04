@@ -4,16 +4,16 @@ import SwiftUI
 @MainActor
 public enum HollerKit {
     private static var state = HollerKitState()
+    static let presenterState = HollerKitPresenterState()
 
     public static func configure(
         endpoint: URL,
         appSecret: String,
         invocation: HollerKitInvocation = [],
         inputMode: HollerKitInputMode = .textAndAudio,
-        audio: HollerKitAudioConfiguration = .transcriptAndAttachment(
+        audio: HollerKitAudioConfiguration = .transcriptOnly(
             maxDuration: 60,
-            requireOnDeviceTranscription: false,
-            maxAttachmentBytes: 2_000_000
+            requireOnDeviceTranscription: false
         ),
         userID: @escaping @Sendable () -> String? = { nil },
         metadata: @escaping @Sendable () -> [String: String] = { [:] },
@@ -57,11 +57,15 @@ public enum HollerKit {
     }
 
     public static func present() {
-        state.isPresentationRequested = true
+        presenterState.isPresented = true
     }
 
     public static var isPresentationRequested: Bool {
-        state.isPresentationRequested
+        presenterState.isPresented
+    }
+
+    static var currentInvocation: HollerKitInvocation {
+        state.configuration?.invocation ?? []
     }
 }
 
@@ -69,5 +73,9 @@ public enum HollerKit {
 private struct HollerKitState {
     var configuration: HollerKitConfiguration?
     var breadcrumbs = BreadcrumbStore()
-    var isPresentationRequested = false
+}
+
+@MainActor
+final class HollerKitPresenterState: ObservableObject {
+    @Published var isPresented = false
 }
