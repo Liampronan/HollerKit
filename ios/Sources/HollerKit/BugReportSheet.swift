@@ -9,6 +9,7 @@ public struct BugReportSheet: View {
     private let configuration: HollerKitConfiguration?
     private let breadcrumbs: BreadcrumbStore
     private let invocationAttachments: [HollerKitAttachment]
+    @Environment(\.dismiss) private var dismiss
     @State private var comment = ""
     @State private var images: [BugReportImage] = []
     @State private var selectedImage: BugReportImage?
@@ -97,12 +98,18 @@ public struct BugReportSheet: View {
             .navigationTitle("Report a Bug")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isSubmitting ? "Submitting..." : "Submit") {
-                        Task {
-                            await submit()
+                    if submittedIssueURL != nil {
+                        Button("Done") {
+                            dismiss()
                         }
+                    } else {
+                        Button(isSubmitting ? "Submitting..." : "Submit") {
+                            Task {
+                                await submit()
+                            }
+                        }
+                        .disabled(!canSubmit)
                     }
-                    .disabled(!canSubmit)
                 }
             }
         }

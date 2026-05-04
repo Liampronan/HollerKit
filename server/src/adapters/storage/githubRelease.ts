@@ -17,9 +17,8 @@ export function githubReleaseStorage(options: GitHubReleaseStorageOptions): Stor
   return {
     async upload(reportId: string, files: ReportFile[]): Promise<UploadedFile[]> {
       const releaseId = await (releaseIdPromise ??= ensureRelease(options, apiBaseUrl))
-      const uploaded: UploadedFile[] = []
 
-      for (const file of files) {
+      return Promise.all(files.map(async (file) => {
         const name = `${reportId}-${sanitizeFilename(file.filename)}`
         const response = await fetch(
           `${uploadBaseUrl}/repos/${options.repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`,
@@ -36,20 +35,18 @@ export function githubReleaseStorage(options: GitHubReleaseStorageOptions): Stor
         )
 
         if (!response.ok) {
-          throw new Error(`GitHub release asset upload failed with ${response.status}: ${await response.text()}`)
+          throw new Error(`GitHub release asset upload failed with ${response.status}.`)
         }
 
         const payload = await response.json() as { browser_download_url: string }
-        uploaded.push({
+        return {
           kind: file.kind,
           filename: file.filename,
           mimeType: file.mimeType,
           size: file.size,
           url: payload.browser_download_url,
-        })
-      }
-
-      return uploaded
+        }
+      }))
     },
   }
 }
@@ -64,7 +61,7 @@ async function ensureRelease(options: GitHubReleaseStorageOptions, apiBaseUrl: s
   }
 
   if (response.status !== 404) {
-    throw new Error(`GitHub release lookup failed with ${response.status}: ${await response.text()}`)
+    throw new Error(`GitHub release lookup failed with ${response.status}.`)
   }
 
   const created = await fetch(`${apiBaseUrl}/repos/${options.repo}/releases`, {
@@ -79,7 +76,7 @@ async function ensureRelease(options: GitHubReleaseStorageOptions, apiBaseUrl: s
   })
 
   if (!created.ok) {
-    throw new Error(`GitHub release creation failed with ${created.status}: ${await created.text()}`)
+    throw new Error(`GitHub release creation failed with ${created.status}.`)
   }
 
   return ((await created.json()) as { id: number }).id

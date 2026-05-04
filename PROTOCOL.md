@@ -1,5 +1,7 @@
 # HollerKit Wire Protocol
 
+The exact HTTP contract is defined in [`openapi.yaml`](./openapi.yaml). This document explains the signing rules, operational limits, and replay protections that are easier to understand in prose.
+
 ## Request
 
 ```text
@@ -12,48 +14,11 @@ x-hollerkit-signature: <hex HMAC-SHA256 of body || timestamp>
 
 Handlers reject requests with `Content-Length` above `maxBodyBytes` before buffering the body. Deployments should also configure their platform or reverse proxy body limit, especially when accepting chunked requests where `Content-Length` is absent.
 
-## Multipart Fields
+## Multipart Contract
 
-| Field | Type | Notes |
-| --- | --- | --- |
-| `inputMode` | string | `text-and-audio`, `text-only`, or `audio-only`; defaults to `text-and-audio`. |
-| `comment` | string | Optional depending on input mode. |
-| `transcript` | JSON object | Optional transcript payload. |
-| `metadata` | JSON object | App, device, OS, and integration metadata. |
-| `breadcrumbs` | JSON array | Optional recent app events. |
-| `userIdHash` | string | Optional opaque hashed user identifier. |
-| `image` | file, repeatable | PNG, JPEG, HEIC, or HEIF. |
-| `audio` | file, max 1 | M4A/AAC-style short audio note. |
+See [`openapi.yaml`](./openapi.yaml) for the canonical multipart field list, response shapes, status codes, and error codes.
 
-## Transcript Payload
-
-```ts
-type TranscriptPayload = {
-  text: string
-  locale: string
-  engine: 'apple-on-device' | 'apple-network' | 'manual' | 'unavailable'
-  confidence?: number
-  durationSeconds?: number
-}
-```
-
-## Response
-
-```json
-{ "ok": true, "issueUrl": "https://github.com/owner/repo/issues/1", "reportId": "..." }
-```
-
-If a classifier skips issue creation:
-
-```json
-{ "ok": true, "reportId": "...", "skipped": true }
-```
-
-Errors use:
-
-```json
-{ "ok": false, "error": { "code": "invalid_signature", "message": "..." } }
-```
+Important wire detail: JSON values such as `metadata`, `breadcrumbs`, and `transcript` are sent as multipart text fields containing JSON strings. Uploaded `image` and `audio` fields are multipart file parts.
 
 ## Default Limits
 

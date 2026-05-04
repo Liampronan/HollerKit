@@ -76,8 +76,7 @@ async function githubFetch(url: string, token: string, init: RequestInit): Promi
   })
 
   if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`GitHub request failed with ${response.status}: ${body}`)
+    throw new Error(`GitHub request failed with ${response.status}.`)
   }
 
   return response
@@ -86,7 +85,27 @@ async function githubFetch(url: string, token: string, init: RequestInit): Promi
 function defaultTitle(report: NormalizedReport, classify: ClassifyResult): string {
   const prefix = classify.severity ? `[${classify.severity.toUpperCase()}] ` : ''
   const source = report.comment ?? report.transcript?.text ?? `${report.inputMode} report`
-  return `${prefix}${source.replace(/\s+/g, ' ').slice(0, 90)}`
+  return `${prefix}${truncateGraphemes(source.replace(/\s+/g, ' '), 90)}`
+}
+
+function truncateGraphemes(value: string, maxLength: number): string {
+  type SegmenterConstructor = new (
+    locales?: string | string[],
+    options?: { granularity: 'grapheme' },
+  ) => { segment(input: string): Iterable<{ segment: string }> }
+
+  const Segmenter = (Intl as typeof Intl & { Segmenter?: SegmenterConstructor }).Segmenter
+  if (!Segmenter) return Array.from(value).slice(0, maxLength).join('')
+
+  let truncated = ''
+  let length = 0
+  for (const { segment } of new Segmenter(undefined, { granularity: 'grapheme' }).segment(value)) {
+    if (length >= maxLength) break
+    truncated += segment
+    length += 1
+  }
+
+  return truncated
 }
 
 function requireIssueNumber(number: number | undefined, action: string): asserts number is number {

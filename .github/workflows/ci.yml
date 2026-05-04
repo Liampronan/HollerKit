@@ -46,7 +46,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Swift tests
-        run: swift test
+        run: |
+          DEVICE_ID="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ { print $2; exit }')"
+          test -n "${DEVICE_ID}"
+          xcodebuild test \
+            -scheme HollerKit \
+            -destination "id=${DEVICE_ID}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
 
   ios-demo:
     name: iOS Demo Build
@@ -62,4 +69,6 @@ jobs:
             -scheme HollerKitDemo \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath /tmp/HollerKitDemoDerived \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
             build

@@ -17,9 +17,7 @@ export function supabaseStorage(options: SupabaseStorageOptions): StorageAdapter
 
   return {
     async upload(reportId: string, files: ReportFile[]): Promise<UploadedFile[]> {
-      const uploaded: UploadedFile[] = []
-
-      for (const file of files) {
+      return Promise.all(files.map(async (file) => {
         const path = objectPath(options.prefix, reportId, file)
         const response = await fetch(`${baseUrl}/storage/v1/object/${options.bucket}/${encodePath(path)}`, {
           method: 'POST',
@@ -33,19 +31,17 @@ export function supabaseStorage(options: SupabaseStorageOptions): StorageAdapter
         })
 
         if (!response.ok) {
-          throw new Error(`Supabase storage upload failed with ${response.status}: ${await response.text()}`)
+          throw new Error(`Supabase storage upload failed with ${response.status}.`)
         }
 
-        uploaded.push({
+        return {
           kind: file.kind,
           filename: file.filename,
           mimeType: file.mimeType,
           size: file.size,
           url: await resolveUrl(baseUrl, options, path),
-        })
-      }
-
-      return uploaded
+        }
+      }))
     },
   }
 }

@@ -5,6 +5,7 @@ import SwiftUI
 struct HollerKitDemoApp: App {
     init() {
         HollerKit.configure(
+            // Replace with your own endpoint and secret to actually post reports.
             endpoint: URL(string: "https://example.com/bug-report")!,
             appSecret: "demo-secret",
             invocation: [.shake, .screenshot],

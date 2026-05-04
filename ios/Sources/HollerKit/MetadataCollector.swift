@@ -7,6 +7,7 @@ import UIKit
 public enum MetadataCollector {
     private static let launchDate = Date()
 
+    @MainActor
     public static func collect(extra: [String: String] = [:]) -> [String: String] {
         var metadata = extra
         metadata["locale"] = Locale.current.identifier

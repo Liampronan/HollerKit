@@ -50,11 +50,7 @@ public final class SpeechNoteCapture: ObservableObject {
         guard speechStatus == .authorized else { throw SpeechNoteCaptureError.authorizationDenied }
 
         let audioSession = AVAudioSession.sharedInstance()
-        let microphoneAllowed = await withCheckedContinuation { continuation in
-            audioSession.requestRecordPermission { allowed in
-                continuation.resume(returning: allowed)
-            }
-        }
+        let microphoneAllowed = await requestMicrophonePermission(audioSession: audioSession)
         guard microphoneAllowed else { throw SpeechNoteCaptureError.authorizationDenied }
 
         let locale = Locale(identifier: options.localeIdentifier)
@@ -69,39 +65,45 @@ public final class SpeechNoteCapture: ObservableObject {
         try audioSession.setCategory(.record, mode: .spokenAudio)
         try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = options.requireOnDeviceRecognition
+        do {
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            request.shouldReportPartialResults = true
+            request.requiresOnDeviceRecognition = options.requireOnDeviceRecognition
 
-        let inputNode = audioEngine.inputNode
-        inputNode.removeTap(onBus: 0)
-        let format = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
-        }
-
-        self.options = options
-        transcriptText = ""
-        confidence = nil
-        startedAt = Date()
-        recognitionRequest = request
-        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, _ in
-            guard let result else { return }
-            let text = result.bestTranscription.formattedString
-            let confidenceValues = result.bestTranscription.segments.map(\.confidence).filter { $0 > 0 }
-            let confidence = confidenceValues.isEmpty
-                ? nil
-                : Double(confidenceValues.reduce(0, +) / Float(confidenceValues.count))
-
-            Task { @MainActor [weak self] in
-                self?.transcriptText = text
-                self?.confidence = confidence
+            let inputNode = audioEngine.inputNode
+            inputNode.removeTap(onBus: 0)
+            let format = inputNode.outputFormat(forBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+                request.append(buffer)
             }
-        }
 
-        audioEngine.prepare()
-        try audioEngine.start()
-        isCapturing = true
+            self.options = options
+            transcriptText = ""
+            confidence = nil
+            startedAt = Date()
+            recognitionRequest = request
+            recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, _ in
+                guard let result else { return }
+                let text = result.bestTranscription.formattedString
+                let confidenceValues = result.bestTranscription.segments.map(\.confidence).filter { $0 > 0 }
+                let confidence = confidenceValues.isEmpty
+                    ? nil
+                    : Double(confidenceValues.reduce(0, +) / Float(confidenceValues.count))
+
+                Task { @MainActor [weak self] in
+                    self?.transcriptText = text
+                    self?.confidence = confidence
+                }
+            }
+
+            audioEngine.prepare()
+            try audioEngine.start()
+            isCapturing = true
+        } catch {
+            cleanupCaptureState()
+            try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            throw error
+        }
         #else
         throw SpeechNoteCaptureError.unavailable
         #endif
@@ -116,12 +118,13 @@ public final class SpeechNoteCapture: ObservableObject {
         recognitionRequest = nil
         recognitionTask = nil
         isCapturing = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
 
         let text = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw SpeechNoteCaptureError.noTranscript }
-
         let duration = startedAt.map { Date().timeIntervalSince($0) }
         startedAt = nil
+        guard !text.isEmpty else { throw SpeechNoteCaptureError.noTranscript }
+
         return HollerKitTranscript(
             text: text,
             locale: options.localeIdentifier,
@@ -133,4 +136,31 @@ public final class SpeechNoteCapture: ObservableObject {
         throw SpeechNoteCaptureError.unavailable
         #endif
     }
+
+    #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
+    private func requestMicrophonePermission(audioSession: AVAudioSession) async -> Bool {
+        await withCheckedContinuation { continuation in
+            if #available(iOS 17.0, *) {
+                AVAudioApplication.requestRecordPermission { allowed in
+                    continuation.resume(returning: allowed)
+                }
+            } else {
+                audioSession.requestRecordPermission { allowed in
+                    continuation.resume(returning: allowed)
+                }
+            }
+        }
+    }
+
+    private func cleanupCaptureState() {
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionRequest = nil
+        recognitionTask = nil
+        isCapturing = false
+        startedAt = nil
+    }
+    #endif
 }

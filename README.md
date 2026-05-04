@@ -219,7 +219,13 @@ To run the iOS package tests:
 
 ```sh
 cd ios
-swift test
+DEVICE_ID="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ { print $2; exit }')"
+test -n "${DEVICE_ID}"
+xcodebuild test \
+  -scheme HollerKit \
+  -destination "id=${DEVICE_ID}" \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO
 ```
 
 To build the demo app:
@@ -229,6 +235,8 @@ xcodebuild \
   -project examples/ios-demo/HollerKitDemo.xcodeproj \
   -scheme HollerKitDemo \
   -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
   build
 ```
 
@@ -236,7 +244,7 @@ The demo app lives in `examples/ios-demo` and uses the local HollerKit Swift pac
 
 ## Protocol
 
-See [PROTOCOL.md](./PROTOCOL.md) for the wire format and limits.
+See [openapi.yaml](./openapi.yaml) for the machine-readable HTTP contract and [PROTOCOL.md](./PROTOCOL.md) for signing, replay, and operational notes.
 
 ## Privacy
 

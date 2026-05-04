@@ -31,8 +31,8 @@ export function validateContentLength(contentLengthHeader: string | null, limits
   if (!contentLengthHeader) return
 
   const contentLength = Number(contentLengthHeader)
-  if (!Number.isFinite(contentLength) || contentLength < 0) {
-    throw new HollerKitError(400, 'invalid_content_length', 'Content-Length must be a non-negative number.')
+  if (!Number.isInteger(contentLength) || contentLength < 0) {
+    throw new HollerKitError(400, 'invalid_content_length', 'Content-Length must be a non-negative integer.')
   }
 
   if (contentLength > limits.maxBodyBytes) {

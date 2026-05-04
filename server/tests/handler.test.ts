@@ -144,6 +144,32 @@ test('rejects oversized requests before reading the body', async () => {
   assert.equal((await response.json()).error.code, 'body_too_large')
 })
 
+test('rejects decimal content lengths', async () => {
+  const handler = createBugReportHandler({
+    appSecret: secret,
+    issue: fakeIssue(),
+    now: () => now,
+  })
+
+  const request = await signedRequest({
+    comment: 'Fractional length',
+    inputMode: 'text-only',
+    metadata: '{}',
+  })
+  const headers = new Headers(request.headers)
+  headers.set('content-length', '1.5')
+  const fractionalLengthRequest = new Request(request.url, {
+    method: request.method,
+    headers,
+    body: await request.arrayBuffer(),
+  })
+
+  const response = await handler(fractionalLengthRequest)
+
+  assert.equal(response.status, 400)
+  assert.equal((await response.json()).error.code, 'invalid_content_length')
+})
+
 test('enforces image count limits', async () => {
   const handler = createBugReportHandler({
     appSecret: secret,

@@ -16,9 +16,7 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
 
   return {
     async upload(reportId: string, files: ReportFile[]): Promise<UploadedFile[]> {
-      const uploaded: UploadedFile[] = []
-
-      for (const file of files) {
+      return Promise.all(files.map(async (file) => {
         const key = objectPath(options.prefix, reportId, file)
         const url = `${endpoint}/${options.bucket}/${encodePath(key)}`
         const headers = await signS3Put({
@@ -36,19 +34,17 @@ export function s3Storage(options: S3StorageOptions): StorageAdapter {
         })
 
         if (!response.ok) {
-          throw new Error(`S3 storage upload failed with ${response.status}: ${await response.text()}`)
+          throw new Error(`S3 storage upload failed with ${response.status}.`)
         }
 
-        uploaded.push({
+        return {
           kind: file.kind,
           filename: file.filename,
           mimeType: file.mimeType,
           size: file.size,
           url: `${(options.publicBaseUrl ?? `${endpoint}/${options.bucket}`).replace(/\/$/, '')}/${encodePath(key)}`,
-        })
-      }
-
-      return uploaded
+        }
+      }))
     },
   }
 }
