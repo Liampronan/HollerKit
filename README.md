@@ -1,5 +1,9 @@
 # HollerKit
 
+<p align="center">
+  <img src="./assets/hollerkit-banner.png" alt="HollerKit" width="640">
+</p>
+
 HollerKit is an open-source bug reporting toolkit for iOS apps. It pairs a Swift Package with a small self-hosted server handler so in-app reports can become GitHub issues with comments, screenshots, annotations, redaction, optional audio notes, and optional AI agent dispatch.
 
 This repository is intentionally single-repo:
