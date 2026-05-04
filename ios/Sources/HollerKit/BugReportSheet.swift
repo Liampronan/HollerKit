@@ -12,7 +12,6 @@ public struct BugReportSheet: View {
     @State private var comment = ""
     @State private var images: [BugReportImage] = []
     @State private var selectedImage: BugReportImage?
-    @State private var didAutoOpenDemoAnnotation = false
     @StateObject private var speechCapture = SpeechCaptureController()
     @State private var isSubmitting = false
     @State private var submissionError: String?
@@ -56,7 +55,7 @@ public struct BugReportSheet: View {
 
                 if configuration?.audio.isEnabled == true {
                     Section("Audio") {
-                        Button(speechCapture.isCapturing ? "Stop Transcribing" : "Transcribe Voice Note") {
+                        Button(speechCapture.isCapturing ? "Stop Dictation" : "Dictate Bug") {
                             Task {
                                 await toggleSpeechCapture()
                             }
@@ -124,7 +123,6 @@ public struct BugReportSheet: View {
             let configuredImages = configuration?.initialImages() ?? []
             images = (invocationAttachments + configuredImages).compactMap(BugReportImage.init(attachment:))
             #endif
-            openDemoAnnotationIfRequested()
         }
         .accessibilityIdentifier("HollerKitBugReportSheet")
     }
@@ -203,19 +201,6 @@ public struct BugReportSheet: View {
         await speechCapture.toggle(configuration: configuration.audio)
     }
 
-    private func openDemoAnnotationIfRequested() {
-        guard ProcessInfo.processInfo.environment["HOLLERKIT_DEMO_OPEN_ANNOTATION"] == "1",
-              !didAutoOpenDemoAnnotation,
-              let image = images.first else {
-            return
-        }
-
-        didAutoOpenDemoAnnotation = true
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(700))
-            selectedImage = image
-        }
-    }
 }
 
 struct BugReportImage: Identifiable, Hashable {

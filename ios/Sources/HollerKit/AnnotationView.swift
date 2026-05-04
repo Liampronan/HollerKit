@@ -18,7 +18,6 @@ struct AnnotationEditorScreen: View {
     @State private var activeRedactionRect: CGRect?
     @State private var history: [AnnotationHistoryItem] = []
     @State private var canvasSize: CGSize = .zero
-    @State private var didSeedDemoAnnotation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,11 +41,9 @@ struct AnnotationEditorScreen: View {
                         .frame(width: imageFrame.width, height: imageFrame.height)
                         .onAppear {
                             canvasSize = imageFrame.size
-                            seedDemoAnnotationIfRequested(canvasSize: imageFrame.size)
                         }
                         .onChange(of: imageFrame.size) { newSize in
                             canvasSize = newSize
-                            seedDemoAnnotationIfRequested(canvasSize: newSize)
                         }
 
                         if selectedTool == .redact {
@@ -114,18 +111,6 @@ struct AnnotationEditorScreen: View {
             redactionRects = previousRects
             selectedRedactionIndex = previousRects.indices.last
         }
-    }
-
-    private func seedDemoAnnotationIfRequested(canvasSize: CGSize) {
-        guard ProcessInfo.processInfo.environment["HOLLERKIT_DEMO_OPEN_ANNOTATION"] == "1",
-              !didSeedDemoAnnotation,
-              canvasSize.width > 240,
-              canvasSize.height > 500 else {
-            return
-        }
-
-        didSeedDemoAnnotation = true
-        drawing = DemoAnnotationDrawing.circleAroundTotal(canvasSize: canvasSize, color: penColor.uiColor)
     }
 
     private var selectedToolColor: Binding<AnnotationColor> {
@@ -559,31 +544,6 @@ private enum AnnotationRenderer {
                 ))
             }
         }
-    }
-}
-
-private enum DemoAnnotationDrawing {
-    static func circleAroundTotal(canvasSize: CGSize, color: UIColor) -> PKDrawing {
-        let center = CGPoint(x: canvasSize.width * 0.78, y: canvasSize.height * 0.335)
-        let radius = CGSize(width: canvasSize.width * 0.18, height: canvasSize.height * 0.043)
-        let points = stride(from: 0.0, through: .pi * 2, by: .pi / 22).enumerated().map { index, angle in
-            PKStrokePoint(
-                location: CGPoint(
-                    x: center.x + cos(angle) * radius.width,
-                    y: center.y + sin(angle) * radius.height
-                ),
-                timeOffset: TimeInterval(index) * 0.01,
-                size: CGSize(width: 9, height: 9),
-                opacity: 1,
-                force: 1,
-                azimuth: 0,
-                altitude: .pi / 2
-            )
-        }
-
-        let path = PKStrokePath(controlPoints: points, creationDate: Date())
-        let stroke = PKStroke(ink: PKInk(.pen, color: color), path: path)
-        return PKDrawing(strokes: [stroke])
     }
 }
 
