@@ -1,6 +1,6 @@
-import { HollerKitError } from './errors.ts'
+import { HollerKitError } from './errors.js'
 
-export async function verifyHmac(request: Request, appSecret: string): Promise<{
+export async function verifyHmac(request: Request, appSecret: string, maxBodyBytes: number): Promise<{
   body: ArrayBuffer
   timestamp: string
 }> {
@@ -15,7 +15,7 @@ export async function verifyHmac(request: Request, appSecret: string): Promise<{
     throw new HollerKitError(400, 'missing_timestamp', 'Missing x-hollerkit-timestamp header.')
   }
 
-  const body = await request.arrayBuffer()
+  const body = await readBodyWithLimit(request, maxBodyBytes)
   const expected = await hmacHex(appSecret, concatBodyAndTimestamp(body, timestamp))
 
   if (!safeCompareHex(signature, expected)) {
@@ -23,6 +23,38 @@ export async function verifyHmac(request: Request, appSecret: string): Promise<{
   }
 
   return { body, timestamp }
+}
+
+async function readBodyWithLimit(request: Request, maxBodyBytes: number): Promise<ArrayBuffer> {
+  if (!request.body) return new ArrayBuffer(0)
+
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedBytes = 0
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (!value) continue
+
+      receivedBytes += value.byteLength
+      if (receivedBytes > maxBodyBytes) {
+        throw new HollerKitError(413, 'body_too_large', 'Request body exceeds the configured byte limit.')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const body = new Uint8Array(receivedBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bufferSource(body)
 }
 
 function safeCompareHex(actual: string, expected: string): boolean {

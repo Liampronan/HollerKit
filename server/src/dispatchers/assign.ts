@@ -1,4 +1,4 @@
-import type { Dispatcher } from '../types.ts'
+import type { Dispatcher } from '../types.js'
 
 export type AssignDispatcherOptions = {
   users: string[]

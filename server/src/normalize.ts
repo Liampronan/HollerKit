@@ -1,4 +1,4 @@
-import { HollerKitError } from './errors.ts'
+import { HollerKitError } from './errors.js'
 import type {
   AudioFile,
   Breadcrumb,
@@ -6,7 +6,7 @@ import type {
   InputMode,
   NormalizedReport,
   TranscriptPayload,
-} from './types.ts'
+} from './types.js'
 
 const inputModes = new Set<InputMode>(['text-and-audio', 'text-only', 'audio-only'])
 const transcriptEngines = new Set<TranscriptPayload['engine']>([

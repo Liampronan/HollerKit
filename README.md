@@ -19,11 +19,27 @@ Bonus: try optional audio-only bug reports, which transcribe a user's voice note
 
 HollerKit is currently at **v0.5**. The server pipeline is usable, and the iOS package can present a report sheet, attach screenshots, annotate images, transcribe short voice notes when Speech is available, collect metadata and breadcrumbs, and submit reports.
 
+HollerKit is currently intended for **internal, debug, QA, and TestFlight-style builds**. It can be used in a production app target when gated appropriately, but it should not be exposed broadly to every public App Store user without the operational safeguards listed below.
+
 The repo is organized as:
 
 - `ios/`: Swift Package for capture UI, metadata, breadcrumbs, and multipart upload.
 - `server/`: npm package for validating signed multipart reports, uploading assets, and creating issues.
 - `examples/`: deployment examples for Supabase and Node.
+
+## Production App Checklist
+
+Before enabling HollerKit in a production app target:
+
+- Gate the SDK behind a build flag, feature flag, TestFlight cohort, staff account check, or equivalent access control.
+- Deploy the server endpoint behind platform or reverse-proxy body limits that match `maxBodyBytes`.
+- Add rate limiting, abuse monitoring, and alerting around the report endpoint.
+- Treat the iOS `appSecret` as a shared client signing secret, not as strong authentication for public traffic.
+- Consider app attestation, authenticated users, or server-side allowlists for public or high-volume deployments.
+- Store GitHub, Supabase, S3, and other service credentials only on the server.
+- Use private attachment storage with signed URLs or an authenticated asset proxy unless reports are intentionally public.
+- Add `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription` only to targets that enable audio dictation.
+- Confirm report contents are acceptable for your privacy policy, retention policy, and support workflow.
 
 ## Demo UI
 

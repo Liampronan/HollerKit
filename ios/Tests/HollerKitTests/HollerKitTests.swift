@@ -33,6 +33,24 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(filename, "bad_name_with__break.png")
     }
 
+    func testMultipartPayloadDoesNotIncludeAudioFileField() throws {
+        let payload = HollerKitReportPayload(
+            inputMode: .audioOnly(),
+            transcript: HollerKitTranscript(
+                text: "The checkout screen freezes.",
+                locale: "en-US",
+                engine: .manual
+            )
+        )
+
+        let body = try MultipartBodyBuilder(boundary: "test-boundary").build(payload)
+        let bodyString = String(decoding: body, as: UTF8.self)
+
+        XCTAssertTrue(bodyString.contains("name=\"transcript\""))
+        XCTAssertFalse(bodyString.contains("name=\"audio\""))
+        XCTAssertFalse(bodyString.contains("filename="))
+    }
+
     func testDefaultAudioModeIsTranscriptOnly() {
         let configuration = HollerKitConfiguration(
             endpoint: URL(string: "https://example.com/bug-report")!,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { githubIssues, supabaseStorage } from '../src/index.ts'
-import type { NormalizedReport } from '../src/index.ts'
+import { githubIssues, supabaseStorage } from '../dist/index.js'
+import type { NormalizedReport } from '../dist/index.js'
 
 test('GitHub issue titles truncate by grapheme', async () => {
   const originalFetch = globalThis.fetch

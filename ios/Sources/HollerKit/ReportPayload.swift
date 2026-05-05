@@ -49,7 +49,6 @@ public struct HollerKitReportPayload: Sendable {
     public var breadcrumbs: [HollerKitBreadcrumb]
     public var userIdHash: String?
     public var images: [HollerKitAttachment]
-    public var audio: HollerKitAttachment?
 
     public init(
         inputMode: HollerKitInputMode,
@@ -58,8 +57,7 @@ public struct HollerKitReportPayload: Sendable {
         metadata: [String: String] = [:],
         breadcrumbs: [HollerKitBreadcrumb] = [],
         userIdHash: String? = nil,
-        images: [HollerKitAttachment] = [],
-        audio: HollerKitAttachment? = nil
+        images: [HollerKitAttachment] = []
     ) {
         self.inputMode = inputMode
         self.comment = comment
@@ -68,6 +66,5 @@ public struct HollerKitReportPayload: Sendable {
         self.breadcrumbs = breadcrumbs
         self.userIdHash = userIdHash
         self.images = images
-        self.audio = audio
     }
 }

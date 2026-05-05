@@ -72,10 +72,6 @@ struct MultipartBodyBuilder {
             appendFile("image", attachment: image, to: &body)
         }
 
-        if let audio = payload.audio {
-            appendFile("audio", attachment: audio, to: &body)
-        }
-
         body.appendString("--\(boundary)--\r\n")
         return body
     }

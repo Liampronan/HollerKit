@@ -1,4 +1,4 @@
-import type { ClassifyResult, IssueAdapter, NormalizedReport } from '../../types.ts'
+import type { ClassifyResult, IssueAdapter, NormalizedReport } from '../../types.js'
 
 export type GitHubIssuesOptions = {
   token: string

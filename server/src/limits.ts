@@ -1,5 +1,5 @@
-import { HollerKitError } from './errors.ts'
-import type { LimitConfig, NormalizedReport } from './types.ts'
+import { HollerKitError } from './errors.js'
+import type { LimitConfig, NormalizedReport } from './types.js'
 
 export const defaultLimits: LimitConfig = {
   timestampDriftSeconds: 5 * 60,

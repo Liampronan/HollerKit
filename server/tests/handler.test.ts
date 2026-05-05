@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createBugReportHandler, renderIssueBody } from '../src/index.ts'
-import type { IssueAdapter, StorageAdapter } from '../src/index.ts'
+import { createBugReportHandler, renderIssueBody } from '../dist/index.js'
+import type { IssueAdapter, StorageAdapter } from '../dist/index.js'
 
 const now = new Date('2026-05-03T20:00:00.000Z')
 const secret = 'test-secret'
@@ -139,6 +139,33 @@ test('rejects oversized requests before reading the body', async () => {
   })
 
   const response = await handler(request)
+
+  assert.equal(response.status, 413)
+  assert.equal((await response.json()).error.code, 'body_too_large')
+})
+
+test('rejects oversized requests without a content length while reading the body', async () => {
+  const handler = createBugReportHandler({
+    appSecret: secret,
+    issue: fakeIssue(),
+    limits: { maxBodyBytes: 10 },
+    now: () => now,
+  })
+
+  const request = await signedRequest({
+    comment: 'This streamed request is too large for the configured cap.',
+    inputMode: 'text-only',
+    metadata: '{}',
+  })
+  const headers = new Headers(request.headers)
+  headers.delete('content-length')
+  const requestWithoutLength = new Request(request.url, {
+    method: request.method,
+    headers,
+    body: await request.arrayBuffer(),
+  })
+
+  const response = await handler(requestWithoutLength)
 
   assert.equal(response.status, 413)
   assert.equal((await response.json()).error.code, 'body_too_large')

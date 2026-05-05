@@ -72,11 +72,27 @@ public enum AudioOnlyPresentation: Sendable, Equatable {
 public enum HollerKitAudioConfiguration: Sendable, Equatable {
     case off
     case transcriptOnly(maxDuration: TimeInterval, requireOnDeviceTranscription: Bool)
-    case transcriptAndAttachment(maxDuration: TimeInterval, requireOnDeviceTranscription: Bool, maxAttachmentBytes: Int)
-    case attachmentOnly(maxDuration: TimeInterval, maxAttachmentBytes: Int)
 
     public var isEnabled: Bool {
         if case .off = self { return false }
         return true
+    }
+
+    var maxDuration: TimeInterval {
+        switch self {
+        case .off:
+            return 0
+        case .transcriptOnly(let maxDuration, _):
+            return maxDuration
+        }
+    }
+
+    var requiresOnDeviceTranscription: Bool {
+        switch self {
+        case .off:
+            return false
+        case .transcriptOnly(_, let requireOnDeviceTranscription):
+            return requireOnDeviceTranscription
+        }
     }
 }

@@ -1,15 +1,15 @@
-import { errorResponse, HollerKitError } from './errors.ts'
-import { verifyHmac } from './hmac.ts'
-import { renderIssueBody } from './issueBody.ts'
-import { resolveLimits, validateContentLength, validateReportLimits, validateTimestamp } from './limits.ts'
-import { normalizeReport } from './normalize.ts'
+import { errorResponse, HollerKitError } from './errors.js'
+import { verifyHmac } from './hmac.js'
+import { renderIssueBody } from './issueBody.js'
+import { resolveLimits, validateContentLength, validateReportLimits, validateTimestamp } from './limits.js'
+import { normalizeReport } from './normalize.js'
 import type {
   ClassifyResult,
   CreateBugReportHandlerOptions,
   DispatchWhen,
   IssueResult,
   UploadedFile,
-} from './types.ts'
+} from './types.js'
 
 export function createBugReportHandler(options: CreateBugReportHandlerOptions): (request: Request) => Promise<Response> {
   const limits = resolveLimits(options.limits)
@@ -23,7 +23,7 @@ export function createBugReportHandler(options: CreateBugReportHandlerOptions): 
       }
 
       validateContentLength(request.headers.get('content-length'), limits)
-      const verified = await verifyHmac(request, options.appSecret)
+      const verified = await verifyHmac(request, options.appSecret, limits.maxBodyBytes)
       validateTimestamp(verified.timestamp, now(), limits)
 
       const report = await normalizeReport({

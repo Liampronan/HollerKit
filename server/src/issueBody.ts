@@ -1,4 +1,4 @@
-import type { ClassifyResult, NormalizedReport, UploadedFile } from './types.ts'
+import type { ClassifyResult, NormalizedReport, UploadedFile } from './types.js'
 
 export function renderIssueBody(input: {
   report: NormalizedReport

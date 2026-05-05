@@ -1,4 +1,4 @@
-import type { ReportFile, StorageAdapter, UploadedFile } from '../../types.ts'
+import type { ReportFile, StorageAdapter, UploadedFile } from '../../types.js'
 
 export type S3StorageOptions = {
   endpoint: string

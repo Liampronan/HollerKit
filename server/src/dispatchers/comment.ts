@@ -1,4 +1,4 @@
-import type { Dispatcher, NormalizedReport } from '../types.ts'
+import type { Dispatcher, NormalizedReport } from '../types.js'
 
 export type CommentDispatcherOptions = {
   template: (report: NormalizedReport) => string

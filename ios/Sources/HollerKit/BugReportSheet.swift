@@ -31,12 +31,14 @@ public struct BugReportSheet: View {
     public var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    TextEditor(text: $comment)
-                        .frame(minHeight: 140)
+                if !isAudioOnly {
+                    Section {
+                        TextEditor(text: $comment)
+                            .frame(minHeight: 140)
+                    }
                 }
 
-                if !images.isEmpty {
+                if !isAudioOnly && !images.isEmpty {
                     Section("Images") {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 12) {
@@ -126,6 +128,7 @@ public struct BugReportSheet: View {
         }
         .onAppear {
             guard images.isEmpty else { return }
+            guard !isAudioOnly else { return }
             #if canImport(UIKit)
             let configuredImages = configuration?.initialImages() ?? []
             images = (invocationAttachments + configuredImages).compactMap(BugReportImage.init(attachment:))
@@ -143,9 +146,19 @@ public struct BugReportSheet: View {
 
     private var canSubmit: Bool {
         guard configuration != nil, !isSubmitting, submittedIssueURL == nil else { return false }
+        if isAudioOnly {
+            return speechCapture.transcript != nil
+        }
+
         return !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !images.isEmpty
             || speechCapture.transcript != nil
+    }
+
+    private var isAudioOnly: Bool {
+        guard let configuration else { return false }
+        if case .audioOnly = configuration.inputMode { return true }
+        return false
     }
 
     @MainActor
@@ -163,12 +176,12 @@ public struct BugReportSheet: View {
             let client = MultipartClient(endpoint: configuration.endpoint, appSecret: configuration.appSecret)
             let response = try await client.submit(HollerKitReportPayload(
                 inputMode: configuration.inputMode,
-                comment: normalizedComment,
+                comment: isAudioOnly ? nil : normalizedComment,
                 transcript: speechCapture.transcript,
                 metadata: MetadataCollector.collect(extra: configuration.metadata()),
                 breadcrumbs: configuration.captureBreadcrumbs ? breadcrumbs.snapshot() : [],
                 userIdHash: hashedUserID(configuration.userID()),
-                images: imageAttachments()
+                images: isAudioOnly ? [] : imageAttachments()
             ))
             submittedIssueURL = response.issueUrl
         } catch {
@@ -247,6 +260,7 @@ private final class SpeechCaptureController: ObservableObject {
     @Published var partialTranscript = ""
 
     private let capture = SpeechNoteCapture()
+    private var autoStopTask: Task<Void, Never>?
 
     func toggle(configuration: HollerKitAudioConfiguration) async {
         errorMessage = nil
@@ -267,6 +281,7 @@ private final class SpeechCaptureController: ObservableObject {
             ))
             isCapturing = true
             bindPartialTranscript()
+            scheduleAutoStop(after: configuration.maxDuration)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -274,12 +289,36 @@ private final class SpeechCaptureController: ObservableObject {
 
     private func stop(configuration: HollerKitAudioConfiguration) async {
         do {
+            autoStopTask?.cancel()
+            autoStopTask = nil
             transcript = try capture.stop()
             partialTranscript = ""
             isCapturing = false
         } catch {
+            autoStopTask?.cancel()
+            autoStopTask = nil
             isCapturing = false
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func scheduleAutoStop(after maxDuration: TimeInterval) {
+        autoStopTask?.cancel()
+        guard maxDuration > 0 else { return }
+
+        autoStopTask = Task { @MainActor [weak self] in
+            let nanoseconds = UInt64(maxDuration * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled, let self, self.isCapturing else { return }
+
+            do {
+                self.transcript = try self.capture.stop()
+                self.partialTranscript = ""
+                self.isCapturing = false
+            } catch {
+                self.isCapturing = false
+                self.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -291,19 +330,6 @@ private final class SpeechCaptureController: ObservableObject {
             }
         }
     }
-}
-
-private extension HollerKitAudioConfiguration {
-    var requiresOnDeviceTranscription: Bool {
-        switch self {
-        case .transcriptOnly(_, let requireOnDeviceTranscription),
-             .transcriptAndAttachment(_, let requireOnDeviceTranscription, _):
-            return requireOnDeviceTranscription
-        case .off, .attachmentOnly:
-            return false
-        }
-    }
-
 }
 
 private struct ImageAttachmentThumbnail: View {
