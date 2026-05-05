@@ -6,7 +6,7 @@
   <img src="./assets/hollerkit-banner.png" alt="HollerKit" width="200">
 </p>
 
-HollerKit is a simple user feedback SDK to let you easily collect screenshot-based feedback from users in your iOS app. 
+HollerKit is a simple user feedback SDK to let you easily collect screenshot-based feedback from people using your iOS app. 
 
 It is a combination of:
 
