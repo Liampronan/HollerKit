@@ -38,22 +38,3 @@ struct ContentView: View {
         }
     }
 }
-
-private struct ProfileUploadMockScreen: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "person.crop.circle.badge.exclamationmark")
-                .font(.system(size: 56))
-                .foregroundStyle(.orange)
-            Text("Uploading avatar.jpg — 94%")
-                .font(.headline)
-            ProgressView(value: 0.94)
-                .frame(maxWidth: 240)
-            Button("Back to Checkout") {
-                DemoNavigationState.shared.currentScreen = .checkout
-            }
-            .buttonStyle(.bordered)
-        }
-        .padding()
-    }
-}
