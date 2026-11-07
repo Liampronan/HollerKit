@@ -147,6 +147,10 @@ public struct QuestStore: Sendable {
             quests: entries
         )
 
+        let cached = loadCachedBoardItems(forBuild: build)
+        let cachedByHash = Dictionary(
+            uniqueKeysWithValues: cached.map { ("\($0.id):\($0.contentHash)", $0) }
+        )
         let definitionsById = Dictionary(uniqueKeysWithValues: definitions.map { ($0.id, $0) })
         let items: [QuestBoardItem] = response.quests.map { serverItem in
             let definition = definitionsById[serverItem.id] ?? QuestDefinition(
@@ -166,7 +170,16 @@ public struct QuestStore: Sendable {
                 isSimulator: isSimulator,
                 isBackendReachable: true
             )
-            let status = QuestStatus(rawValue: serverItem.boardStatus) ?? .pending
+            let serverStatus = QuestStatus(rawValue: serverItem.boardStatus) ?? .pending
+            let cachedItem = cachedByHash["\(serverItem.id):\(serverItem.contentHash)"]
+            let status: QuestStatus
+            if serverStatus == .passed || cachedItem?.status == .passed {
+                status = .passed
+            } else if serverStatus == .failed || cachedItem?.status == .failed {
+                status = .failed
+            } else {
+                status = serverStatus
+            }
             return QuestBoardItem(
                 id: serverItem.id,
                 version: serverItem.version,
@@ -174,7 +187,7 @@ public struct QuestStore: Sendable {
                 definition: definition,
                 status: status,
                 questStatus: serverItem.questStatus,
-                counts: serverItem.counts ?? QuestResultCounts(),
+                counts: serverItem.counts ?? cachedItem?.counts ?? QuestResultCounts(),
                 needWarnings: warnings
             )
         }
