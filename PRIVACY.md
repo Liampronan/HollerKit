@@ -1,26 +1,19 @@
-# HollerKit Privacy Requirements
+# HollerKit Privacy Policy & Requirements
 
-HollerKit is self-host first. The app owner controls storage, routing, retention, and destination issues.
+HollerKit is **self-hosted first**. You control the `/v1` server, the Postgres database (`hollerkit` schema), the private object storage bucket, and data retention.
 
-## Requirements
+## Core Privacy Guarantees
 
-- Microphone capture is opt-in by SDK configuration.
-- Raw audio upload is off by default. If enabled, it is explicit and capped by duration and byte size.
-- Speech recognition permission is requested only when transcription is enabled.
-- Apps that only enable HollerKit in debug, internal, or TestFlight-style targets can keep microphone and speech-recognition usage strings scoped to those non-release targets.
-- Transcript provenance is included in the issue body: on-device, Apple network, manual, or unavailable.
-- The default iOS sheet submits transcript text, not raw audio.
-- Redacted images must be destructively exported before upload.
-- Email and direct user identifiers are never collected automatically.
-- Apps may pass an opaque user ID; the SDK hashes it before transmission.
-- The iOS package includes an Apple privacy manifest declaring customer-support content, submitted images, diagnostics metadata, and breadcrumb-style product interaction data for app functionality. It does not declare tracking.
+- **Runtime gating (`isEnabled`)**: When `isEnabled()` returns `false` (for example on public App Store installs when using `HollerKitEnvironment.isDebugOrTestFlight`), the iOS SDK attaches no observers, records no breadcrumbs, stores no new files, and starts no new network requests (an already in-flight outbox flush awaiting `auth()` token resolution may finish its current upload grant or feedback submission request before stopping).
+- **No stored credentials on device**: The iOS `OutboxStore` persists pending feedback JSON and screenshot attachments in Application Support while offline or signed out, but **never** writes JWTs or authentication tokens to disk. It calls your `auth` closure dynamically at flush time.
+- **Transcript-first voice notes**: Microphone capture and speech recognition are opt-in and only activate when a tester taps the dictation button. By default, HollerKit submits the text transcript and provenance (`on_device`, `apple_network`, `manual`, or `unavailable`) rather than uploading raw audio files.
+- **Required `Info.plist` usage descriptions**: Because TestFlight builds are compiled as Release archives, any target that ships HollerKit with voice dictation enabled must include `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription` in `Info.plist`.
+- **Destructive image redaction**: When a tester redacts or annotates a screenshot or quest mark in the iOS editor, the redacted pixels are flattened into a new bitmap before the image is saved or uploaded.
+- **Explicit tester identity**: HollerKit does not scrape emails or device advertising identifiers. Tester submissions are authenticated with your host app's session JWT (`tester` scope), and the server records the verified `submitter_id` from that token.
+- **Apple Privacy Manifest (`PrivacyInfo.xcprivacy`)**: The iOS package includes a privacy manifest declaring user-submitted customer support content, images, diagnostics metadata, and product interaction breadcrumbs for app functionality, with tracking disabled.
 
 ## Operational Guidance
 
-- Treat the app secret as low-trust because it ships in the iOS binary.
-- Pair HMAC validation with server-side rate limiting, strict size caps, optional auth, and optional App Attest.
-- Configure a deployment or reverse-proxy body-size limit. HollerKit rejects oversized `Content-Length` values before buffering, but platform limits are still important for chunked uploads.
-- The default timestamp window is five minutes. Add a short-lived request-ID cache if replayed duplicate reports would be painful for your team.
-- User comments and transcripts are rendered as code blocks in GitHub issue bodies so untrusted Markdown does not create mentions, HTML, or deceptive links.
-- Prefer private object storage for screenshots, annotated images, and any opt-in raw audio upload in production.
-- Use GitHub Release storage only for demos and zero-infra experiments.
+- **Use private object storage**: Configure Supabase Storage or S3 buckets as private. `hollerkit-server` issues short-lived presigned upload URLs (`PUT`) and signed read URLs (`GET`, defaulting to a 1-hour TTL; configurable via `limits.readUrlTtlSeconds` for the feedback route and `readUrlTtlSeconds` in `flushOutbox` for outbox sink deliveries) so screenshots are never world-readable.
+- **Enforce tester allowlists**: When using `supabaseJwt({ store })` in production, keep the `hollerkit.testers` allowlist check active so only active rows in `hollerkit.testers` can fetch quests or submit feedback.
+- **Database isolation**: The `001_hollerkit_v1.sql` migration creates all tables inside the `hollerkit` schema with Row-Level Security (RLS) enabled and zero public policies, preventing direct PostgREST access via `anon` or `authenticated` roles.
