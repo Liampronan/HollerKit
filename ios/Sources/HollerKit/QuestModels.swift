@@ -1,6 +1,20 @@
 import CryptoKit
 import Foundation
 
+extension String {
+    /// Trims leading and trailing whitespace matching ECMAScript `String.prototype.trim()`,
+    /// which preserves `U+0085` (Next Line) unlike `CharacterSet.whitespacesAndNewlines`.
+    var jsTrimmed: String {
+        trimmingCharacters(in: Self.jsWhitespaceAndLineTerminators)
+    }
+
+    private static let jsWhitespaceAndLineTerminators: CharacterSet = {
+        var set = CharacterSet.whitespacesAndNewlines
+        set.remove(charactersIn: "\u{0085}")
+        return set
+    }()
+}
+
 public enum QuestRecordMode: String, Codable, CaseIterable, Sendable {
     case none
     case optional
@@ -58,15 +72,16 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
         start: String? = nil,
         source: QuestManifestSource? = nil
     ) {
-        self.id = id
-        self.title = title
-        self.area = area
-        self.setup = setup
-        self.steps = steps
-        self.expect = expect
-        self.needs = needs
+        self.id = id.jsTrimmed
+        self.title = title.jsTrimmed
+        self.area = area.jsTrimmed
+        self.setup = setup.map(\.jsTrimmed)
+        self.steps = steps.map(\.jsTrimmed)
+        self.expect = expect.map(\.jsTrimmed)
+        self.needs = needs.map(\.jsTrimmed)
         self.record = record
-        self.start = start
+        let trimmedStart = start?.jsTrimmed
+        self.start = (trimmedStart?.isEmpty == false) ? trimmedStart : nil
         self.source = source
     }
 
@@ -85,16 +100,29 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(String.self, forKey: .id)
-        self.title = try container.decode(String.self, forKey: .title)
-        self.area = try container.decode(String.self, forKey: .area)
-        self.setup = try container.decodeIfPresent([String].self, forKey: .setup) ?? []
-        self.steps = try container.decode([String].self, forKey: .steps)
-        self.expect = try container.decode([String].self, forKey: .expect)
-        self.needs = try container.decodeIfPresent([String].self, forKey: .needs) ?? []
-        self.record = try container.decodeIfPresent(QuestRecordMode.self, forKey: .record) ?? .optional
-        self.start = try container.decodeIfPresent(String.self, forKey: .start)
-        self.source = try container.decodeIfPresent(QuestManifestSource.self, forKey: .source)
+        let rawId = try container.decode(String.self, forKey: .id)
+        let rawTitle = try container.decode(String.self, forKey: .title)
+        let rawArea = try container.decode(String.self, forKey: .area)
+        let rawSetup = try container.decodeIfPresent([String].self, forKey: .setup) ?? []
+        let rawSteps = try container.decode([String].self, forKey: .steps)
+        let rawExpect = try container.decode([String].self, forKey: .expect)
+        let rawNeeds = try container.decodeIfPresent([String].self, forKey: .needs) ?? []
+        let rawRecord = try container.decodeIfPresent(QuestRecordMode.self, forKey: .record) ?? .optional
+        let rawStart = try container.decodeIfPresent(String.self, forKey: .start)
+        let rawSource = try container.decodeIfPresent(QuestManifestSource.self, forKey: .source)
+
+        self.init(
+            id: rawId,
+            title: rawTitle,
+            area: rawArea,
+            setup: rawSetup,
+            steps: rawSteps,
+            expect: rawExpect,
+            needs: rawNeeds,
+            record: rawRecord,
+            start: rawStart,
+            source: rawSource
+        )
     }
 
     public var contentHash: String {
@@ -102,16 +130,16 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
     }
 
     public func toManifestEntry() -> QuestManifestEntry {
-        let trimmedStart = start?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedStart = start?.jsTrimmed
         return QuestManifestEntry(
-            id: id.trimmingCharacters(in: .whitespacesAndNewlines),
+            id: id.jsTrimmed,
             contentHash: contentHash,
-            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-            area: area.trimmingCharacters(in: .whitespacesAndNewlines),
-            setup: setup.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-            steps: steps.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-            expect: expect.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-            needs: needs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+            title: title.jsTrimmed,
+            area: area.jsTrimmed,
+            setup: setup.map(\.jsTrimmed),
+            steps: steps.map(\.jsTrimmed),
+            expect: expect.map(\.jsTrimmed),
+            needs: needs.map(\.jsTrimmed),
             record: record.rawValue,
             start: (trimmedStart?.isEmpty == false) ? trimmedStart : nil,
             source: source
@@ -179,18 +207,18 @@ private struct CanonicalQuestPayload: Encodable {
 }
 
 public func canonicalQuestJSON(_ quest: QuestDefinition) -> String {
-    let trimmedStart = quest.start?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmedStart = quest.start?.jsTrimmed
     let normalizedStart = (trimmedStart?.isEmpty == false) ? trimmedStart : nil
 
     let payload = CanonicalQuestPayload(
-        area: quest.area.trimmingCharacters(in: .whitespacesAndNewlines),
-        expect: quest.expect.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-        needs: quest.needs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+        area: quest.area.jsTrimmed,
+        expect: quest.expect.map(\.jsTrimmed),
+        needs: quest.needs.map(\.jsTrimmed),
         record: quest.record.rawValue,
-        setup: quest.setup.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+        setup: quest.setup.map(\.jsTrimmed),
         start: normalizedStart,
-        steps: quest.steps.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-        title: quest.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        steps: quest.steps.map(\.jsTrimmed),
+        title: quest.title.jsTrimmed
     )
 
     let encoder = JSONEncoder()
@@ -210,6 +238,7 @@ public func computeQuestContentHash(_ quest: QuestDefinition) -> String {
 public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var version: Int
+    public var isVersionConfirmed: Bool
     public var contentHash: String
     public var definition: QuestDefinition
     public var status: QuestStatus
@@ -217,9 +246,22 @@ public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
     public var counts: QuestResultCounts
     public var needWarnings: [String]
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case version
+        case isVersionConfirmed
+        case contentHash
+        case definition
+        case status
+        case questStatus
+        case counts
+        case needWarnings
+    }
+
     public init(
         id: String,
         version: Int = 1,
+        isVersionConfirmed: Bool = true,
         contentHash: String? = nil,
         definition: QuestDefinition,
         status: QuestStatus = .pending,
@@ -227,14 +269,29 @@ public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
         counts: QuestResultCounts = QuestResultCounts(),
         needWarnings: [String] = []
     ) {
-        self.id = id
+        self.id = id.jsTrimmed
         self.version = version
+        self.isVersionConfirmed = isVersionConfirmed
         self.contentHash = contentHash ?? definition.contentHash
         self.definition = definition
         self.status = status
         self.questStatus = questStatus
         self.counts = counts
         self.needWarnings = needWarnings
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawId = try container.decode(String.self, forKey: .id)
+        self.id = rawId.jsTrimmed
+        self.version = try container.decode(Int.self, forKey: .version)
+        self.isVersionConfirmed = try container.decodeIfPresent(Bool.self, forKey: .isVersionConfirmed) ?? true
+        self.contentHash = try container.decode(String.self, forKey: .contentHash)
+        self.definition = try container.decode(QuestDefinition.self, forKey: .definition)
+        self.status = try container.decode(QuestStatus.self, forKey: .status)
+        self.questStatus = try container.decode(String.self, forKey: .questStatus)
+        self.counts = try container.decode(QuestResultCounts.self, forKey: .counts)
+        self.needWarnings = try container.decodeIfPresent([String].self, forKey: .needWarnings) ?? []
     }
 }
 

@@ -457,6 +457,19 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(submitted?["questVersion"] as? Int, 1)
         XCTAssertEqual(submitted?["result"] as? String, "pass")
         XCTAssertEqual(submitted?["stepsChecked"] as? [Bool], [true, false, true])
+
+        let events = try XCTUnwrap(submitted?["events"] as? [[String: Any]])
+        XCTAssertTrue(events.contains(where: { ($0["kind"] as? String) == "breadcrumb" }))
+        let markEvent = try XCTUnwrap(events.first(where: { ($0["kind"] as? String) == "mark" }))
+        XCTAssertEqual(markEvent["offsetSeconds"] as? Double ?? -1, 4.2, accuracy: 0.001)
+        let markPayload = try XCTUnwrap(markEvent["payload"] as? [String: String])
+        XCTAssertEqual(markPayload["markId"], mark?.id.uuidString.lowercased())
+
+        let attachments = try XCTUnwrap(submitted?["attachments"] as? [[String: Any]])
+        XCTAssertEqual(attachments.count, 1)
+        XCTAssertEqual(attachments.first?["kind"] as? String, "mark")
+        XCTAssertEqual(attachments.first?["offsetSeconds"] as? Double ?? -1, 4.2, accuracy: 0.001)
+        XCTAssertNotNil(attachments.first?["key"] as? String)
     }
 
     func testInputModeWireValues() {

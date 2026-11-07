@@ -3,15 +3,18 @@ import SwiftUI
 public struct QuestCardView: View {
     public var item: QuestBoardItem
     public var isActive: Bool
+    public var isDisabled: Bool
     public var onStart: () -> Void
 
     public init(
         item: QuestBoardItem,
         isActive: Bool = false,
+        isDisabled: Bool = false,
         onStart: @escaping () -> Void
     ) {
         self.item = item
         self.isActive = isActive
+        self.isDisabled = isDisabled
         self.onStart = onStart
     }
 
@@ -126,7 +129,7 @@ public struct QuestCardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(isActive)
+                .disabled(isActive || isDisabled)
                 .accessibilityIdentifier("HollerKitStartQuestButton_\(item.id)")
             }
             .padding(.top, 4)

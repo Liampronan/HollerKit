@@ -1,6 +1,17 @@
 import HollerKit
 import SwiftUI
 
+@MainActor
+final class DemoNavigationState: ObservableObject {
+    enum Screen: String {
+        case checkout
+        case profile
+    }
+
+    static let shared = DemoNavigationState()
+    @Published var currentScreen: Screen = .checkout
+}
+
 @main
 struct HollerKitDemoApp: App {
     init() {
@@ -51,7 +62,16 @@ struct HollerKitDemoApp: App {
             metadata: { ["environment": "demo"] },
             initialImages: DemoScreenshotFactory.attachments,
             quests: .definitions(demoQuests) { route in
-                HollerKit.breadcrumb("Navigated via quest route \(route)", category: "navigation")
+                switch route {
+                case "hollerkitdemo://checkout":
+                    DemoNavigationState.shared.currentScreen = .checkout
+                    HollerKit.breadcrumb("Navigated via quest route \(route)", category: "navigation")
+                case "hollerkitdemo://profile":
+                    DemoNavigationState.shared.currentScreen = .profile
+                    HollerKit.breadcrumb("Navigated via quest route \(route)", category: "navigation")
+                default:
+                    break
+                }
             }
         )
 

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftUI
 
@@ -17,13 +18,15 @@ public enum QuestStoreError: Error, LocalizedError, Sendable, Equatable {
 
 public struct QuestStore: Sendable {
     public var cacheDirectoryURL: URL
+    public var serverIdentity: String?
 
-    public init(cacheDirectoryURL: URL? = nil) {
+    public init(cacheDirectoryURL: URL? = nil, serverIdentity: String? = nil) {
         if let cacheDirectoryURL {
             self.cacheDirectoryURL = cacheDirectoryURL
         } else {
             self.cacheDirectoryURL = Self.defaultCacheDirectoryURL()
         }
+        self.serverIdentity = serverIdentity
     }
 
     public static func defaultCacheDirectoryURL() -> URL {
@@ -49,7 +52,7 @@ public struct QuestStore: Sendable {
     ) -> [String] {
         var warnings: [String] = []
         for rawNeed in needs {
-            let need = rawNeed.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let need = rawNeed.jsTrimmed.lowercased()
             guard !need.isEmpty else { continue }
             switch need {
             case "device":
@@ -61,7 +64,7 @@ public struct QuestStore: Sendable {
                     warnings.append("Requires reachable backend")
                 }
             default:
-                warnings.append("Requires \(rawNeed.trimmingCharacters(in: .whitespacesAndNewlines))")
+                warnings.append("Requires \(rawNeed.jsTrimmed)")
             }
         }
         return warnings
@@ -70,6 +73,7 @@ public struct QuestStore: Sendable {
     public func loadManifest(from configuration: HollerKitQuestsConfiguration) throws -> [QuestDefinition] {
         switch configuration.manifestSource {
         case .definitions(let definitions):
+            try Self.validateUniqueQuestIds(in: definitions)
             return definitions
         case .fileURL(let url):
             let data = try Data(contentsOf: url)
@@ -92,12 +96,27 @@ public struct QuestStore: Sendable {
     public static func decodeDefinitions(from data: Data) throws -> [QuestDefinition] {
         let decoder = JSONDecoder()
         if let manifest = try? decoder.decode(QuestManifest.self, from: data) {
+            try validateUniqueQuestIds(in: manifest.quests)
             return manifest.quests
         }
         if let array = try? decoder.decode([QuestDefinition].self, from: data) {
+            try validateUniqueQuestIds(in: array)
             return array
         }
         throw QuestStoreError.invalidManifestData("Expected a QuestManifest object or array of QuestDefinitions.")
+    }
+
+    public static func validateUniqueQuestIds(in definitions: [QuestDefinition]) throws {
+        var seen: Set<String> = []
+        for definition in definitions {
+            let id = definition.id.jsTrimmed
+            if id.isEmpty {
+                throw QuestStoreError.invalidManifestData("Quest id must not be empty.")
+            }
+            if !seen.insert(id).inserted {
+                throw QuestStoreError.invalidManifestData("Duplicate quest id '\(id)' in manifest.")
+            }
+        }
     }
 
     public func buildLocalBoardItems(
@@ -108,21 +127,41 @@ public struct QuestStore: Sendable {
     ) -> [QuestBoardItem] {
         let cached = loadCachedBoardItems(forBuild: build)
         let cachedByHash = Dictionary(
-            uniqueKeysWithValues: cached.map { ("\($0.id):\($0.contentHash)", $0) }
+            cached.map { ("\($0.id.jsTrimmed):\($0.contentHash)", $0) },
+            uniquingKeysWith: { _, latest in latest }
         )
+        var maxVersionById: [String: Int] = [:]
+        for item in cached {
+            let normalizedId = item.id.jsTrimmed
+            maxVersionById[normalizedId] = max(maxVersionById[normalizedId] ?? 0, item.version)
+        }
 
         return definitions.map { definition in
+            let normalizedId = definition.id.jsTrimmed
             let hash = definition.contentHash
-            let key = "\(definition.id):\(hash)"
+            let key = "\(normalizedId):\(hash)"
             let cachedItem = cachedByHash[key]
             let warnings = Self.evaluateNeedWarnings(
                 for: definition.needs,
                 isSimulator: isSimulator,
                 isBackendReachable: isBackendReachable
             )
+            let resolvedVersion: Int
+            let isVersionConfirmed: Bool
+            if let cachedItem {
+                resolvedVersion = cachedItem.version
+                isVersionConfirmed = cachedItem.isVersionConfirmed
+            } else if let priorMaxVersion = maxVersionById[normalizedId] {
+                resolvedVersion = priorMaxVersion + 1
+                isVersionConfirmed = false
+            } else {
+                resolvedVersion = 1
+                isVersionConfirmed = false
+            }
             return QuestBoardItem(
-                id: definition.id,
-                version: cachedItem?.version ?? 1,
+                id: normalizedId,
+                version: resolvedVersion,
+                isVersionConfirmed: isVersionConfirmed,
                 contentHash: hash,
                 definition: definition,
                 status: cachedItem?.status ?? .pending,
@@ -138,8 +177,10 @@ public struct QuestStore: Sendable {
         build: String,
         appVersion: String?,
         client: APIClient,
-        isSimulator: Bool = Self.isRunningOnSimulator
+        isSimulator: Bool = Self.isRunningOnSimulator,
+        persistToCache: Bool = true
     ) async throws -> [QuestBoardItem] {
+        try Self.validateUniqueQuestIds(in: definitions)
         let entries = definitions.map { $0.toManifestEntry() }
         let response = try await client.syncBuildManifest(
             build: build,
@@ -147,14 +188,14 @@ public struct QuestStore: Sendable {
             quests: entries
         )
 
-        let cached = loadCachedBoardItems(forBuild: build)
-        let cachedByHash = Dictionary(
-            uniqueKeysWithValues: cached.map { ("\($0.id):\($0.contentHash)", $0) }
+        let definitionsById = Dictionary(
+            definitions.map { ($0.id.jsTrimmed, $0) },
+            uniquingKeysWith: { _, latest in latest }
         )
-        let definitionsById = Dictionary(uniqueKeysWithValues: definitions.map { ($0.id, $0) })
         let items: [QuestBoardItem] = response.quests.map { serverItem in
-            let definition = definitionsById[serverItem.id] ?? QuestDefinition(
-                id: serverItem.id,
+            let normalizedServerId = serverItem.id.jsTrimmed
+            let definition = definitionsById[normalizedServerId] ?? QuestDefinition(
+                id: normalizedServerId,
                 title: serverItem.title,
                 area: serverItem.area,
                 setup: serverItem.setup,
@@ -170,29 +211,23 @@ public struct QuestStore: Sendable {
                 isSimulator: isSimulator,
                 isBackendReachable: true
             )
-            let serverStatus = QuestStatus(rawValue: serverItem.boardStatus) ?? .pending
-            let cachedItem = cachedByHash["\(serverItem.id):\(serverItem.contentHash)"]
-            let status: QuestStatus
-            if serverStatus == .passed || cachedItem?.status == .passed {
-                status = .passed
-            } else if serverStatus == .failed || cachedItem?.status == .failed {
-                status = .failed
-            } else {
-                status = serverStatus
-            }
+            let status = QuestStatus(rawValue: serverItem.boardStatus) ?? .pending
             return QuestBoardItem(
-                id: serverItem.id,
+                id: normalizedServerId,
                 version: serverItem.version,
+                isVersionConfirmed: true,
                 contentHash: serverItem.contentHash,
                 definition: definition,
                 status: status,
                 questStatus: serverItem.questStatus,
-                counts: serverItem.counts ?? cachedItem?.counts ?? QuestResultCounts(),
+                counts: serverItem.counts ?? QuestResultCounts(),
                 needWarnings: warnings
             )
         }
 
-        saveCachedBoardItems(items, forBuild: build)
+        if persistToCache {
+            saveCachedBoardItems(items, forBuild: build)
+        }
         return items
     }
 
@@ -214,11 +249,29 @@ public struct QuestStore: Sendable {
               let items = try? JSONDecoder().decode([QuestBoardItem].self, from: data) else {
             return []
         }
-        return items
+        var seen: Set<String> = []
+        var deduplicated: [QuestBoardItem] = []
+        for item in items.reversed() {
+            let key = "\(item.id.jsTrimmed):\(item.contentHash)"
+            if seen.insert(key).inserted {
+                deduplicated.append(item)
+            }
+        }
+        return deduplicated.reversed()
     }
 
     private func cacheFileURL(forBuild build: String) -> URL {
         let safeBuild = build.replacingOccurrences(of: "[^a-zA-Z0-9._-]", with: "_", options: .regularExpression)
+        if let serverIdentity, !serverIdentity.isEmpty {
+            let normalizedServer = serverIdentity.replacingOccurrences(
+                of: "/+$",
+                with: "",
+                options: .regularExpression
+            )
+            let digest = SHA256.hash(data: Data(normalizedServer.utf8))
+            let serverPrefix = digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+            return cacheDirectoryURL.appendingPathComponent("board-\(serverPrefix)-\(safeBuild).json", isDirectory: false)
+        }
         return cacheDirectoryURL.appendingPathComponent("board-\(safeBuild).json", isDirectory: false)
     }
 }
@@ -235,6 +288,7 @@ public final class HollerKitQuestState: ObservableObject {
     private var definitions: [QuestDefinition] = []
     private var store = QuestStore()
     private var localStatusOverrides: [String: QuestStatus] = [:]
+    private var configurationGeneration: UInt64 = 0
 
     public init() {}
 
@@ -247,6 +301,7 @@ public final class HollerKitQuestState: ObservableObject {
     }
 
     func reset() {
+        configurationGeneration &+= 1
         pendingCount = 0
         quests = []
         activeQuest = nil
@@ -261,9 +316,14 @@ public final class HollerKitQuestState: ObservableObject {
     func configure(
         questsConfiguration: HollerKitQuestsConfiguration?,
         build: String,
-        cacheDirectoryURL: URL? = nil
+        cacheDirectoryURL: URL? = nil,
+        serverURL: URL? = nil
     ) {
-        self.store = QuestStore(cacheDirectoryURL: cacheDirectoryURL)
+        configurationGeneration &+= 1
+        self.store = QuestStore(
+            cacheDirectoryURL: cacheDirectoryURL,
+            serverIdentity: serverURL?.absoluteString
+        )
         self.localStatusOverrides = [:]
         guard let questsConfiguration else {
             reset()
@@ -273,6 +333,7 @@ public final class HollerKitQuestState: ObservableObject {
         do {
             let loaded = try store.loadManifest(from: questsConfiguration)
             self.definitions = loaded
+            self.lastSyncError = nil
             let localItems = store.buildLocalBoardItems(
                 from: loaded,
                 build: build,
@@ -290,40 +351,62 @@ public final class HollerKitQuestState: ObservableObject {
     public func refresh(using configuration: HollerKitConfiguration? = nil) async {
         guard let config = configuration ?? HollerKit.currentConfiguration,
               config.isEnabled(),
-              config.quests != nil else {
+              let questsConfig = config.quests else {
             return
         }
 
+        let generation = configurationGeneration
         let metadata = MetadataCollector.collect(extra: config.metadata())
         let build = MetadataCollector.currentBuild(from: metadata)
         let appVersion = MetadataCollector.currentAppVersion(from: metadata)
 
-        if definitions.isEmpty, let questsConfig = config.quests {
-            if let loaded = try? store.loadManifest(from: questsConfig) {
-                definitions = loaded
+        if store.serverIdentity == nil {
+            store.serverIdentity = config.server.absoluteString
+        }
+
+        if definitions.isEmpty {
+            do {
+                definitions = try store.loadManifest(from: questsConfig)
+            } catch {
+                guard configurationGeneration == generation else { return }
+                lastSyncError = error.localizedDescription
+                return
             }
         }
         guard !definitions.isEmpty else { return }
 
+        let definitionsSnapshot = definitions
+        let storeSnapshot = store
         isSyncing = true
-        defer { isSyncing = false }
+        defer {
+            if configurationGeneration == generation {
+                isSyncing = false
+            }
+        }
 
         let client = APIClient(configuration: config)
         do {
-            let syncedItems = try await store.syncWithServer(
-                definitions: definitions,
+            let syncedItems = try await storeSnapshot.syncWithServer(
+                definitions: definitionsSnapshot,
                 build: build,
                 appVersion: appVersion,
-                client: client
+                client: client,
+                persistToCache: false
             )
+            guard configurationGeneration == generation, HollerKit.isEnabled else {
+                return
+            }
             isBackendReachable = true
             lastSyncError = nil
             applyBoardItems(syncedItems, build: build)
         } catch {
+            guard configurationGeneration == generation, HollerKit.isEnabled else {
+                return
+            }
             isBackendReachable = false
             lastSyncError = error.localizedDescription
             let fallbackItems = store.buildLocalBoardItems(
-                from: definitions,
+                from: definitionsSnapshot,
                 build: build,
                 isBackendReachable: false
             )
@@ -332,7 +415,7 @@ public final class HollerKitQuestState: ObservableObject {
     }
 
     public func startQuest(_ item: QuestBoardItem, startedAt: Date = Date()) {
-        guard HollerKit.isEnabled else { return }
+        guard HollerKit.isEnabled, activeQuest == nil else { return }
         let session = ActiveQuestSession(
             quest: item,
             startedAt: startedAt
@@ -349,7 +432,7 @@ public final class HollerKitQuestState: ObservableObject {
         HollerKit.presenterState.isQuestsPresented = false
         HollerKit.presenterState.isPresented = false
 
-        if let startRoute = item.definition.start?.trimmingCharacters(in: .whitespacesAndNewlines),
+        if let startRoute = item.definition.start?.jsTrimmed,
            !startRoute.isEmpty {
             HollerKit.currentConfiguration?.quests?.routes?(startRoute)
         }
@@ -445,7 +528,8 @@ public final class HollerKitQuestState: ObservableObject {
         transcript: HollerKitTranscript?,
         endedAt: Date = Date()
     ) async throws -> OutboxSubmissionOutcome {
-        guard let session = activeQuest,
+        guard HollerKit.reconcileEnablement(),
+              let session = activeQuest,
               let config = HollerKit.currentConfiguration else {
             throw HollerKitAPIError.missingAuthToken
         }
@@ -498,22 +582,45 @@ public final class HollerKitQuestState: ObservableObject {
             events: events
         )
 
-        recordLocalResult(result, forQuestId: session.quest.id, build: build)
-        activeQuest = nil
+        let client = APIClient(configuration: config)
+        let unconfirmedManifestEntry = session.quest.isVersionConfirmed
+            ? nil
+            : session.quest.definition.toManifestEntry()
+
+        let outcome = try await HollerKit.currentOutboxStore.submit(
+            request: request,
+            attachments: attachments,
+            questManifestEntry: unconfirmedManifestEntry,
+            using: client
+        )
+
+        recordLocalResult(
+            result,
+            forQuestId: session.quest.id,
+            contentHash: session.quest.contentHash,
+            build: build
+        )
+        if activeQuest?.id == session.id {
+            activeQuest = nil
+        }
         HollerKit.endQuestBreadcrumbs()
         QuestOverlayWindowManager.shared.hide()
 
-        let client = APIClient(configuration: config)
-        return try await HollerKit.currentOutboxStore.submit(
-            request: request,
-            attachments: attachments,
-            using: client
-        )
+        return outcome
     }
 
-    public func recordLocalResult(_ result: QuestResult, forQuestId questId: String, build: String) {
-        guard let index = quests.firstIndex(where: { $0.id == questId }) else { return }
+    public func recordLocalResult(
+        _ result: QuestResult,
+        forQuestId questId: String,
+        contentHash: String? = nil,
+        build: String
+    ) {
+        let normalizedId = questId.jsTrimmed
+        guard let index = quests.firstIndex(where: { $0.id == normalizedId }) else { return }
         var item = quests[index]
+        if let contentHash, item.contentHash != contentHash {
+            return
+        }
         switch result {
         case .pass:
             item.counts.pass += 1

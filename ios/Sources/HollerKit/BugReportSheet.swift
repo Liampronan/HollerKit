@@ -331,6 +331,31 @@ final class SpeechCaptureController: ObservableObject {
         }
     }
 
+    func finalizeIfCapturing() async {
+        guard isCapturing else { return }
+        autoStopTask?.cancel()
+        autoStopTask = nil
+        do {
+            transcript = try capture.stop()
+            partialTranscript = ""
+            isCapturing = false
+        } catch {
+            partialTranscript = ""
+            isCapturing = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func cancelCapture() {
+        autoStopTask?.cancel()
+        autoStopTask = nil
+        if isCapturing || capture.isCapturing {
+            _ = try? capture.stop()
+        }
+        partialTranscript = ""
+        isCapturing = false
+    }
+
     private func start(configuration: HollerKitAudioConfiguration) async {
         do {
             transcript = nil

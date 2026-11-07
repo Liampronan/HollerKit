@@ -10,6 +10,7 @@ public final class QuestOverlayWindowManager {
 
     #if canImport(UIKit)
     private var overlayWindow: PassthroughOverlayWindow?
+    private weak var boundWindowScene: UIWindowScene?
     #endif
 
     private init() {}
@@ -22,16 +23,17 @@ public final class QuestOverlayWindowManager {
         #endif
     }
 
-    public func show(questState: HollerKitQuestState) {
-        #if canImport(UIKit)
-        guard let windowScene = activeWindowScene() else { return }
+    #if canImport(UIKit)
+    public func show(questState: HollerKitQuestState, in windowScene: UIWindowScene? = nil) {
+        guard let targetScene = windowScene ?? activeWindowScene() else { return }
+        boundWindowScene = targetScene
 
         let window: PassthroughOverlayWindow
-        if let existing = overlayWindow, existing.windowScene === windowScene {
+        if let existing = overlayWindow, existing.windowScene === targetScene {
             window = existing
         } else {
             overlayWindow?.isHidden = true
-            window = PassthroughOverlayWindow(windowScene: windowScene)
+            window = PassthroughOverlayWindow(windowScene: targetScene)
             overlayWindow = window
         }
 
@@ -45,18 +47,21 @@ public final class QuestOverlayWindowManager {
         hostingController.view.backgroundColor = .clear
         window.rootViewController = hostingController
         window.isHidden = false
-        #endif
     }
+    #else
+    public func show(questState: HollerKitQuestState) {}
+    #endif
 
     public func hide() {
         #if canImport(UIKit)
         overlayWindow?.isHidden = true
         overlayWindow?.rootViewController = nil
         overlayWindow = nil
+        boundWindowScene = nil
         #endif
     }
 
-    /// Captures a PNG screenshot of the host app's main window while excluding the HollerKit overlay window.
+    /// Captures a PNG screenshot of the host app's main window in the initiating scene while excluding the HollerKit overlay window.
     public func captureHostScreenExcludingOverlay() -> Data? {
         #if canImport(UIKit)
         let wasHidden = overlayWindow?.isHidden ?? true
@@ -86,6 +91,11 @@ public final class QuestOverlayWindowManager {
     #if canImport(UIKit)
     private func activeWindowScene() -> UIWindowScene? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        if let activeKeyScene = scenes.first(where: { scene in
+            scene.activationState == .foregroundActive && scene.windows.contains(where: \.isKeyWindow)
+        }) {
+            return activeKeyScene
+        }
         if let active = scenes.first(where: { $0.activationState == .foregroundActive }) {
             return active
         }
@@ -93,19 +103,16 @@ public final class QuestOverlayWindowManager {
     }
 
     private func findHostAppWindow() -> UIWindow? {
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else { continue }
-            let candidates = windowScene.windows.filter { window in
-                window !== overlayWindow && !window.isHidden && window.alpha > 0.01
-            }
-            if let key = candidates.first(where: { $0.isKeyWindow }) {
-                return key
-            }
-            if let first = candidates.first(where: { $0.windowLevel == .normal }) ?? candidates.first {
-                return first
-            }
+        guard let windowScene = overlayWindow?.windowScene ?? boundWindowScene ?? activeWindowScene() else {
+            return nil
         }
-        return nil
+        let candidates = windowScene.windows.filter { window in
+            window !== overlayWindow && !window.isHidden && window.alpha > 0.01
+        }
+        if let key = candidates.first(where: { $0.isKeyWindow }) {
+            return key
+        }
+        return candidates.first(where: { $0.windowLevel == .normal }) ?? candidates.first
     }
     #endif
 }
@@ -146,14 +153,41 @@ public struct QuestOverlayView: View {
     @ObservedObject private var questState: HollerKitQuestState
     @State private var dragOffset: CGSize = .zero
     @State private var accumulatedOffset: CGSize = .zero
+    @State private var cardSize: CGSize = .zero
+    private var viewportSize: CGSize
     private var onFrameChange: (CGRect) -> Void
 
     public init(
         questState: HollerKitQuestState = HollerKit.quests,
+        viewportSize: CGSize = .zero,
         onFrameChange: @escaping (CGRect) -> Void = { _ in }
     ) {
         self.questState = questState
+        self.viewportSize = viewportSize
         self.onFrameChange = onFrameChange
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                let raw = CGSize(
+                    width: accumulatedOffset.width + value.translation.width,
+                    height: accumulatedOffset.height + value.translation.height
+                )
+                let clamped = clampOffset(raw, viewportSize: viewportSize, cardSize: cardSize)
+                dragOffset = CGSize(
+                    width: clamped.width - accumulatedOffset.width,
+                    height: clamped.height - accumulatedOffset.height
+                )
+            }
+            .onEnded { value in
+                let raw = CGSize(
+                    width: accumulatedOffset.width + value.translation.width,
+                    height: accumulatedOffset.height + value.translation.height
+                )
+                accumulatedOffset = clampOffset(raw, viewportSize: viewportSize, cardSize: cardSize)
+                dragOffset = .zero
+            }
     }
 
     public var body: some View {
@@ -163,36 +197,52 @@ public struct QuestOverlayView: View {
                     expandedCard(session: session)
                 } else {
                     collapsedPill(session: session)
+                        .gesture(dragGesture)
                 }
             }
             .background(
                 GeometryReader { proxy in
                     Color.clear
                         .onAppear {
+                            cardSize = proxy.size
+                            accumulatedOffset = clampOffset(accumulatedOffset, viewportSize: viewportSize, cardSize: proxy.size)
                             onFrameChange(proxy.frame(in: .global))
+                        }
+                        .onChange(of: proxy.size) { _, newSize in
+                            cardSize = newSize
+                            accumulatedOffset = clampOffset(accumulatedOffset, viewportSize: viewportSize, cardSize: newSize)
                         }
                         .onChange(of: proxy.frame(in: .global)) { _, newFrame in
                             onFrameChange(newFrame)
                         }
                 }
             )
+            .onChange(of: viewportSize) { _, newViewport in
+                accumulatedOffset = clampOffset(accumulatedOffset, viewportSize: newViewport, cardSize: cardSize)
+            }
             .offset(
                 x: accumulatedOffset.width + dragOffset.width,
                 y: accumulatedOffset.height + dragOffset.height
             )
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        dragOffset = value.translation
-                    }
-                    .onEnded { value in
-                        accumulatedOffset.width += value.translation.width
-                        accumulatedOffset.height += value.translation.height
-                        dragOffset = .zero
-                    }
-            )
             .accessibilityIdentifier("HollerKitQuestOverlayView")
         }
+    }
+
+    private func clampOffset(_ proposed: CGSize, viewportSize: CGSize, cardSize: CGSize) -> CGSize {
+        guard viewportSize.width > 0, viewportSize.height > 0, cardSize.width > 0, cardSize.height > 0 else {
+            return proposed
+        }
+        let horizontalPadding: CGFloat = 16
+        let bottomPadding: CGFloat = 28
+        let topPadding: CGFloat = 16
+        let maxX = max(0, (viewportSize.width - cardSize.width) / 2 - horizontalPadding)
+        let minY = -max(0, viewportSize.height - cardSize.height - bottomPadding - topPadding)
+        let maxY: CGFloat = 0
+
+        return CGSize(
+            width: min(max(proposed.width, -maxX), maxX),
+            height: min(max(proposed.height, minY), maxY)
+        )
     }
 
     private func collapsedPill(session: ActiveQuestSession) -> some View {
@@ -251,7 +301,11 @@ public struct QuestOverlayView: View {
     }
 
     private func expandedCard(session: ActiveQuestSession) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let maxInstructionsHeight: CGFloat = viewportSize.height > 0
+            ? min(240, max(110, viewportSize.height * 0.36))
+            : 200
+
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.quest.definition.area.uppercased())
@@ -278,54 +332,62 @@ public struct QuestOverlayView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Collapse Quest Overlay")
             }
+            .contentShape(Rectangle())
+            .gesture(dragGesture)
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Steps")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Steps")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
 
-                ForEach(Array(session.quest.definition.steps.enumerated()), id: \.offset) { index, step in
-                    let isChecked = session.stepsChecked.indices.contains(index) && session.stepsChecked[index]
-                    Button {
-                        questState.toggleStep(at: index)
-                    } label: {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(isChecked ? .green : .secondary)
-                                .font(.subheadline)
-                            Text(step)
-                                .font(.caption)
-                                .foregroundStyle(isChecked ? .secondary : .primary)
-                                .strikethrough(isChecked)
-                                .multilineTextAlignment(.leading)
-                            Spacer(minLength: 0)
+                        ForEach(Array(session.quest.definition.steps.enumerated()), id: \.offset) { index, step in
+                            let isChecked = session.stepsChecked.indices.contains(index) && session.stepsChecked[index]
+                            Button {
+                                questState.toggleStep(at: index)
+                            } label: {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isChecked ? .green : .secondary)
+                                        .font(.subheadline)
+                                    Text(step)
+                                        .font(.caption)
+                                        .foregroundStyle(isChecked ? .secondary : .primary)
+                                        .strikethrough(isChecked)
+                                        .multilineTextAlignment(.leading)
+                                    Spacer(minLength: 0)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("HollerKitQuestStep_\(index)")
                         }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("HollerKitQuestStep_\(index)")
-                }
-            }
 
-            if !session.quest.definition.expect.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Expect")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    ForEach(Array(session.quest.definition.expect.enumerated()), id: \.offset) { _, exp in
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: "sparkles")
-                                .font(.caption2)
-                                .foregroundStyle(.teal)
-                                .padding(.top, 2)
-                            Text(exp)
-                                .font(.caption)
+                    if !session.quest.definition.expect.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Expect")
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
+                            ForEach(Array(session.quest.definition.expect.enumerated()), id: \.offset) { _, exp in
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "sparkles")
+                                        .font(.caption2)
+                                        .foregroundStyle(.teal)
+                                        .padding(.top, 2)
+                                    Text(exp)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxHeight: maxInstructionsHeight)
 
             HStack(spacing: 8) {
                 Button {
@@ -365,6 +427,8 @@ public struct QuestOverlayView: View {
                 .controlSize(.small)
                 .accessibilityIdentifier("HollerKitQuestDoneButton")
             }
+            .contentShape(Rectangle())
+            .gesture(dragGesture)
         }
         .padding(14)
         .frame(maxWidth: 340)
@@ -382,14 +446,20 @@ private struct QuestOverlayRootView: View {
     var onFrameChange: (CGRect) -> Void
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            Color.clear
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
+        GeometryReader { proxy in
+            ZStack(alignment: .bottom) {
+                Color.clear
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
 
-            QuestOverlayView(questState: questState, onFrameChange: onFrameChange)
+                QuestOverlayView(
+                    questState: questState,
+                    viewportSize: proxy.size,
+                    onFrameChange: onFrameChange
+                )
                 .padding(.horizontal, 16)
                 .padding(.bottom, 28)
+            }
         }
         .sheet(
             isPresented: Binding(

@@ -61,7 +61,8 @@ public enum HollerKit {
             quests.configure(
                 questsConfiguration: configuration.quests,
                 build: build,
-                cacheDirectoryURL: cacheDir
+                cacheDirectoryURL: cacheDir,
+                serverURL: configuration.server
             )
             Task { @MainActor in
                 _ = await flushOutbox()

@@ -136,6 +136,7 @@ public struct QuestResultSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Back") {
+                        speechCapture.cancelCapture()
                         questState.dismissResultSheet()
                         dismiss()
                     }
@@ -151,6 +152,9 @@ public struct QuestResultSheet: View {
                     .accessibilityIdentifier("HollerKitQuestResultSubmitButton")
                 }
             }
+        }
+        .onDisappear {
+            speechCapture.cancelCapture()
         }
         .sheet(item: $selectedMarkForAnnotation) { item in
             #if canImport(UIKit)
@@ -177,6 +181,7 @@ public struct QuestResultSheet: View {
         defer { isSubmitting = false }
 
         do {
+            await speechCapture.finalizeIfCapturing()
             _ = try await questState.submitActiveQuest(
                 result: selectedResult,
                 comment: comment,

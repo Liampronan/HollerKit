@@ -49,12 +49,29 @@ public struct QuestBoardView: View {
                 if displayedQuests.isEmpty {
                     Section {
                         VStack(spacing: 10) {
-                            Image(systemName: selectedTab == .pending ? "checkmark.seal.fill" : "checklist")
-                                .font(.system(size: 32))
-                                .foregroundStyle(.secondary)
-                            Text(selectedTab == .pending ? "All quests completed for this build!" : "No completed quests yet.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                            if questState.quests.isEmpty, let error = questState.lastSyncError {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 32))
+                                    .foregroundStyle(.orange)
+                                Text(error)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            } else if questState.quests.isEmpty {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 32))
+                                    .foregroundStyle(.secondary)
+                                Text("No quests configured for this build.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Image(systemName: selectedTab == .pending ? "checkmark.seal.fill" : "checklist")
+                                    .font(.system(size: 32))
+                                    .foregroundStyle(.secondary)
+                                Text(selectedTab == .pending ? "All quests completed for this build!" : "No completed quests yet.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
@@ -62,9 +79,12 @@ public struct QuestBoardView: View {
                 } else {
                     Section(selectedTab == .pending ? "Pending Quests" : "Completed Quests") {
                         ForEach(displayedQuests) { item in
+                            let isCurrentActive = questState.activeQuest?.quest.id == item.id
+                            let isAnyActive = questState.activeQuest != nil
                             QuestCardView(
                                 item: item,
-                                isActive: questState.activeQuest?.quest.id == item.id,
+                                isActive: isCurrentActive,
+                                isDisabled: isAnyActive && !isCurrentActive,
                                 onStart: {
                                     questState.startQuest(item)
                                 }
