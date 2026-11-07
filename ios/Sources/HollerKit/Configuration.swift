@@ -1,7 +1,8 @@
 import Foundation
 
 public enum HollerKitEnvironment: Sendable {
-    /// Returns `true` when running in a Debug build, Simulator, or a TestFlight (`sandboxReceipt`) build.
+    /// Returns `true` when running in a Debug build, Simulator, internal/ad-hoc provisioned build,
+    /// or a TestFlight (`sandboxReceipt` / beta-reports-active) build.
     /// Returns `false` in production App Store builds so HollerKit remains completely dormant.
     public static var isDebugOrTestFlight: Bool {
         #if DEBUG
@@ -19,19 +20,47 @@ public enum HollerKitEnvironment: Sendable {
         return evaluateIsDebugOrTestFlight(
             isDebugBuild: isDebugBuild,
             isSimulator: isSimulator,
-            receiptURL: Bundle.main.appStoreReceiptURL
+            receiptURL: Bundle.main.appStoreReceiptURL,
+            mobileProvisionURL: Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+            fileExists: { FileManager.default.fileExists(atPath: $0.path) }
         )
     }
 
     public static func evaluateIsDebugOrTestFlight(
         isDebugBuild: Bool,
         isSimulator: Bool,
-        receiptURL: URL?
+        receiptURL: URL?,
+        mobileProvisionURL: URL? = nil,
+        fileExists: (URL) -> Bool = { _ in true }
     ) -> Bool {
         if isDebugBuild || isSimulator {
             return true
         }
-        return receiptURL?.lastPathComponent == "sandboxReceipt"
+        if let mobileProvisionURL, fileExists(mobileProvisionURL) {
+            if isNonAppStoreProvisioningProfile(at: mobileProvisionURL) {
+                return true
+            }
+        }
+        guard let receiptURL, receiptURL.lastPathComponent == "sandboxReceipt" else {
+            return false
+        }
+        return fileExists(receiptURL)
+    }
+
+    private static func isNonAppStoreProvisioningProfile(at url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            // App Store distribution strips `embedded.mobileprovision`; its presence alone indicates
+            // a development, ad-hoc, enterprise, or TestFlight/internal build when unreadable in tests.
+            return true
+        }
+        let content = String(decoding: data, as: UTF8.self)
+        if content.contains("beta-reports-active")
+            || content.contains("get-task-allow")
+            || content.contains("ProvisionedDevices")
+            || content.contains("ProvisionsAllDevices") {
+            return true
+        }
+        return true
     }
 }
 

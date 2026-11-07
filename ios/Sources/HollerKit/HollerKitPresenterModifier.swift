@@ -8,32 +8,44 @@ public extension View {
 
 private struct HollerKitPresenterModifier: ViewModifier {
     @ObservedObject private var presenter = HollerKit.presenterState
+    @Environment(\.scenePhase) private var scenePhase
 
     func body(content: Content) -> some View {
-        if HollerKit.isEnabled {
-            content
-                .background {
-                    InvocationObserver(
-                        invocation: HollerKit.currentInvocation,
-                        onShake: {
-                            HollerKit.presentBugReport()
-                        },
-                        onScreenshot: { attachment in
-                            if let attachment {
-                                HollerKit.presentBugReport(attachments: [attachment])
-                            } else {
+        Group {
+            if HollerKit.isEnabled {
+                content
+                    .background {
+                        InvocationObserver(
+                            invocation: HollerKit.currentInvocation,
+                            onShake: {
                                 HollerKit.presentBugReport()
+                            },
+                            onScreenshot: { attachment in
+                                if let attachment {
+                                    HollerKit.presentBugReport(attachments: [attachment])
+                                } else {
+                                    HollerKit.presentBugReport()
+                                }
                             }
-                        }
-                    )
-                }
-                .sheet(isPresented: $presenter.isPresented, onDismiss: {
-                    HollerKit.clearPresentationAttachments()
-                }) {
-                    HollerKit.presentationView()
-                }
-        } else {
-            content
+                        )
+                    }
+                    .sheet(isPresented: $presenter.isPresented, onDismiss: {
+                        HollerKit.clearPresentationAttachments()
+                    }) {
+                        HollerKit.presentationView()
+                    }
+                    .sheet(isPresented: $presenter.isQuestsPresented) {
+                        HollerKit.questsPresentationView()
+                    }
+            } else {
+                content
+            }
+        }
+        .onAppear {
+            HollerKit.reconcileEnablement()
+        }
+        .onChange(of: scenePhase) { _, _ in
+            HollerKit.reconcileEnablement()
         }
     }
 }

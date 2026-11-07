@@ -21,6 +21,31 @@ public enum HollerKitAPIError: Error, LocalizedError, Sendable, Equatable {
             return body.isEmpty ? "HTTP error \(statusCode)." : "HTTP error \(statusCode): \(body)"
         }
     }
+
+    public var statusCode: Int? {
+        switch self {
+        case .serverError(let statusCode, _, _), .httpError(let statusCode, _):
+            return statusCode
+        case .missingAuthToken, .invalidURL, .invalidResponse:
+            return nil
+        }
+    }
+
+    public var isAuthenticationError: Bool {
+        switch self {
+        case .missingAuthToken:
+            return true
+        case .serverError(let statusCode, _, _), .httpError(let statusCode, _):
+            return statusCode == 401 || statusCode == 403
+        case .invalidURL, .invalidResponse:
+            return false
+        }
+    }
+
+    public var isPermanentValidationError: Bool {
+        guard let statusCode else { return false }
+        return statusCode == 400 || statusCode == 413 || statusCode == 415 || statusCode == 422
+    }
 }
 
 public struct QuestManifestSource: Codable, Equatable, Sendable {

@@ -9,7 +9,7 @@ public enum MetadataCollector {
 
     @MainActor
     public static func collect(extra: [String: String] = [:]) -> [String: String] {
-        var metadata = extra
+        var metadata: [String: String] = [:]
         metadata["locale"] = Locale.current.identifier
         metadata["timeZone"] = TimeZone.current.identifier
         if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !appVersion.isEmpty {
@@ -26,6 +26,10 @@ public enum MetadataCollector {
         metadata["screenSize"] = "\(Int(UIScreen.main.bounds.width))x\(Int(UIScreen.main.bounds.height))"
         metadata["orientation"] = UIDevice.current.orientation.description
         #endif
+
+        for (key, value) in extra {
+            metadata[key] = value
+        }
 
         return metadata
     }

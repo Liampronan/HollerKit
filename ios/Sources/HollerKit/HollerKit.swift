@@ -7,7 +7,9 @@ public enum HollerKit {
     static let presenterState = HollerKitPresenterState()
     private static let lifecycleMonitor = OutboxLifecycleMonitor {
         Task { @MainActor in
-            _ = await HollerKit.flushOutbox()
+            if HollerKit.reconcileEnablement() {
+                _ = await HollerKit.flushOutbox()
+            }
         }
     }
 
@@ -42,24 +44,42 @@ public enum HollerKit {
 
     public static func configure(_ configuration: HollerKitConfiguration) {
         state.configuration = configuration
-        state.outboxStore = OutboxStore(rootDirectoryURL: configuration.outboxDirectoryURL)
+        let targetOutboxURL = (configuration.outboxDirectoryURL ?? OutboxStore.defaultOutboxDirectoryURL()).standardizedFileURL
+        if state.outboxStore.rootDirectoryURL.standardizedFileURL != targetOutboxURL {
+            state.outboxStore = OutboxStore(rootDirectoryURL: configuration.outboxDirectoryURL)
+        }
 
-        if configuration.isEnabled() {
-            lifecycleMonitor.start()
+        lifecycleMonitor.start()
+        if reconcileEnablement() {
             Task { @MainActor in
                 _ = await flushOutbox()
             }
-        } else {
-            lifecycleMonitor.stop()
-            state.breadcrumbs = BreadcrumbStore()
-            presenterState.isPresented = false
-            presenterState.isQuestsPresented = false
-            presenterState.pendingAttachments = []
         }
     }
 
+    @discardableResult
+    public static func reconcileEnablement() -> Bool {
+        let enabled = state.configuration?.isEnabled() ?? false
+        if presenterState.isRuntimeEnabled != enabled {
+            presenterState.isRuntimeEnabled = enabled
+        }
+        if !enabled {
+            state.breadcrumbs = BreadcrumbStore()
+            if presenterState.isPresented {
+                presenterState.isPresented = false
+            }
+            if presenterState.isQuestsPresented {
+                presenterState.isQuestsPresented = false
+            }
+            if !presenterState.pendingAttachments.isEmpty {
+                presenterState.pendingAttachments = []
+            }
+        }
+        return enabled
+    }
+
     public static var isEnabled: Bool {
-        state.configuration?.isEnabled() ?? false
+        reconcileEnablement()
     }
 
     public static func breadcrumb(
@@ -68,7 +88,7 @@ public enum HollerKit {
         metadata: [String: String] = [:],
         date: Date = Date()
     ) {
-        guard isEnabled, state.configuration?.captureBreadcrumbs == true else { return }
+        guard reconcileEnablement(), state.configuration?.captureBreadcrumbs == true else { return }
         state.breadcrumbs.append(.init(
             timestamp: date,
             category: category,
@@ -86,8 +106,19 @@ public enum HollerKit {
         )
     }
 
+    public static func questsPresentationView() -> some View {
+        NavigationStack {
+            ContentUnavailableView(
+                "Quests",
+                systemImage: "checklist",
+                description: Text("No quests are currently active for this build.")
+            )
+            .navigationTitle("Quests")
+        }
+    }
+
     public static func presentBugReport(attachments: [HollerKitAttachment] = []) {
-        guard isEnabled else { return }
+        guard reconcileEnablement() else { return }
         presenterState.pendingAttachments = attachments
         presenterState.isPresented = true
     }
@@ -97,13 +128,13 @@ public enum HollerKit {
     }
 
     public static func presentQuests() {
-        guard isEnabled else { return }
+        guard reconcileEnablement() else { return }
         presenterState.isQuestsPresented = true
     }
 
     @discardableResult
     public static func flushOutbox() async -> OutboxFlushResult {
-        guard isEnabled, let configuration = state.configuration else {
+        guard reconcileEnablement(), let configuration = state.configuration else {
             return OutboxFlushResult()
         }
         let client = APIClient(configuration: configuration)
@@ -113,7 +144,7 @@ public enum HollerKit {
     public static func submitReport(
         _ payload: HollerKitReportPayload
     ) async throws -> OutboxSubmissionOutcome {
-        guard isEnabled, let configuration = state.configuration else {
+        guard reconcileEnablement(), let configuration = state.configuration else {
             throw HollerKitAPIError.missingAuthToken
         }
         let client = APIClient(configuration: configuration)
@@ -146,7 +177,7 @@ public enum HollerKit {
     }
 
     static var currentInvocation: HollerKitInvocation {
-        guard isEnabled else { return [] }
+        guard reconcileEnablement() else { return [] }
         return state.configuration?.invocation ?? []
     }
 
@@ -168,6 +199,7 @@ private struct HollerKitState {
 
 @MainActor
 final class HollerKitPresenterState: ObservableObject {
+    @Published var isRuntimeEnabled = false
     @Published var isPresented = false
     @Published var isQuestsPresented = false
     var pendingAttachments: [HollerKitAttachment] = []

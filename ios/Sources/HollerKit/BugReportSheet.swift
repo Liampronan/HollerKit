@@ -21,12 +21,12 @@ public struct BugReportSheet: View {
     init(
         configuration: HollerKitConfiguration?,
         breadcrumbs: BreadcrumbStore,
-        outboxStore: OutboxStore = OutboxStore(),
+        outboxStore: OutboxStore? = nil,
         invocationAttachments: [HollerKitAttachment] = []
     ) {
         self.configuration = configuration
         self.breadcrumbs = breadcrumbs
-        self.outboxStore = outboxStore
+        self.outboxStore = outboxStore ?? OutboxStore(rootDirectoryURL: configuration?.outboxDirectoryURL)
         self.invocationAttachments = invocationAttachments
     }
 
@@ -91,9 +91,19 @@ public struct BugReportSheet: View {
                         case .sent(let response):
                             Label("Submitted (\(response.feedback.id.prefix(8)))", systemImage: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
-                        case .queued:
-                            Label("Saved to outbox — will send when online", systemImage: "tray.and.arrow.up.fill")
-                                .foregroundStyle(.orange)
+                        case .queued(_, let reason):
+                            if Self.isAuthenticationFailureReason(reason) {
+                                Label("Saved to outbox — sign in to finish sending", systemImage: "person.badge.key.fill")
+                                    .foregroundStyle(.orange)
+                            } else {
+                                Label("Saved to outbox — will send when online", systemImage: "tray.and.arrow.up.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                            if let reason, !reason.isEmpty {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -154,7 +164,9 @@ public struct BugReportSheet: View {
     #endif
 
     private var canSubmit: Bool {
-        guard configuration != nil, !isSubmitting, submissionOutcome == nil else { return false }
+        guard let configuration, configuration.isEnabled(), !isSubmitting, submissionOutcome == nil else {
+            return false
+        }
         if isAudioOnly {
             return speechCapture.transcript != nil
         }
@@ -170,10 +182,24 @@ public struct BugReportSheet: View {
         return false
     }
 
+    private static func isAuthenticationFailureReason(_ reason: String?) -> Bool {
+        guard let lower = reason?.lowercased() else { return false }
+        return lower.contains("authentication token")
+            || lower.contains("unauthorized")
+            || lower.contains("forbidden")
+            || lower.contains("401")
+            || lower.contains("403")
+    }
+
     @MainActor
     private func submit() async {
         guard let configuration else {
             submissionError = "HollerKit has not been configured."
+            return
+        }
+        guard configuration.isEnabled() else {
+            HollerKit.reconcileEnablement()
+            dismiss()
             return
         }
 

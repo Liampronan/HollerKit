@@ -134,7 +134,21 @@ final class HollerKitTests: XCTestCase {
         XCTAssertTrue(HollerKitEnvironment.evaluateIsDebugOrTestFlight(
             isDebugBuild: false,
             isSimulator: false,
-            receiptURL: URL(fileURLWithPath: "/private/var/mobile/Containers/Data/Application/UUID/StoreKit/sandboxReceipt")
+            receiptURL: URL(fileURLWithPath: "/private/var/mobile/Containers/Data/Application/UUID/StoreKit/sandboxReceipt"),
+            fileExists: { _ in true }
+        ))
+        XCTAssertFalse(HollerKitEnvironment.evaluateIsDebugOrTestFlight(
+            isDebugBuild: false,
+            isSimulator: false,
+            receiptURL: URL(fileURLWithPath: "/private/var/mobile/Containers/Data/Application/UUID/StoreKit/sandboxReceipt"),
+            fileExists: { _ in false }
+        ))
+        XCTAssertTrue(HollerKitEnvironment.evaluateIsDebugOrTestFlight(
+            isDebugBuild: false,
+            isSimulator: false,
+            receiptURL: nil,
+            mobileProvisionURL: URL(fileURLWithPath: "/private/var/containers/Bundle/Application/UUID/App.app/embedded.mobileprovision"),
+            fileExists: { $0.lastPathComponent == "embedded.mobileprovision" }
         ))
         XCTAssertFalse(HollerKitEnvironment.evaluateIsDebugOrTestFlight(
             isDebugBuild: false,
@@ -335,6 +349,11 @@ final class HollerKitTests: XCTestCase {
             XCTAssertEqual(req.value(forHTTPHeaderField: "hollerkit-protocol"), "1")
             XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer jwt-token-123")
         }
+        let manifestBody = try XCTUnwrap(captured.first?.1)
+        let manifestJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: manifestBody) as? [String: Any])
+        XCTAssertEqual(manifestJSON["appVersion"] as? String, "1.2.0")
+        let manifestQuests = try XCTUnwrap(manifestJSON["quests"] as? [[String: Any]])
+        XCTAssertEqual(manifestQuests.first?["id"] as? String, "feed-zoom")
     }
 
     func testOutboxStorePersistsWhenSignedOutAndFlushesWhenAuthBecomesAvailable() async throws {
@@ -469,13 +488,14 @@ final class HollerKitTests: XCTestCase {
         XCTAssertFalse(envelopeString.contains("fresh-session-jwt"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: itemDir.appendingPathComponent("0.png").path))
 
-        // 2. Sign back in (auth() now returns a token) and flush the outbox
+        // 2. Sign back in (auth() now returns a token) and flush using a fresh OutboxStore instance
         currentTokenBox.withLock { $0 = "fresh-session-jwt" }
-        let flushResult = await outbox.flush(using: client)
+        let reloadedOutbox = OutboxStore(rootDirectoryURL: tempDir)
+        let flushResult = await reloadedOutbox.flush(using: client)
 
         XCTAssertEqual(flushResult.flushedIds, [queuedId])
         XCTAssertEqual(flushResult.remainingCount, 0)
-        let pendingCountAfterFlush = await outbox.pendingCount()
+        let pendingCountAfterFlush = await reloadedOutbox.pendingCount()
         XCTAssertEqual(pendingCountAfterFlush, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: itemDir.path))
 
