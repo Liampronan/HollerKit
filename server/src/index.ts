@@ -1,56 +1,76 @@
-export { createBugReportHandler } from './handler.js'
-export { errorResponse, HollerKitError } from './errors.js'
-export { renderIssueBody } from './issueBody.js'
-export { defaultLimits, resolveLimits } from './limits.js'
-export { githubIssues } from './adapters/issue/github.js'
-export { s3Storage } from './adapters/storage/s3.js'
-export { supabaseStorage } from './adapters/storage/supabase.js'
-export { githubReleaseStorage } from './adapters/storage/githubRelease.js'
-export * as dispatchers from './dispatchers/index.js'
-export type {
-  AudioFile,
-  Breadcrumb,
-  Classifier,
-  ClassifyResult,
-  CreateBugReportHandlerOptions,
-  DispatchContext,
-  Dispatcher,
-  ImageFile,
-  InputMode,
-  IssueAdapter,
-  IssueResult,
-  LimitConfig,
-  NormalizedReport,
-  ReportFile,
-  StorageAdapter,
-  TranscriptPayload,
-  UploadedFile,
-} from './types.js'
-
+export { s3Storage, type S3StorageOptions } from './adapters/storage/s3.js'
 export {
-  apiKeysAuthenticator,
-  createHollerKitServer,
+  SUPABASE_UPLOAD_URL_TTL_SECONDS,
+  supabaseStorage,
+  type SupabaseStorageOptions,
+} from './adapters/storage/supabase.js'
+export { isCliEntrypoint, runCli, type CliIo } from './cli.js'
+export { errorResponse, HollerKitError } from './errors.js'
+export {
+  defaultLimits,
   defaultV1Limits,
-  extractBearerToken,
-  fakeStorage,
+  resolveLimits,
   resolveV1Limits,
+  type LimitConfig,
+  type V1LimitConfig,
+} from './limits.js'
+export {
+  apiKeys,
+  apiKeysAuthenticator,
+  extractBearerToken,
+  generateApiKey,
+  getApiKeyPrefix,
+  hashApiKey,
   staticTokens,
+  supabaseJwt,
+  type ApiKeysAuthOptions,
   type Authenticator,
   type AuthPrincipal,
-  type CreateHollerKitServerOptions,
-  type HollerKitStorageAdapter,
-  type V1LimitConfig,
-} from './v1/server.js'
+  type JwtClaims,
+  type SupabaseJwtOptions,
+} from './v1/auth.js'
+export {
+  runConformanceSuite,
+  type ConformanceResult,
+  type ConformanceStepResult,
+  type ConformanceSuiteOptions,
+} from './v1/conformance.js'
 export { memoryStore } from './v1/memoryStore.js'
 export {
+  postgresStore,
+  type PostgresHollerKitStore,
+  type PostgresStoreOptions,
+} from './v1/postgresStore.js'
+export {
+  createHollerKitServer,
+  fakeStorage,
+  parseQuestDefinitionArray,
+  parseQuestManifest,
+  type CreateHollerKitServerOptions,
+  type HollerKitStorageAdapter,
+} from './v1/server.js'
+export {
+  defaultSinkWhen,
+  flushOutbox,
+  shouldEnqueueSink,
+  validateUniqueSinks,
+  type FeedbackDetail,
+  type FlushOutboxOptions,
+  type FlushOutboxResult,
+  type HollerKitSink,
+  type HollerKitSinkDeliveryContext,
+  type SignedFeedbackAttachmentRecord,
+} from './v1/sinks.js'
+export {
   computeQuestContentHash,
-  hashApiKey,
   type ApiKeyRecord,
   type AttachmentKind,
   type BuildManifestQuestStatus,
+  type ClaimPendingOutboxInput,
   type CreateApiKeyInput,
   type CreateFeedbackStoreInput,
   type CreateUploadGrantInput,
+  type EnqueueOutboxInput,
   type FeedbackAttachmentInput,
   type FeedbackAttachmentRecord,
   type FeedbackDetailRecord,
@@ -62,6 +82,9 @@ export {
   type ListFeedbackFilter,
   type ListFeedbackResult,
   type ListQuestsFilter,
+  type MarkOutboxDeliveredInput,
+  type MarkOutboxFailedInput,
+  type OutboxRecord,
   type QuestBoardStatus,
   type QuestDefinitionInput,
   type QuestHashInput,
@@ -83,10 +106,3 @@ export {
   type UploadGrantRecord,
   type UpsertTesterInput,
 } from './v1/store.js'
-export {
-  runConformanceSuite,
-  type ConformanceResult,
-  type ConformanceStepResult,
-  type ConformanceSuiteOptions,
-} from './v1/conformance.js'
-

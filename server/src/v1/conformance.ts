@@ -265,9 +265,52 @@ export async function runConformanceSuite(
       token: options.agentKey,
     })
     assert.equal(retiredList.status, 200)
-    const betaRetired = retiredList.body.quests.find((q: any) => q.id === questBetaV1.id)
+    const betaRetired = retiredList.body.quests.find((q: any) => q.id === questBetaV1.id && q.version === 1)
     assert.ok(betaRetired)
     assert.ok(betaRetired.retiredAt)
+
+    // Create a new version (v2) of the retired questBeta -> v1 must remain retired (not overwritten to superseded)
+    const questBetaV2: QuestDefinitionInput = {
+      ...questBetaV1,
+      steps: [...questBetaV1.steps, 'Verify circular avatar mask'],
+    }
+    const sync5 = await requestJson('/v1/quests', {
+      method: 'PUT',
+      token: options.questsWriteKey,
+      body: {
+        version: 1,
+        sha: 'eeee4444',
+        quests: [questAlphaV1, questBetaV2],
+      },
+    })
+    assert.equal(sync5.status, 200)
+    const betaV2 = sync5.body.quests.find((q: any) => q.id === questBetaV1.id)
+    assert.equal(betaV2.version, 2)
+    assert.equal(betaV2.status, 'active')
+
+    const retiredAfterBetaV2 = await requestJson('/v1/quests?status=retired', {
+      method: 'GET',
+      token: options.agentKey,
+    })
+    assert.equal(retiredAfterBetaV2.status, 200)
+    const betaV1StillRetired = retiredAfterBetaV2.body.quests.find(
+      (q: any) => q.id === questBetaV1.id && q.version === 1,
+    )
+    assert.ok(betaV1StillRetired, 'Retired v1 must remain in status=retired when v2 is created')
+    assert.equal(betaV1StillRetired.status, 'retired')
+
+    // Re-retire questBeta so subsequent steps start with only questAlphaV1 active
+    const sync6 = await requestJson('/v1/quests', {
+      method: 'PUT',
+      token: options.questsWriteKey,
+      body: {
+        version: 1,
+        sha: 'ffff4444',
+        quests: [questAlphaV1],
+      },
+    })
+    assert.equal(sync6.status, 200)
+    assert.deepEqual(sync6.body.retiredIds, [questBetaV1.id])
   })
 
   // 4 & 5. POST /v1/builds/{build}/manifest and GET /v1/builds/{build}/pending
@@ -705,6 +748,20 @@ export async function runConformanceSuite(
     })
     assert.equal(hugeImageGrantRes.status, 413)
     assert.equal(hugeImageGrantRes.body.error.code, 'image_too_large')
+
+    // > maxVideoBytes video upload grant
+    const hugeVideoGrantRes = await requestJson('/v1/uploads', {
+      method: 'POST',
+      token: options.testerToken,
+      body: {
+        feedbackId: randomUUID(),
+        kind: 'video',
+        mimeType: 'video/mp4',
+        size: limits.maxVideoBytes + 1,
+      },
+    })
+    assert.equal(hugeVideoGrantRes.status, 413)
+    assert.equal(hugeVideoGrantRes.body.error.code, 'video_too_large')
 
     // > maxImages images on feedback
     const tooManyImagesRes = await requestJson('/v1/feedback', {

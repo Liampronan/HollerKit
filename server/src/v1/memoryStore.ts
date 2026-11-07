@@ -4,9 +4,11 @@ import {
   computeQuestContentHash,
   type ApiKeyRecord,
   type BuildManifestQuestStatus,
+  type ClaimPendingOutboxInput,
   type CreateApiKeyInput,
   type CreateFeedbackStoreInput,
   type CreateUploadGrantInput,
+  type EnqueueOutboxInput,
   type FeedbackAttachmentRecord,
   type FeedbackDetailRecord,
   type FeedbackEventRecord,
@@ -15,6 +17,9 @@ import {
   type ListFeedbackFilter,
   type ListFeedbackResult,
   type ListQuestsFilter,
+  type MarkOutboxDeliveredInput,
+  type MarkOutboxFailedInput,
+  type OutboxRecord,
   type QuestBoardStatus,
   type QuestRecordMode,
   type QuestResultCounts,
@@ -62,6 +67,9 @@ interface StoredQuestBuildRow {
   firstSeenAt: string
 }
 
+/**
+ * Creates an in-memory `HollerKitStore` implementation for tests and local development.
+ */
 export function memoryStore(): HollerKitStore {
   const quests: StoredQuestRow[] = []
   const questBuilds = new Map<string, StoredQuestBuildRow>()
@@ -73,9 +81,11 @@ export function memoryStore(): HollerKitStore {
   const triageByFeedback = new Map<string, TriageRecord[]>()
   const testers = new Map<string, TesterRecord>()
   const apiKeys = new Map<string, ApiKeyRecord>()
+  const outbox = new Map<number, OutboxRecord>()
 
   let nextEventId = 1
   let nextTriageId = 1
+  let nextOutboxId = 1
 
   function computeCounts(questId: string, questVersion: number): QuestResultCounts {
     const counts: QuestResultCounts = { pass: 0, fail: 0, unsure: 0, abandoned: 0 }
@@ -132,6 +142,8 @@ export function memoryStore(): HollerKitStore {
 
       const syncedIds = new Set<string>()
       const syncedRows: StoredQuestRow[] = []
+      const activatedIds: string[] = []
+      const reactivatedIds: string[] = []
 
       for (const def of input.quests) {
         const id = def.id.trim()
@@ -165,6 +177,7 @@ export function memoryStore(): HollerKitStore {
           existingMatch.status = 'active'
           existingMatch.retiredAt = null
           syncedRows.push(existingMatch)
+          reactivatedIds.push(id)
         } else {
           const nextVersion = maxVersionForQuest(id) + 1
           for (const row of quests) {
@@ -195,6 +208,7 @@ export function memoryStore(): HollerKitStore {
           }
           quests.push(created)
           syncedRows.push(created)
+          activatedIds.push(id)
         }
       }
 
@@ -213,6 +227,8 @@ export function memoryStore(): HollerKitStore {
 
       return {
         quests: syncedRows.map(toQuestVersionRecord),
+        activatedIds,
+        reactivatedIds,
         retiredIds,
       }
     },
@@ -515,6 +531,28 @@ export function memoryStore(): HollerKitStore {
       attachmentsByFeedback.set(record.id, attachmentRecords)
       triageByFeedback.set(record.id, [])
 
+      if (input.sinks && input.sinks.length > 0) {
+        const snapshot = cloneFeedback(record)
+        for (const sink of input.sinks) {
+          const shouldEnqueue = input.shouldEnqueueSink
+            ? input.shouldEnqueueSink(sink, snapshot)
+            : triageStatus === 'new'
+          if (!shouldEnqueue) continue
+          const outboxId = nextOutboxId++
+          outbox.set(outboxId, {
+            id: outboxId,
+            feedbackId: record.id,
+            sink,
+            attempts: 0,
+            lastError: null,
+            nextAttemptAt: nowIso,
+            deliveredAt: null,
+            link: null,
+            createdAt: nowIso,
+          })
+        }
+      }
+
       return { feedback: cloneFeedback(record), idempotent: false }
     },
 
@@ -624,6 +662,11 @@ export function memoryStore(): HollerKitStore {
       return tester ? { ...tester } : null
     },
 
+    async isTester(userId: string): Promise<boolean> {
+      const tester = testers.get(userId)
+      return Boolean(tester && tester.active)
+    },
+
     async upsertTester(input: UpsertTesterInput): Promise<TesterRecord> {
       const existing = testers.get(input.userId)
       const nowIso = (input.now ?? new Date()).toISOString()
@@ -639,6 +682,12 @@ export function memoryStore(): HollerKitStore {
     },
 
     async getApiKeyByHash(keyHash: string): Promise<ApiKeyRecord | null> {
+      const record = apiKeys.get(keyHash)
+      if (!record || record.revokedAt !== null) return null
+      return { ...record, scopes: [...record.scopes] }
+    },
+
+    async findApiKeyByHash(keyHash: string): Promise<ApiKeyRecord | null> {
       const record = apiKeys.get(keyHash)
       if (!record || record.revokedAt !== null) return null
       return { ...record, scopes: [...record.scopes] }
@@ -671,6 +720,77 @@ export function memoryStore(): HollerKitStore {
         }
       }
       return revoked
+    },
+
+    async enqueueOutbox(input: EnqueueOutboxInput): Promise<OutboxRecord> {
+      const nowIso = (input.now ?? new Date()).toISOString()
+      const id = nextOutboxId++
+      const record: OutboxRecord = {
+        id,
+        feedbackId: input.feedbackId,
+        sink: input.sink,
+        attempts: 0,
+        lastError: null,
+        nextAttemptAt: nowIso,
+        deliveredAt: null,
+        link: null,
+        createdAt: nowIso,
+      }
+      outbox.set(id, record)
+      return { ...record }
+    },
+
+    async claimPendingOutbox(input: ClaimPendingOutboxInput = {}): Promise<OutboxRecord[]> {
+      const nowMs = (input.now ?? new Date()).getTime()
+      const leaseMs = Math.max(0, input.leaseMs ?? 60_000)
+      const leaseUntilIso = new Date(nowMs + leaseMs).toISOString()
+      const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
+      const pending = Array.from(outbox.values())
+        .filter((row) => row.deliveredAt === null && new Date(row.nextAttemptAt).getTime() <= nowMs)
+        .sort((a, b) => {
+          const diff = new Date(a.nextAttemptAt).getTime() - new Date(b.nextAttemptAt).getTime()
+          if (diff !== 0) return diff
+          return a.id - b.id
+        })
+        .slice(0, limit)
+
+      return pending.map((row) => {
+        if (leaseMs > 0) {
+          row.nextAttemptAt = leaseUntilIso
+        }
+        return { ...row }
+      })
+    },
+
+    async markOutboxDelivered(input: MarkOutboxDeliveredInput): Promise<OutboxRecord | null> {
+      const row = outbox.get(input.id)
+      if (!row) return null
+      const nowIso = (input.now ?? new Date()).toISOString()
+      row.deliveredAt = nowIso
+      row.link = input.link ?? null
+
+      if (input.link && input.link.trim().length > 0) {
+        const fb = feedbacks.get(row.feedbackId)
+        if (fb && !fb.links.includes(input.link)) {
+          fb.links.push(input.link)
+          fb.updatedAt = nowIso
+        }
+      }
+
+      return { ...row }
+    },
+
+    async markOutboxFailed(input: MarkOutboxFailedInput): Promise<OutboxRecord | null> {
+      const row = outbox.get(input.id)
+      if (!row) return null
+      row.attempts += 1
+      row.lastError = input.error
+      row.nextAttemptAt = input.nextAttemptAt
+      return { ...row }
+    },
+
+    async close(): Promise<void> {
+      // No-op for in-memory store
     },
   }
 }

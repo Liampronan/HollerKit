@@ -1,27 +1,52 @@
 import {
-  createBugReportHandler,
-  dispatchers,
-  githubIssues,
+  apiKeys,
+  createHollerKitServer,
+  postgresStore,
+  supabaseJwt,
   supabaseStorage,
 } from 'npm:hollerkit-server'
 
-Deno.serve(createBugReportHandler({
-  appSecret: Deno.env.get('HOLLERKIT_APP_SECRET')!,
-  issue: githubIssues({
-    token: Deno.env.get('GITHUB_TOKEN')!,
-    repo: Deno.env.get('GITHUB_REPO')!,
-    labels: ['user-report'],
+/**
+ * Reads a required Deno environment variable or throws an error naming the missing variable.
+ */
+function requireEnv(name: string): string {
+  const value = Deno.env.get(name)?.trim()
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`)
+  }
+  return value
+}
+
+const supabaseUrl = requireEnv('SUPABASE_URL')
+const poolerDbUrl = requireEnv('SUPABASE_DB_POOLER_URL')
+const serviceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY')
+
+const store = postgresStore({
+  url: poolerDbUrl,
+  max: 2,
+  prepare: false,
+  fetchTypes: false,
+  idleTimeout: 5,
+  maxLifetime: 600,
+})
+
+const storage = supabaseStorage({
+  url: supabaseUrl,
+  serviceRoleKey,
+  bucket: Deno.env.get('HOLLERKIT_BUCKET') ?? 'hollerkit',
+})
+
+Deno.serve(
+  createHollerKitServer({
+    store,
+    storage,
+    authenticate: [
+      supabaseJwt({
+        jwksUrl: `${supabaseUrl}/auth/v1/.well-known/jwks.json`,
+        secret: Deno.env.get('SUPABASE_JWT_SECRET'),
+        store,
+      }),
+      apiKeys({ store }),
+    ],
   }),
-  storage: supabaseStorage({
-    url: Deno.env.get('SUPABASE_URL')!,
-    serviceRoleKey: Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
-    bucket: Deno.env.get('SUPABASE_BUCKET') ?? 'bug-report-assets',
-    signedUrlExpiresInSeconds: 60 * 60 * 24 * 7,
-  }),
-  dispatch: {
-    when: { allowlist: (Deno.env.get('AGENT_ALLOWLIST') ?? '').split(',').filter(Boolean) },
-    handler: dispatchers.comment({
-      template: (report) => `@your-bot-here please investigate this bug. Report ID: ${report.id}`,
-    }),
-  },
-}))
+)

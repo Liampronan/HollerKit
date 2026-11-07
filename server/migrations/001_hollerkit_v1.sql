@@ -26,7 +26,14 @@ CREATE TABLE IF NOT EXISTS hollerkit.quests (
   UNIQUE (id, content_hash)
 );
 
--- 2. quest_builds: tracks which quest versions are bundled in which app builds
+-- 2. builds: tracks registered app builds (including builds with empty manifests)
+CREATE TABLE IF NOT EXISTS hollerkit.builds (
+  build text PRIMARY KEY,
+  app_version text,
+  first_seen_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 2b. quest_builds: tracks which quest versions are bundled in which app builds
 CREATE TABLE IF NOT EXISTS hollerkit.quest_builds (
   quest_id text NOT NULL,
   quest_version integer NOT NULL,
@@ -176,6 +183,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending
 
 -- Enable Row Level Security on every table in hollerkit (deny-by-default for public/anon roles)
 ALTER TABLE hollerkit.quests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hollerkit.builds ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hollerkit.quest_builds ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hollerkit.feedback ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hollerkit.events ENABLE ROW LEVEL SECURITY;
