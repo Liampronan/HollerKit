@@ -1,4 +1,3 @@
-import CryptoKit
 import SwiftUI
 
 #if canImport(UIKit)
@@ -8,6 +7,7 @@ import UIKit
 public struct BugReportSheet: View {
     private let configuration: HollerKitConfiguration?
     private let breadcrumbs: BreadcrumbStore
+    private let outboxStore: OutboxStore
     private let invocationAttachments: [HollerKitAttachment]
     @Environment(\.dismiss) private var dismiss
     @State private var comment = ""
@@ -16,15 +16,17 @@ public struct BugReportSheet: View {
     @StateObject private var speechCapture = SpeechCaptureController()
     @State private var isSubmitting = false
     @State private var submissionError: String?
-    @State private var submittedIssueURL: URL?
+    @State private var submissionOutcome: OutboxSubmissionOutcome?
 
     init(
         configuration: HollerKitConfiguration?,
         breadcrumbs: BreadcrumbStore,
+        outboxStore: OutboxStore? = nil,
         invocationAttachments: [HollerKitAttachment] = []
     ) {
         self.configuration = configuration
         self.breadcrumbs = breadcrumbs
+        self.outboxStore = outboxStore ?? OutboxStore(rootDirectoryURL: configuration?.outboxDirectoryURL)
         self.invocationAttachments = invocationAttachments
     }
 
@@ -83,9 +85,26 @@ public struct BugReportSheet: View {
                     }
                 }
 
-                if let submittedIssueURL {
-                    Section("Submitted") {
-                        Link("Open GitHub Issue", destination: submittedIssueURL)
+                if let submissionOutcome {
+                    Section("Status") {
+                        switch submissionOutcome {
+                        case .sent(let response):
+                            Label("Submitted (\(response.feedback.id.prefix(8)))", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        case .queued(_, let reason):
+                            if Self.isAuthenticationFailureReason(reason) {
+                                Label("Saved to outbox — sign in to finish sending", systemImage: "person.badge.key.fill")
+                                    .foregroundStyle(.orange)
+                            } else {
+                                Label("Saved to outbox — will send when online", systemImage: "tray.and.arrow.up.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                            if let reason, !reason.isEmpty {
+                                Text(reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
 
@@ -100,7 +119,7 @@ public struct BugReportSheet: View {
             .navigationTitle("Report a Bug")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    if submittedIssueURL != nil {
+                    if submissionOutcome != nil {
                         Button("Done") {
                             dismiss()
                         }
@@ -145,7 +164,9 @@ public struct BugReportSheet: View {
     #endif
 
     private var canSubmit: Bool {
-        guard configuration != nil, !isSubmitting, submittedIssueURL == nil else { return false }
+        guard let configuration, configuration.isEnabled(), !isSubmitting, submissionOutcome == nil else {
+            return false
+        }
         if isAudioOnly {
             return speechCapture.transcript != nil
         }
@@ -161,10 +182,24 @@ public struct BugReportSheet: View {
         return false
     }
 
+    private static func isAuthenticationFailureReason(_ reason: String?) -> Bool {
+        guard let lower = reason?.lowercased() else { return false }
+        return lower.contains("authentication token")
+            || lower.contains("unauthorized")
+            || lower.contains("forbidden")
+            || lower.contains("401")
+            || lower.contains("403")
+    }
+
     @MainActor
     private func submit() async {
         guard let configuration else {
             submissionError = "HollerKit has not been configured."
+            return
+        }
+        guard configuration.isEnabled() else {
+            HollerKit.reconcileEnablement()
+            dismiss()
             return
         }
 
@@ -173,17 +208,21 @@ public struct BugReportSheet: View {
         defer { isSubmitting = false }
 
         do {
-            let client = MultipartClient(endpoint: configuration.endpoint, appSecret: configuration.appSecret)
-            let response = try await client.submit(HollerKitReportPayload(
+            let payload = HollerKitReportPayload(
                 inputMode: configuration.inputMode,
                 comment: isAudioOnly ? nil : normalizedComment,
                 transcript: speechCapture.transcript,
                 metadata: MetadataCollector.collect(extra: configuration.metadata()),
                 breadcrumbs: configuration.captureBreadcrumbs ? breadcrumbs.snapshot() : [],
-                userIdHash: hashedUserID(configuration.userID()),
                 images: isAudioOnly ? [] : imageAttachments()
-            ))
-            submittedIssueURL = response.issueUrl
+            )
+            let (request, attachments) = payload.toFeedbackSubmission()
+            let client = APIClient(configuration: configuration)
+            submissionOutcome = try await outboxStore.submit(
+                request: request,
+                attachments: attachments,
+                using: client
+            )
         } catch {
             submissionError = error.localizedDescription
         }
@@ -192,12 +231,6 @@ public struct BugReportSheet: View {
     private var normalizedComment: String? {
         let trimmed = comment.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private func hashedUserID(_ userID: String?) -> String? {
-        guard let userID, !userID.isEmpty else { return nil }
-        let digest = SHA256.hash(data: Data(userID.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private func imageAttachments() -> [HollerKitAttachment] {
@@ -220,7 +253,6 @@ public struct BugReportSheet: View {
         guard let configuration else { return }
         await speechCapture.toggle(configuration: configuration.audio)
     }
-
 }
 
 struct BugReportImage: Identifiable, Hashable {
@@ -253,7 +285,7 @@ struct BugReportImage: Identifiable, Hashable {
 }
 
 @MainActor
-private final class SpeechCaptureController: ObservableObject {
+final class SpeechCaptureController: ObservableObject {
     @Published var isCapturing = false
     @Published var transcript: HollerKitTranscript?
     @Published var errorMessage: String?
@@ -332,7 +364,7 @@ private final class SpeechCaptureController: ObservableObject {
     }
 }
 
-private struct ImageAttachmentThumbnail: View {
+struct ImageAttachmentThumbnail: View {
     var image: BugReportImage
 
     var body: some View {

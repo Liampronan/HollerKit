@@ -31,14 +31,12 @@ The repo is organized as:
 
 Before enabling HollerKit in a production app target:
 
-- Gate the SDK behind a build flag, feature flag, TestFlight cohort, staff account check, or equivalent access control.
-- Deploy the server endpoint behind platform or reverse-proxy body limits that match `maxBodyBytes`.
-- Add rate limiting, abuse monitoring, and alerting around the report endpoint.
-- Treat the iOS `appSecret` as a shared client signing secret, not as strong authentication for public traffic.
-- Consider app attestation, authenticated users, or server-side allowlists for public or high-volume deployments.
-- Store GitHub, Supabase, S3, and other service credentials only on the server.
-- Use private attachment storage with signed URLs or an authenticated asset proxy unless reports are intentionally public.
-- Add `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription` only to targets that enable audio dictation.
+- Gate the SDK at runtime using `isEnabled` (e.g. `HollerKitEnvironment.isDebugOrTestFlight`, a feature flag, or a staff account check) and enforce tester allowlists on the server (`hollerkit.testers`).
+- Deploy the server endpoint behind platform or reverse-proxy body limits.
+- Add rate limiting, abuse monitoring, and alerting around the `/v1` endpoints.
+- Store Supabase service role keys, S3 credentials, and API keys only on the server; pass the host app's current user session token dynamically via `auth: { await Auth.currentAccessToken() }` without caching tokens in HollerKit.
+- Use private attachment storage with presigned upload and read URLs.
+- Include `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription` in `Info.plist` for any target that ships HollerKit with audio dictation—including Release targets when TestFlight testers use it.
 - Confirm report contents are acceptable for your privacy policy, retention policy, and support workflow.
 
 ## Demo UI
@@ -50,7 +48,7 @@ Before enabling HollerKit in a production app target:
 
 ## iOS Quickstart
 
-Add the local Swift package from `ios/` while developing.
+Add the local Swift package from `ios/` while developing (requires **iOS 18+**).
 
 In Xcode:
 
@@ -65,52 +63,31 @@ Configure HollerKit when your app starts:
 import HollerKit
 
 HollerKit.configure(
-    endpoint: URL(string: "https://example.com/bug-report")!,
-    appSecret: "shared-with-server",
+    server: URL(string: "https://example.supabase.co/functions/v1/hollerkit")!,
+    auth: { try await supabase.auth.session.accessToken },
+    isEnabled: { HollerKitEnvironment.isDebugOrTestFlight },
     invocation: [.shake, .screenshot],
     inputMode: .textAndAudio,
-    userID: { Auth.currentUserId },
     metadata: { ["experiment": Flags.activeExperiment] },
     captureBreadcrumbs: true
 )
 ```
 
-For teams that only want HollerKit in debug, internal, or TestFlight-style builds, gate both configuration and presentation behind a compilation condition:
+### Runtime Gating (`isEnabled`) vs. `#if DEBUG`
+
+**TestFlight builds are Release archives.** Gating HollerKit behind `#if DEBUG` silently strips it from TestFlight builds right when QA and beta testers need it most. Instead, gate HollerKit at runtime with the `isEnabled` closure:
+
+- When `isEnabled()` returns `false` (for example in App Store builds when using `HollerKitEnvironment.isDebugOrTestFlight`), `HollerKit` shows no UI, attaches no shake or screenshot observers, records no breadcrumbs, and turns `presentBugReport()` / `presentQuests()` into no-ops.
+- Because TestFlight archives are built with the Release configuration, `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription` **must** be present in any target that ships HollerKit, including Release when TestFlight testers use voice notes.
+- **Recommended architecture:** Wrap `HollerKit` behind a thin app-side protocol or facade (with a live implementation calling `HollerKit` and a no-op implementation). That keeps call sites decoupled across your app and lets you switch to compile-time exclusion in a single file later if you ever stop using HollerKit in TestFlight.
 
 ```swift
-#if DEBUG || INTERNAL
-import HollerKit
-#endif
-
-@main
-struct MyApp: App {
-    init() {
-        #if DEBUG || INTERNAL
-        HollerKit.configure(
-            endpoint: URL(string: "https://example.com/bug-report")!,
-            appSecret: "shared-with-server",
-            invocation: [.shake, .screenshot],
-            inputMode: .textAndAudio
-        )
-        #endif
-    }
-
-    var body: some Scene {
-        WindowGroup {
-            #if DEBUG || INTERNAL
-            RootView()
-                .hollerKitPresenter()
-            #else
-            RootView()
-            #endif
-        }
-    }
+protocol FeedbackReporter {
+    @MainActor func configure()
+    @MainActor func breadcrumb(_ message: String, category: String?)
+    @MainActor func presentBugReport()
 }
 ```
-
-Add `INTERNAL` as a Swift active compilation condition for any non-release scheme that should include HollerKit.
-
-If HollerKit is only enabled in `DEBUG` or `INTERNAL` builds, you can keep the microphone and speech-recognition usage strings in those non-release app targets only. Release targets that do not link or present HollerKit do not need to request those permissions.
 
 Choose how HollerKit can be invoked with the `invocation` option:
 
