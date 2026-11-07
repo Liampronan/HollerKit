@@ -9,6 +9,7 @@ public struct BugReportSheet: View {
     private let breadcrumbs: BreadcrumbStore
     private let outboxStore: OutboxStore
     private let invocationAttachments: [HollerKitAttachment]
+    @ObservedObject private var questState = HollerKit.quests
     @Environment(\.dismiss) private var dismiss
     @State private var comment = ""
     @State private var images: [BugReportImage] = []
@@ -33,6 +34,27 @@ public struct BugReportSheet: View {
     public var body: some View {
         NavigationStack {
             Form {
+                if configuration?.quests != nil || !questState.quests.isEmpty {
+                    Section {
+                        Button {
+                            dismiss()
+                            Task { @MainActor in
+                                HollerKit.presentQuests()
+                            }
+                        } label: {
+                            HStack {
+                                Label("Quests (\(questState.pendingCount))", systemImage: "flag.checkered")
+                                    .fontWeight(.medium)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityIdentifier("HollerKitOpenQuestsRow")
+                    }
+                }
+
                 if !isAudioOnly {
                     Section {
                         TextEditor(text: $comment)
@@ -261,6 +283,11 @@ struct BugReportImage: Identifiable, Hashable {
 
     #if canImport(UIKit)
     var image: UIImage
+
+    init(title: String, image: UIImage) {
+        self.title = title
+        self.image = image
+    }
 
     init?(attachment: HollerKitAttachment) {
         guard let image = UIImage(data: attachment.data) else { return nil }

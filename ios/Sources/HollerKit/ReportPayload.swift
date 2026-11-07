@@ -99,7 +99,7 @@ public struct HollerKitReportPayload: Sendable {
                 payload["category"] = category
             }
             return FeedbackEventInput(
-                offsetSeconds: 0,
+                offsetSeconds: crumb.offsetSeconds ?? 0,
                 kind: "breadcrumb",
                 payload: payload
             )

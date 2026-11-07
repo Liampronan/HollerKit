@@ -99,6 +99,366 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(store.snapshot().map(\.message), ["two", "three"])
     }
 
+    func testBreadcrumbStoreTracksOffsetSecondsDuringActiveQuest() {
+        var store = BreadcrumbStore(capacity: 10)
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+        store.append(.init(timestamp: t0.addingTimeInterval(-5), message: "Before quest"))
+        XCTAssertNil(store.snapshot().last?.offsetSeconds)
+
+        store.beginQuestRun(startedAt: t0)
+        store.append(.init(timestamp: t0.addingTimeInterval(3.5), category: "ui", message: "Tapped card"))
+        store.append(.init(timestamp: t0.addingTimeInterval(9.25), category: "nav", message: "Returned to feed"))
+
+        let snapshot = store.snapshot()
+        XCTAssertEqual(snapshot.count, 3)
+        XCTAssertEqual(snapshot[1].offsetSeconds ?? -1, 3.5, accuracy: 0.001)
+        XCTAssertEqual(snapshot[2].offsetSeconds ?? -1, 9.25, accuracy: 0.001)
+
+        let events = store.questEvents(since: t0)
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(events[0].kind, "breadcrumb")
+        XCTAssertEqual(events[0].offsetSeconds, 3.5, accuracy: 0.001)
+        XCTAssertEqual(events[0].payload["message"], "Tapped card")
+        XCTAssertEqual(events[1].offsetSeconds, 9.25, accuracy: 0.001)
+
+        store.endQuestRun()
+        store.append(.init(timestamp: t0.addingTimeInterval(15), message: "After quest"))
+        XCTAssertNil(store.snapshot().last?.offsetSeconds)
+    }
+
+    func testCanonicalQuestContentHashMatchesProtocolServerVectors() {
+        let questAlpha = QuestDefinition(
+            id: "feed-detail-zoom",
+            title: "  Open a feed card and come back  ",
+            area: " feed ",
+            setup: [" Settings -> Experiments -> Feed on "],
+            steps: ["Scroll to the third card", "Tap it; the zoom transition plays", "Go back"],
+            expect: ["Back returns to the same card at the same scroll position"],
+            needs: ["device", "backend"],
+            record: .suggested,
+            start: "trashapp://feed",
+            source: QuestManifestSource(pr: 55, added: "2026-11-07")
+        )
+
+        let expectedAlphaJSON = #"{"area":"feed","expect":["Back returns to the same card at the same scroll position"],"needs":["device","backend"],"record":"suggested","setup":["Settings -> Experiments -> Feed on"],"start":"trashapp://feed","steps":["Scroll to the third card","Tap it; the zoom transition plays","Go back"],"title":"Open a feed card and come back"}"#
+        XCTAssertEqual(canonicalQuestJSON(questAlpha), expectedAlphaJSON)
+        XCTAssertEqual(
+            computeQuestContentHash(questAlpha),
+            "2b07ae4a0b23655760ad5bc9fc4c63fccce974368679975dc9996893a1b6e742"
+        )
+
+        // Changing non-functional id or source fields must not alter contentHash
+        var questAlphaDifferentProvenance = questAlpha
+        questAlphaDifferentProvenance.id = "renamed-id"
+        questAlphaDifferentProvenance.source = QuestManifestSource(pr: 999, sha: "deadbeef", added: "2027-01-01")
+        XCTAssertEqual(questAlphaDifferentProvenance.contentHash, questAlpha.contentHash)
+
+        let questBeta = QuestDefinition(
+            id: "profile-avatar-crop",
+            title: "Crop a new avatar photo",
+            area: "profile",
+            steps: ["Open Profile", "Tap avatar", "Pinch to zoom and save"],
+            expect: ["Updated avatar persists after reload"],
+            source: QuestManifestSource(pr: 56, added: "2026-11-07")
+        )
+
+        let expectedBetaJSON = #"{"area":"profile","expect":["Updated avatar persists after reload"],"needs":[],"record":"optional","setup":[],"start":null,"steps":["Open Profile","Tap avatar","Pinch to zoom and save"],"title":"Crop a new avatar photo"}"#
+        XCTAssertEqual(canonicalQuestJSON(questBeta), expectedBetaJSON)
+        XCTAssertEqual(
+            computeQuestContentHash(questBeta),
+            "0bfdcddc41b204e0e20dbe05257e54a5a71c32bc82409cca75358dce22c8cd61"
+        )
+    }
+
+    func testQuestStoreLoadsManifestEvaluatesNeedsAndCachesOfflineState() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-queststore-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let manifestFileURL = tempDir.appendingPathComponent("hollerkit-quests.json")
+        let manifestJSON = """
+        {
+          "version": 1,
+          "quests": [
+            {
+              "id": "feed-detail-zoom",
+              "title": "Open a feed card and come back",
+              "area": "feed",
+              "setup": ["Settings -> Experiments -> Feed on"],
+              "steps": ["Scroll to the third card", "Tap it; the zoom transition plays", "Go back"],
+              "expect": ["Back returns to the same card at the same scroll position"],
+              "needs": ["device", "backend"],
+              "record": "suggested",
+              "start": "trashapp://feed"
+            }
+          ]
+        }
+        """
+        try Data(manifestJSON.utf8).write(to: manifestFileURL)
+
+        let store = QuestStore(cacheDirectoryURL: tempDir.appendingPathComponent("Cache", isDirectory: true))
+        let config = HollerKitQuestsConfiguration.fileURL(manifestFileURL)
+        let definitions = try store.loadManifest(from: config)
+        XCTAssertEqual(definitions.count, 1)
+        XCTAssertEqual(definitions.first?.id, "feed-detail-zoom")
+        XCTAssertEqual(
+            definitions.first?.contentHash,
+            "2b07ae4a0b23655760ad5bc9fc4c63fccce974368679975dc9996893a1b6e742"
+        )
+
+        let simulatorOfflineWarnings = QuestStore.evaluateNeedWarnings(
+            for: ["device", "backend"],
+            isSimulator: true,
+            isBackendReachable: false
+        )
+        XCTAssertEqual(simulatorOfflineWarnings, ["Requires physical device", "Requires reachable backend"])
+
+        let deviceOnlineWarnings = QuestStore.evaluateNeedWarnings(
+            for: ["device", "backend"],
+            isSimulator: false,
+            isBackendReachable: true
+        )
+        XCTAssertTrue(deviceOnlineWarnings.isEmpty)
+
+        // Sync with stubbed server and verify local cache persistence
+        let session = makeStubSession()
+        StubURLProtocol.setHandler { request, _ in
+            let url = request.url!
+            let json = """
+            {
+              "ok": true,
+              "build": "200",
+              "pendingCount": 0,
+              "quests": [
+                {
+                  "id": "feed-detail-zoom",
+                  "version": 2,
+                  "contentHash": "2b07ae4a0b23655760ad5bc9fc4c63fccce974368679975dc9996893a1b6e742",
+                  "questStatus": "active",
+                  "boardStatus": "passed",
+                  "title": "Open a feed card and come back",
+                  "area": "feed",
+                  "setup": ["Settings -> Experiments -> Feed on"],
+                  "steps": ["Scroll to the third card", "Tap it; the zoom transition plays", "Go back"],
+                  "expect": ["Back returns to the same card at the same scroll position"],
+                  "needs": ["device", "backend"],
+                  "record": "suggested",
+                  "start": "trashapp://feed",
+                  "counts": { "pass": 1, "fail": 0, "unsure": 0, "abandoned": 0 }
+                }
+              ]
+            }
+            """
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["hollerkit-protocol": "1"]
+            )!
+            return (response, Data(json.utf8))
+        }
+
+        let client = APIClient(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            session: session
+        )
+
+        let synced = try await store.syncWithServer(
+            definitions: definitions,
+            build: "200",
+            appVersion: "1.0.0",
+            client: client,
+            isSimulator: true
+        )
+        XCTAssertEqual(synced.count, 1)
+        XCTAssertEqual(synced.first?.status, .passed)
+        XCTAssertEqual(synced.first?.version, 2)
+
+        // Offline load from cache preserves `.passed` status and version 2
+        let cachedFallback = store.buildLocalBoardItems(
+            from: definitions,
+            build: "200",
+            isSimulator: true,
+            isBackendReachable: false
+        )
+        XCTAssertEqual(cachedFallback.first?.status, .passed)
+        XCTAssertEqual(cachedFallback.first?.version, 2)
+        XCTAssertEqual(cachedFallback.first?.needWarnings, ["Requires physical device", "Requires reachable backend"])
+    }
+
+    @MainActor
+    func testHollerKitQuestStateLifecycleRouteMarkAndSubmission() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-queststate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let navigatedRoutes = LockedBox<[String]>([])
+        let submittedFeedbackBox = LockedBox<[String: Any]?>(nil)
+        let uploadedMarksCountBox = LockedBox<Int>(0)
+        let session = makeStubSession()
+
+        StubURLProtocol.setHandler { request, bodyData in
+            let url = request.url!
+
+            if url.path.hasSuffix("/manifest") {
+                let json = """
+                {
+                  "ok": true,
+                  "build": "300",
+                  "pendingCount": 1,
+                  "quests": [
+                    {
+                      "id": "feed-detail-zoom",
+                      "version": 1,
+                      "contentHash": "2b07ae4a0b23655760ad5bc9fc4c63fccce974368679975dc9996893a1b6e742",
+                      "questStatus": "active",
+                      "boardStatus": "pending",
+                      "title": "Open a feed card and come back",
+                      "area": "feed",
+                      "setup": ["Settings -> Experiments -> Feed on"],
+                      "steps": ["Scroll to the third card", "Tap it; the zoom transition plays", "Go back"],
+                      "expect": ["Back returns to the same card at the same scroll position"],
+                      "needs": ["device", "backend"],
+                      "record": "suggested",
+                      "start": "trashapp://feed",
+                      "counts": { "pass": 0, "fail": 0, "unsure": 0, "abandoned": 0 }
+                    }
+                  ]
+                }
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["hollerkit-protocol": "1"])!
+                return (response, Data(json.utf8))
+            }
+
+            if url.path.hasSuffix("/v1/uploads") {
+                let payload = try JSONSerialization.jsonObject(with: bodyData ?? Data()) as? [String: Any]
+                let feedbackId = payload?["feedbackId"] as? String ?? "id"
+                let json = """
+                {
+                  "ok": true,
+                  "key": "\(feedbackId)/mark-0.png",
+                  "url": "https://storage.hollerkit.test/upload/\(feedbackId)/mark-0.png",
+                  "expiresAt": "2026-11-07T01:00:00Z"
+                }
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["hollerkit-protocol": "1"])!
+                return (response, Data(json.utf8))
+            }
+
+            if url.host == "storage.hollerkit.test" {
+                uploadedMarksCountBox.withLock { $0 += 1 }
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!
+                return (response, Data())
+            }
+
+            if url.path.hasSuffix("/v1/feedback") {
+                let payload = try JSONSerialization.jsonObject(with: bodyData ?? Data()) as? [String: Any]
+                submittedFeedbackBox.withLock { $0 = payload }
+                let id = payload?["id"] as? String ?? UUID().uuidString.lowercased()
+                let json = """
+                {
+                  "ok": true,
+                  "idempotent": false,
+                  "feedback": {
+                    "id": "\(id)",
+                    "kind": "quest_run",
+                    "questId": "feed-detail-zoom",
+                    "questVersion": 1,
+                    "result": "pass",
+                    "build": "300",
+                    "submitterId": "tester-1",
+                    "createdAt": "2026-11-07T00:00:00Z",
+                    "updatedAt": "2026-11-07T00:00:00Z"
+                  }
+                }
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: "HTTP/1.1", headerFields: ["hollerkit-protocol": "1"])!
+                return (response, Data(json.utf8))
+            }
+
+            throw URLError(.badURL)
+        }
+
+        let questDef = QuestDefinition(
+            id: "feed-detail-zoom",
+            title: "Open a feed card and come back",
+            area: "feed",
+            setup: ["Settings -> Experiments -> Feed on"],
+            steps: ["Scroll to the third card", "Tap it; the zoom transition plays", "Go back"],
+            expect: ["Back returns to the same card at the same scroll position"],
+            needs: ["device", "backend"],
+            record: .suggested,
+            start: "trashapp://feed"
+        )
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            metadata: { ["appBuild": "300", "appVersion": "1.0.0"] },
+            quests: .definitions([questDef]) { route in
+                navigatedRoutes.withLock { $0.append(route) }
+            },
+            urlSession: session,
+            outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
+        ))
+
+        await HollerKit.quests.refresh()
+        XCTAssertEqual(HollerKit.quests.pendingCount, 1)
+        XCTAssertEqual(HollerKit.quests.quests.count, 1)
+
+        guard let item = HollerKit.quests.quests.first else {
+            XCTFail("Expected quest board item")
+            return
+        }
+
+        let startDate = Date(timeIntervalSince1970: 1_700_000_000)
+        HollerKit.quests.startQuest(item, startedAt: startDate)
+        XCTAssertEqual(navigatedRoutes.withLock { $0 }, ["trashapp://feed"])
+        XCTAssertNotNil(HollerKit.quests.activeQuest)
+
+        HollerKit.quests.toggleStep(at: 0)
+        HollerKit.quests.toggleStep(at: 2)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.stepsChecked, [true, false, true])
+
+        let mark = HollerKit.quests.captureMark(
+            label: "Zoom transition glitch",
+            imageData: Data([0x89, 0x50, 0x4E, 0x47]),
+            at: startDate.addingTimeInterval(4.2)
+        )
+        XCTAssertNotNil(mark)
+        XCTAssertEqual(mark?.offsetSeconds ?? -1, 4.2, accuracy: 0.001)
+
+        let outcome = try await HollerKit.quests.submitActiveQuest(
+            result: .pass,
+            comment: "Smooth transition verified",
+            transcript: nil,
+            endedAt: startDate.addingTimeInterval(10.0)
+        )
+
+        if case .sent(let response) = outcome {
+            XCTAssertEqual(response.feedback.kind, "quest_run")
+            XCTAssertEqual(response.feedback.result, "pass")
+        } else {
+            XCTFail("Expected quest submission to be sent immediately")
+        }
+
+        XCTAssertNil(HollerKit.quests.activeQuest)
+        XCTAssertEqual(HollerKit.quests.pendingCount, 0)
+        XCTAssertEqual(HollerKit.quests.completedQuests.count, 1)
+        XCTAssertEqual(uploadedMarksCountBox.withLock { $0 }, 1)
+
+        let submitted = submittedFeedbackBox.withLock { $0 }
+        XCTAssertEqual(submitted?["kind"] as? String, "quest_run")
+        XCTAssertEqual(submitted?["questId"] as? String, "feed-detail-zoom")
+        XCTAssertEqual(submitted?["questVersion"] as? Int, 1)
+        XCTAssertEqual(submitted?["result"] as? String, "pass")
+        XCTAssertEqual(submitted?["stepsChecked"] as? [Bool], [true, false, true])
+    }
+
     func testInputModeWireValues() {
         XCTAssertEqual(HollerKitInputMode.textAndAudio.wireValue, "text-and-audio")
         XCTAssertEqual(HollerKitInputMode.textOnly.wireValue, "text-only")

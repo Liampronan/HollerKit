@@ -68,6 +68,7 @@ public struct HollerKitQuestsConfiguration: @unchecked Sendable {
     public enum ManifestSource: Sendable, Equatable {
         case bundled(String)
         case fileURL(URL)
+        case definitions([QuestDefinition])
     }
 
     public var manifestSource: ManifestSource
@@ -92,6 +93,26 @@ public struct HollerKitQuestsConfiguration: @unchecked Sendable {
         HollerKitQuestsConfiguration(
             manifestSource: .bundled(resourceName),
             bundle: bundle,
+            routes: routes
+        )
+    }
+
+    public static func fileURL(
+        _ url: URL,
+        routes: (@Sendable @MainActor (String) -> Void)? = nil
+    ) -> HollerKitQuestsConfiguration {
+        HollerKitQuestsConfiguration(
+            manifestSource: .fileURL(url),
+            routes: routes
+        )
+    }
+
+    public static func definitions(
+        _ quests: [QuestDefinition],
+        routes: (@Sendable @MainActor (String) -> Void)? = nil
+    ) -> HollerKitQuestsConfiguration {
+        HollerKitQuestsConfiguration(
+            manifestSource: .definitions(quests),
             routes: routes
         )
     }

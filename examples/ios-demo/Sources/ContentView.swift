@@ -2,6 +2,7 @@ import HollerKit
 import SwiftUI
 
 struct ContentView: View {
+    @ObservedObject private var questState = HollerKit.quests
     @State private var didOpenReport = false
 
     var body: some View {
@@ -9,9 +10,14 @@ struct ContentView: View {
             CheckoutMockScreen()
                 .navigationTitle("Checkout")
                 .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Quests (\(questState.pendingCount))") {
+                            HollerKit.presentQuests()
+                        }
+                    }
                     ToolbarItem(placement: .primaryAction) {
                         Button("Report") {
-                            HollerKit.present()
+                            HollerKit.presentBugReport()
                         }
                     }
                 }
@@ -20,7 +26,7 @@ struct ContentView: View {
             guard !didOpenReport else { return }
             didOpenReport = true
             try? await Task.sleep(for: .milliseconds(650))
-            HollerKit.present()
+            HollerKit.presentBugReport()
         }
     }
 }
