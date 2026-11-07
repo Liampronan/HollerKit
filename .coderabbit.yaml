@@ -21,6 +21,8 @@ reviews:
     - "!**/node_modules/**"
     - "!server/dist/**"
     - "!server/package-lock.json"
+    - "!mcp/dist/**"
+    - "!mcp/package-lock.json"
     - "!**/.build/**"
     - "!**/DerivedData/**"
     - "!**/.swiftpm/**"
@@ -32,25 +34,28 @@ reviews:
     - path: "ios/Sources/HollerKit/**/*.swift"
       instructions: |
         Review the iOS SDK with a focus on:
-        1. Swift 6 strict concurrency compliance (`Sendable` conformances, `@MainActor` isolation on `HollerKit`, `HollerKitPresenterState`, `BugReportSheet`, `AnnotationView`, and `SpeechTranscriber`, and safe cross-actor callbacks).
-        2. Multipart wire protocol and HMAC signing parity (`MultipartClient`, `MultipartBodyBuilder`, `ReportPayload`): ensure `x-hollerkit-timestamp` and `x-hollerkit-signature` (`HMAC-SHA256` of `body || timestamp`) stay strictly aligned with `server/src/hmac.ts`, `PROTOCOL.md`, and `openapi.yaml`.
+        1. Swift 6 strict concurrency compliance (`Sendable` conformances, `@MainActor` isolation on `HollerKit`, `HollerKitPresenterState`, `HollerKitQuestState`, `BugReportSheet`, `AnnotationView`, and `SpeechTranscriber`, and safe cross-actor callbacks).
+        2. `/v1` wire protocol and offline outbox reliability (`APIClient`, `OutboxStore`, `QuestStore`, `ReportPayload`): ensure `HollerKit-Protocol: 1`, presigned upload grant handling, and idempotent feedback/quest-run submissions stay aligned with `QUEST_PROTOCOL.md` and `quest-protocol.yaml`.
         3. Speech recognition and audio capture lifecycle (`SpeechTranscriber`, `SpeechNoteCapture`, `AudioOnlyCaptureView`): proper `AVAudioEngine` / `SFSpeechRecognizer` cleanup, permission handling, and transcript-first privacy defaults.
-        4. UI, screenshot capture, and annotation correctness (`AnnotationView`, `ScreenshotDetector`, `ShakeDetector`, `HollerKitPresenterModifier`): safe window/scene lookup, image rendering scale and redaction accuracy, and clean sheet presentation/dismissal state.
+        4. UI, screenshot capture, and quest overlay correctness (`AnnotationView`, `QuestOverlayWindow`, `QuestBoardView`, `ScreenshotDetector`, `ShakeDetector`, `HollerKitPresenterModifier`): safe window/scene lookup, image redaction accuracy, and clean presentation/dismissal state.
     - path: "server/src/**/*.ts"
       instructions: |
         Review the server package with a focus on:
-        1. Security, HMAC verification, and DoS resilience (`hmac.ts`, `limits.ts`, `normalize.ts`, `handler.ts`): constant-time signature comparison, streaming body byte-limit enforcement (`maxBodyBytes`) prior to full buffering, timestamp drift checks, and strict multipart field/MIME validation.
-        2. Storage, issue adapter, and dispatcher reliability (`adapters/storage/*.ts`, `adapters/issue/github.ts`, `dispatchers/*.ts`): safe storage key construction, structured error propagation via `HollerKitError`, and preventing secret or token leakage in responses or logs.
-        3. Wire contract parity with `ios/Sources/HollerKit`, `openapi.yaml`, and `PROTOCOL.md`.
-    - path: "openapi.yaml"
+        1. Security, authentication, and DoS resilience (`v1/auth.ts`, `v1/limits.ts`, `v1/server.ts`, `v1/postgresStore.ts`): JWT and `hk_` API key scope checks, bound upload grant validation, request size/count limits, and parameterized SQL queries.
+        2. Storage and sink reliability (`adapters/storage/*.ts`, `v1/sinks.ts`): safe storage key construction, structured error propagation via `HollerKitError`, and preventing secret or token leakage in responses or logs.
+        3. Wire contract parity with `ios/Sources/HollerKit`, `mcp/src/`, `quest-protocol.yaml`, and `QUEST_PROTOCOL.md`.
+    - path: "mcp/src/**/*.ts"
       instructions: |
-        Ensure OpenAPI 3.1 schema definitions, multipart field encodings, security headers (`x-hollerkit-timestamp`, `x-hollerkit-signature`, `x-hollerkit-request-id`), error codes, and default limits remain synchronized with `PROTOCOL.md`, `server/src/`, and `ios/Sources/HollerKit/`.
+        Review the MCP package with a focus on JSON-RPC 2.0 stdio compliance, input validation, timeout handling, and parity with `/v1` server endpoints (`feedback_inbox`, `feedback_get`, `feedback_triage`, `quests_pending`, `quests_retirable`).
+    - path: "quest-protocol.yaml"
+      instructions: |
+        Ensure OpenAPI 3.1 schema definitions, `HollerKit-Protocol: 1` headers, bearer auth scopes (`tester`, `quests:write`, `agent:read`, `agent:triage`), error codes, and default limits remain synchronized with `QUEST_PROTOCOL.md`, `server/src/v1/`, `mcp/src/`, and `ios/Sources/HollerKit/`.
     - path: "ios/Tests/**/*.swift"
       instructions: |
-        Review iOS unit tests for deterministic verification of HMAC signature generation, multipart body serialization, breadcrumb ring-buffer behavior, and payload encoding without external network dependencies.
+        Review iOS unit tests for deterministic verification of `/v1` API transport, offline `OutboxStore` queueing, `QuestStore` manifest caching, breadcrumb ring-buffer behavior, and runtime `isEnabled` gating without external network dependencies.
     - path: "server/tests/**/*.ts"
       instructions: |
-        Review server tests for thorough coverage of HMAC verification, streaming body limits, timestamp drift, multipart parsing, storage/issue adapters, and dispatchers using deterministic mocks.
+        Review server tests for thorough coverage of `/v1` conformance, JWT/API key authentication, upload grant binding, storage adapters, CLI commands, and outbox sinks.
 
   tools:
     swiftlint:

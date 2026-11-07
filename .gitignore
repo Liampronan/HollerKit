@@ -5,12 +5,18 @@ node_modules/
 npm-debug.log*
 server/dist/
 mcp/dist/
+*.tgz
+.npmrc
 
-# SwiftPM
+# SwiftPM & Xcode
 .build/
 .swiftpm/
 Package.resolved
+DerivedData/
+xcuserdata/
+*.xcresult/
 
-# Environment
+# Environment & Local Agent Config
 .env
 .env.*
+.agents/

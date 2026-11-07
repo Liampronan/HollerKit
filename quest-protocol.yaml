@@ -976,7 +976,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [ok, quests, retiredIds]
+                required: [ok, quests, activatedIds, reactivatedIds, retiredIds]
                 properties:
                   ok:
                     type: boolean
@@ -985,6 +985,14 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/QuestVersionRecord"
+                  activatedIds:
+                    type: array
+                    items:
+                      type: string
+                  reactivatedIds:
+                    type: array
+                    items:
+                      type: string
                   retiredIds:
                     type: array
                     items:

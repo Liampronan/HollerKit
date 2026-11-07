@@ -26,11 +26,21 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.6.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Liampronan/HollerKit.git",
+    "directory": "server"
+  },
+  "homepage": "https://github.com/Liampronan/HollerKit#readme",
+  "bugs": {
+    "url": "https://github.com/Liampronan/HollerKit/issues"
+  },
+  "author": "Liam Ronan",
   "keywords": [
     "bug-reporting",
-    "github-issues",
+    "qa-quests",
     "hollerkit"
   ],
   "license": "MIT",
