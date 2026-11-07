@@ -299,7 +299,7 @@ final class HollerKitTests: XCTestCase {
                 return (response, Data(json.utf8))
             }
 
-            throw URLError(.UnsupportedURL)
+            throw URLError(.unsupportedURL)
         }
 
         let client = APIClient(
