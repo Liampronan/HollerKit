@@ -35,7 +35,7 @@ private struct HollerKitPresenterModifier: ViewModifier {
                         HollerKit.presentationView()
                     }
                     .sheet(isPresented: $presenter.isQuestsPresented) {
-                        HollerKit.questsPresentationView()
+                        HollerKit.questBoardView()
                     }
             } else {
                 content

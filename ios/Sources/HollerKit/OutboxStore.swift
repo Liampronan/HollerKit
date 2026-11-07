@@ -70,6 +70,7 @@ public struct OutboxEnvelope: Codable, Equatable, Sendable {
     public var principalFingerprint: String?
     public var request: FeedbackSubmissionRequest
     public var attachmentManifests: [OutboxAttachmentManifest]
+    public var questManifestEntry: QuestManifestEntry?
     public var submittedResponse: FeedbackSubmissionResponse?
 
     private enum CodingKeys: String, CodingKey {
@@ -80,6 +81,7 @@ public struct OutboxEnvelope: Codable, Equatable, Sendable {
         case principalFingerprint
         case request
         case attachmentManifests
+        case questManifestEntry
         case submittedResponse
     }
 
@@ -91,6 +93,7 @@ public struct OutboxEnvelope: Codable, Equatable, Sendable {
         principalFingerprint: String? = nil,
         request: FeedbackSubmissionRequest,
         attachmentManifests: [OutboxAttachmentManifest] = [],
+        questManifestEntry: QuestManifestEntry? = nil,
         submittedResponse: FeedbackSubmissionResponse? = nil
     ) {
         self.feedbackId = feedbackId
@@ -100,6 +103,7 @@ public struct OutboxEnvelope: Codable, Equatable, Sendable {
         self.principalFingerprint = principalFingerprint
         self.request = request
         self.attachmentManifests = attachmentManifests
+        self.questManifestEntry = questManifestEntry
         self.submittedResponse = submittedResponse
     }
 
@@ -112,6 +116,7 @@ public struct OutboxEnvelope: Codable, Equatable, Sendable {
         self.principalFingerprint = try container.decodeIfPresent(String.self, forKey: .principalFingerprint)
         self.request = try container.decode(FeedbackSubmissionRequest.self, forKey: .request)
         self.attachmentManifests = try container.decodeIfPresent([OutboxAttachmentManifest].self, forKey: .attachmentManifests) ?? []
+        self.questManifestEntry = try container.decodeIfPresent(QuestManifestEntry.self, forKey: .questManifestEntry)
         self.submittedResponse = try container.decodeIfPresent(FeedbackSubmissionResponse.self, forKey: .submittedResponse)
     }
 }
@@ -179,6 +184,7 @@ actor OutboxDirectoryEngine {
     func enqueue(
         request: FeedbackSubmissionRequest,
         attachments: [OutboxAttachmentPayload],
+        questManifestEntry: QuestManifestEntry?,
         serverURL: String?,
         createdAt: Date
     ) async throws -> (feedbackId: UUID, revision: UUID) {
@@ -234,6 +240,7 @@ actor OutboxDirectoryEngine {
             principalFingerprint: nil,
             request: normalizedRequest,
             attachmentManifests: manifests,
+            questManifestEntry: questManifestEntry,
             submittedResponse: nil
         )
 
@@ -560,6 +567,21 @@ actor OutboxDirectoryEngine {
         finalRequest.id = envelope.feedbackId.uuidString.lowercased()
         finalRequest.attachments = envelope.request.attachments + uploadedAttachments
 
+        if let manifestEntry = envelope.questManifestEntry {
+            let manifestResponse = try await client.syncBuildManifest(
+                build: finalRequest.build,
+                appVersion: finalRequest.appVersion,
+                quests: [manifestEntry],
+                token: token
+            )
+            if let syncedQuest = manifestResponse.quests.first(where: { $0.id == manifestEntry.id }) {
+                finalRequest.questVersion = syncedQuest.version
+                envelope.request.questVersion = syncedQuest.version
+            }
+            envelope.questManifestEntry = nil
+            try? writeEnvelope(envelope, to: item.directoryURL)
+        }
+
         let response = try await client.submitFeedback(finalRequest, token: token)
         envelope.submittedResponse = response
         try? writeEnvelope(envelope, to: item.directoryURL)
@@ -627,6 +649,7 @@ public actor OutboxStore {
     public func enqueue(
         request: FeedbackSubmissionRequest,
         attachments: [OutboxAttachmentPayload] = [],
+        questManifestEntry: QuestManifestEntry? = nil,
         serverURL: String? = nil,
         createdAt: Date = Date()
     ) async throws -> UUID {
@@ -634,6 +657,7 @@ public actor OutboxStore {
         let (feedbackId, _) = try await engine.enqueue(
             request: request,
             attachments: attachments,
+            questManifestEntry: questManifestEntry,
             serverURL: serverURL,
             createdAt: createdAt
         )
@@ -643,12 +667,14 @@ public actor OutboxStore {
     public func submit(
         request: FeedbackSubmissionRequest,
         attachments: [OutboxAttachmentPayload] = [],
+        questManifestEntry: QuestManifestEntry? = nil,
         using client: APIClient
     ) async throws -> OutboxSubmissionOutcome {
         let engine = await OutboxDirectoryCoordinator.shared.engine(for: rootDirectoryURL)
         let (feedbackId, revision) = try await engine.enqueue(
             request: request,
             attachments: attachments,
+            questManifestEntry: questManifestEntry,
             serverURL: client.server.absoluteString,
             createdAt: Date()
         )

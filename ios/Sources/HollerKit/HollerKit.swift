@@ -3,12 +3,15 @@ import SwiftUI
 
 @MainActor
 public enum HollerKit {
+    public static let quests = HollerKitQuestState()
+
     private static var state = HollerKitState()
     static let presenterState = HollerKitPresenterState()
     private static let lifecycleMonitor = OutboxLifecycleMonitor {
         Task { @MainActor in
             if HollerKit.reconcileEnablement() {
                 _ = await HollerKit.flushOutbox()
+                await HollerKit.quests.refresh()
             }
         }
     }
@@ -51,8 +54,19 @@ public enum HollerKit {
 
         lifecycleMonitor.start()
         if reconcileEnablement() {
+            let metadata = MetadataCollector.collect(extra: configuration.metadata())
+            let build = MetadataCollector.currentBuild(from: metadata)
+            let cacheDir = configuration.outboxDirectoryURL?.deletingLastPathComponent()
+                .appendingPathComponent("QuestCache", isDirectory: true)
+            quests.configure(
+                questsConfiguration: configuration.quests,
+                build: build,
+                cacheDirectoryURL: cacheDir,
+                serverURL: configuration.server
+            )
             Task { @MainActor in
                 _ = await flushOutbox()
+                await quests.refresh(using: configuration)
             }
         }
     }
@@ -64,6 +78,7 @@ public enum HollerKit {
             presenterState.isRuntimeEnabled = enabled
         }
         if !enabled {
+            quests.reset()
             state.breadcrumbs = BreadcrumbStore()
             if presenterState.isPresented {
                 presenterState.isPresented = false
@@ -106,15 +121,12 @@ public enum HollerKit {
         )
     }
 
+    public static func questBoardView() -> some View {
+        QuestBoardView(questState: quests)
+    }
+
     public static func questsPresentationView() -> some View {
-        NavigationStack {
-            ContentUnavailableView(
-                "Quests",
-                systemImage: "checklist",
-                description: Text("No quests are currently active for this build.")
-            )
-            .navigationTitle("Quests")
-        }
+        questBoardView()
     }
 
     public static func presentBugReport(attachments: [HollerKitAttachment] = []) {
@@ -162,6 +174,14 @@ public enum HollerKit {
 
     public static var isQuestsPresentationRequested: Bool {
         presenterState.isQuestsPresented
+    }
+
+    static func beginQuestBreadcrumbs(startedAt: Date) {
+        state.breadcrumbs.beginQuestRun(startedAt: startedAt)
+    }
+
+    static func endQuestBreadcrumbs() {
+        state.breadcrumbs.endQuestRun()
     }
 
     static var currentConfiguration: HollerKitConfiguration? {
