@@ -10,7 +10,7 @@ HollerKit is a self-hosted **bug reporting and guided QA quest loop** for iOS ap
 
 It connects four pieces into a single loop:
 
-1. **`hollerkit-quests.json` in your app repo** —When you or a coding agent open a PR, you add or update QA test quests alongside the code. CI validates the manifest on every PR and syncs active quests to your server on merge to `main`.
+1. **`hollerkit-quests.json` in your app repo** — When you or a coding agent open a PR, you add or update QA test quests alongside the code. CI validates the manifest on every PR and syncs active quests to your server on merge to `main`.
 2. **`HollerKit` iOS SDK (`ios/`, iOS 18+)** — Runs inside your Debug and TestFlight builds (gated at runtime via `isEnabled`). Testers can shake or screenshot to file ad-hoc bug reports, or open the **QA Quests** board to run guided test scenarios with a floating step-by-step overlay, one-tap screenshot marks, voice dictation, and an offline-tolerant outbox.
 3. **`hollerkit-server` (`server/`, `1.0.0-beta.1`)** — A lightweight `/v1` HTTP handler for **Supabase Edge Functions** or **Node.js**. It stores quests, feedback, and outbox notifications in a dedicated `hollerkit` Postgres schema and issues short-lived presigned URLs for private screenshots in **Supabase Storage** or **S3-compatible object storage**.
 4. **`hollerkit-mcp` (`mcp/`, `1.0.0-beta.1`)** — A Model Context Protocol (MCP) server that gives coding agents (Claude Code, Cursor, Codex, etc.) direct access to the feedback inbox, signed screenshot attachments, quest runs, and passed quests ready to retire from `hollerkit-quests.json`.
@@ -86,7 +86,7 @@ HollerKit's Swift package targets **iOS 18+** and uses zero third-party Swift de
 
 ### Add the Package
 
-In Xcode, choose **File > Add Package Dependencies** and add this repository (or select `HollerKit/ios` via **Add Local...** during development).
+Clone this repository, open your project in Xcode, choose **File > Add Package Dependencies... > Add Local...**, select the `HollerKit/ios` directory (which contains `Package.swift`), and add the `HollerKit` library product to your app target. Also add your `hollerkit-quests.json` manifest to your app target's **Copy Bundle Resources** build phase so bundled quests are available offline and synced with your `/v1` server.
 
 ### Configure at App Launch
 
@@ -111,7 +111,7 @@ struct MyApp: App {
             inputMode: .textAndAudio,
             metadata: { ["buildChannel": "testflight"] },
             captureBreadcrumbs: true,
-            quests: .server { route in
+            quests: .bundled("hollerkit-quests") { route in
                 // Optional deep-link handler when a tester taps "Start Quest"
                 AppRouter.shared.navigate(to: route)
             }
@@ -133,15 +133,15 @@ struct MyApp: App {
 
 Instead, keep `HollerKit` linked and gate it at runtime with `isEnabled`:
 
-- When `isEnabled()` returns `false` (such as on public App Store installs when using `HollerKitEnvironment.isDebugOrTestFlight`), `HollerKit` installs no shake or screenshot observers, renders no UI, records no breadcrumbs, makes no network requests, and turns `HollerKit.presentBugReport()` / `HollerKit.presentQuests()` into no-ops.
+- When `isEnabled()` returns `false` (such as on public App Store installs when using `HollerKitEnvironment.isDebugOrTestFlight`), `HollerKit` installs no shake or screenshot observers, renders no UI, records no breadcrumbs, starts no new network requests (an already in-flight outbox flush awaiting `auth()` token resolution may finish its current upload grant or feedback submission request before stopping), and turns `HollerKit.presentBugReport()` / `HollerKit.presentQuests()` into no-ops.
 - **Required `Info.plist` keys:** Because TestFlight builds are Release archives, any target that ships `HollerKit` with voice dictation enabled must include both privacy strings in `Info.plist`:
   - `NSMicrophoneUsageDescription`
   - `NSSpeechRecognitionUsageDescription`
-- **Offline & signed-out resilience:** If a tester submits a bug report or finishes a quest while offline or before signing in, `OutboxStore` saves the submission JSON and screenshot files to Application Support (without ever persisting auth tokens) and flushes them automatically once network connectivity and `auth()` are available.
+- **Offline & signed-out resilience:** If a tester submits a bug report or finishes a quest while offline or before signing in, `OutboxStore` saves the submission JSON and screenshot files to Application Support (without ever persisting auth tokens). Automatic flush triggers run on `HollerKit.configure(...)`, when the app becomes active, when network connectivity is restored (`NWPathMonitor`), and after a new submission is queued. If a tester signs in while your app is already active in the foreground, call `await HollerKit.flushOutbox()` (and optionally `await HollerKit.quests.refresh()`) after sign-in completes.
 
 ### Recommended App-Side Wrapper Pattern
 
-To keep your app views decoupled from `HollerKit`, wrap it behind a small app-side protocol with a live implementation and a no-op implementation:
+To keep your app views decoupled from `HollerKit`, wrap it behind a small app-side protocol with a live implementation and a no-op implementation (make sure `hollerkit-quests.json` is included in your app target's bundle resources):
 
 ```swift
 import HollerKit
@@ -159,7 +159,11 @@ struct LiveQAFeedbackService: QAFeedbackService {
         HollerKit.configure(
             server: URL(string: "https://your-project.supabase.co/functions/v1/hollerkit")!,
             auth: { try? await AuthManager.shared.currentAccessToken() },
-            isEnabled: { HollerKitEnvironment.isDebugOrTestFlight }
+            isEnabled: { HollerKitEnvironment.isDebugOrTestFlight },
+            invocation: [.shake, .screenshot],
+            quests: .bundled("hollerkit-quests") { route in
+                AppRouter.shared.navigate(to: route)
+            }
         )
     }
 
@@ -185,17 +189,36 @@ struct NoOpQAFeedbackService: QAFeedbackService {
 
 `hollerkit-server` (`1.0.0-beta.1`) runs on Web-standard `Request` / `Response` handlers in **Supabase Edge Functions** or **Node.js 22+**.
 
-### Step 1: Apply the Database Migration
+### Step 1: Copy and Apply the Database Migration
 
-Copy the SQL migration into your project and apply it to your Postgres database (creates the isolated `hollerkit` schema with RLS enabled):
+First, install `hollerkit-server` in your project (or build it from a local checkout with `cd server && npm ci && npm run build`) so the `hollerkit` CLI is available. Then copy the SQL migration file (`001_hollerkit_v1.sql`) and execute it against your target Postgres database before deploying:
 
 ```sh
+# 1. Copy 001_hollerkit_v1.sql into your project's migrations directory
+# (or run `node ./server/dist/cli.js migrations copy ./supabase/migrations` from a local checkout)
 npx hollerkit-server migrations copy ./supabase/migrations
+
+# 2. Apply the copied SQL migration to your target Postgres database
+# (for example via Supabase CLI, psql, or the Supabase SQL Editor)
+supabase db push
+# or: psql "$DATABASE_URL" -f ./supabase/migrations/001_hollerkit_v1.sql
 ```
 
-### Step 2: Deploy on Supabase Edge Functions
+> **Note:** `migrations copy` only copies `001_hollerkit_v1.sql` into your repository; you must execute the SQL against your database so the `hollerkit` schema and tables exist before the server starts.
 
-See [`examples/supabase/index.ts`](./examples/supabase/index.ts) and [`examples/supabase/config.toml`](./examples/supabase/config.toml):
+### Step 2: Create a Private Storage Bucket & Enroll Testers
+
+1. **Create a private storage bucket:** Before deploying, create a **private** bucket named `hollerkit` (or matching your `HOLLERKIT_BUCKET` environment variable) in Supabase Storage or S3. Neither the SQL migration nor `supabaseStorage` creates the bucket automatically.
+2. **Enroll authorized testers:** When `supabaseJwt({ store })` is used without a custom `authorizeTester` callback, the server checks that each tester's JWT `sub` exists as an active row in `hollerkit.testers`. Enroll your testers in Postgres before they submit feedback or fetch quests:
+   ```sql
+   INSERT INTO hollerkit.testers (user_id, email, active)
+   VALUES ('<tester-jwt-sub>', 'tester@example.com', true)
+   ON CONFLICT (user_id) DO UPDATE SET active = true;
+   ```
+
+### Step 3: Deploy on Supabase Edge Functions
+
+See [`examples/supabase/index.ts`](./examples/supabase/index.ts), [`examples/supabase/functions/hollerkit/index.ts`](./examples/supabase/functions/hollerkit/index.ts), and [`examples/supabase/config.toml`](./examples/supabase/config.toml):
 
 ```ts
 import {
@@ -208,8 +231,10 @@ import {
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL')!
 const store = postgresStore({
-  url: Deno.env.get('SUPABASE_DB_URL')!,
+  url: Deno.env.get('SUPABASE_DB_POOLER_URL')!,
+  max: 2,
   prepare: false, // Required for Supabase Supavisor transaction pooling
+  fetchTypes: false,
 })
 
 const storage = supabaseStorage({
@@ -234,7 +259,7 @@ Deno.serve(
 )
 ```
 
-In `supabase/config.toml`, disable Supabase's gateway JWT check on the `hollerkit` function so both tester Supabase Auth JWTs and `hk_...` API keys (used by CI and `hollerkit-mcp`) reach HollerKit's own authenticator chain:
+In `supabase/config.toml`, disable Supabase's gateway JWT check on the `hollerkit` function (or deploy with `supabase functions deploy hollerkit --no-verify-jwt`) so both tester Supabase Auth JWTs and `hk_...` API keys (used by CI and `hollerkit-mcp`) reach HollerKit's own authenticator chain:
 
 ```toml
 [functions.hollerkit]
@@ -265,8 +290,8 @@ npx hollerkit-server keys create \
   --scopes agent:read,agent:triage \
   --label "cursor-agent"
 
-# 4. Revoke an API key by prefix, hash, or label
-npx hollerkit-server keys revoke --db "$DATABASE_URL" hk_a1b2c3d4
+# 4. Revoke an API key by its 12-character prefix, full SHA-256 hash, or label
+npx hollerkit-server keys revoke --db "$DATABASE_URL" hk_a1b2c3d4e
 
 # 5. Run the 15-step end-to-end /v1 conformance suite against a live server
 npx hollerkit-server conformance \
