@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import {
   apiKeysAuthenticator,
   createHollerKitServer,
@@ -12,6 +16,7 @@ import {
 import {
   createHollerKitMcpServer,
   HOLLERKIT_MCP_TOOLS,
+  HOLLERKIT_MCP_VERSION,
   type FeedbackGetOutput,
   type FeedbackInboxOutput,
   type FeedbackTriageOutput,
@@ -21,6 +26,8 @@ import {
   type QuestsPendingOutput,
   type QuestsRetirableOutput,
 } from '../dist/index.js'
+
+const execFileAsync = promisify(execFile)
 
 const BASE_URL = 'https://example.supabase.co/functions/v1/hollerkit'
 
@@ -792,4 +799,16 @@ test('surfaces 401, 403, 404, timeout, validation, and protocol errors clearly',
     (timeoutResult.structuredContent.error as { code: string }).code,
     'request_timeout',
   )
+})
+
+test('CLI --version and HOLLERKIT_MCP_VERSION match mcp/package.json version', async () => {
+  const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url))
+  const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
+  const pkg = JSON.parse(await readFile(pkgPath, 'utf8')) as { version: string }
+
+  assert.equal(HOLLERKIT_MCP_VERSION, pkg.version)
+
+  const { stdout, stderr } = await execFileAsync(process.execPath, [cliPath, '--version'])
+  assert.equal(stderr, '')
+  assert.equal(stdout.trim(), pkg.version)
 })
