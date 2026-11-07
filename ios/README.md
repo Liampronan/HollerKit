@@ -35,7 +35,6 @@ struct MyApp: App {
             },
             invocation: [.shake, .screenshot],
             inputMode: .textAndAudio,
-            metadata: { ["buildChannel": "testflight"] },
             captureBreadcrumbs: true,
             quests: .bundled("hollerkit-quests") { route in
                 // Optional: navigate when a tester taps "Start Quest"
@@ -61,7 +60,7 @@ Xcode compiles **TestFlight** archives using the **Release** build configuration
 
 Instead, keep HollerKit linked and pass `isEnabled: { HollerKitEnvironment.isDebugOrTestFlight }`:
 - **In Debug & TestFlight:** Shake/screenshot gestures, breadcrumbs, and the QA Quests board are active.
-- **In App Store builds (`isEnabled() == false`):** HollerKit installs no gesture observers, renders no UI, records no breadcrumbs, starts no new network requests, and turns `presentBugReport()` / `presentQuests()` into no-ops.
+- **In App Store builds (`isEnabled() == false`):** HollerKit installs no gesture observers, records no breadcrumbs, starts no new network requests, and turns `.hollerKitPresenter()`, `presentBugReport()`, and `presentQuests()` into no-ops. (If you embed `HollerKit.presentationView()` or `HollerKit.questBoardView()` directly in your own view hierarchy, gate those views with `isEnabled` as well.)
 
 ### Required `Info.plist` Keys for Voice Dictation
 
@@ -76,7 +75,7 @@ Because TestFlight builds are Release archives, include these keys in `Info.plis
 Testers can file bug reports or finish quests even while offline or signed out:
 - Submissions and screenshots are queued on disk (without storing auth tokens).
 - The outbox flushes automatically on launch, when the app enters the foreground, when connectivity returns, and when a new report is submitted.
-- If a tester signs in while the app is already open, call `await HollerKit.flushOutbox()` (and optionally `await HollerKit.quests.refresh()`) after login completes.
+- If a tester signs in while the app is already open on a single-user device, you can call `await HollerKit.flushOutbox()` (and optionally `await HollerKit.quests.refresh()`) after login completes. Note that queued reports are not bound to a specific user ID on disk, so flushing after sign-in submits any pending items under the newly signed-in account—avoid calling `flushOutbox()` across account switches on shared devices.
 
 ---
 

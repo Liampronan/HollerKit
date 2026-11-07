@@ -4,12 +4,19 @@
 
 ---
 
-## 1. Create an Agent API Key
+## 1. Build & Create an Agent API Key
 
-Use the `hollerkit-server` CLI to create an API key with `agent:read` and `agent:triage` scopes:
+From a local checkout of `HollerKit`, build the server CLI and MCP server:
 
 ```sh
-npx hollerkit-server keys create \
+cd server && npm ci && npm run build
+cd ../mcp && npm ci && npm run build
+```
+
+Then create an API key with `agent:read` and `agent:triage` scopes:
+
+```sh
+node ./server/dist/cli.js keys create \
   --db "$DATABASE_URL" \
   --scopes agent:read,agent:triage \
   --label "coding-agent"
@@ -19,22 +26,24 @@ npx hollerkit-server keys create \
 
 ## 2. Configure Your MCP Client
 
-Add `hollerkit` to your MCP configuration (e.g. `.mcp.json` or Claude Code / Cursor settings):
+Point your MCP client at the built `mcp/dist/cli.js` entrypoint (or `npx -y hollerkit-mcp` when installed from npm):
 
 ```json
 {
   "mcpServers": {
     "hollerkit": {
-      "command": "npx",
-      "args": ["-y", "hollerkit-mcp"],
+      "command": "node",
+      "args": ["/absolute/path/to/HollerKit/mcp/dist/cli.js"],
       "env": {
         "HOLLERKIT_URL": "https://your-project.supabase.co/functions/v1/hollerkit",
-        "HOLLERKIT_API_KEY": "hk_your_agent_api_key"
+        "HOLLERKIT_API_KEY": "${HOLLERKIT_API_KEY}"
       }
     }
   }
 }
 ```
+
+> **Security note:** Never commit a real `hk_...` key into a shared `.mcp.json` file. Store the key in your shell environment (`${HOLLERKIT_API_KEY}`) or your MCP client's local/user-scoped secret settings.
 
 ---
 
@@ -42,8 +51,8 @@ Add `hollerkit` to your MCP configuration (e.g. `.mcp.json` or Claude Code / Cur
 
 | Tool | Scope | What it does |
 | :--- | :--- | :--- |
-| `hollerkit_inbox` | `agent:read` | Lists bug reports and quest runs (filterable by `status`, `kind`, `quest_id`, `result`, `build`, or `since`). |
-| `hollerkit_get_feedback` | `agent:read` | Fetches full details for a single report or quest run, including breadcrumbs, step marks, and temporary signed screenshot URLs. |
-| `hollerkit_triage` | `agent:triage` | Updates an item's status (`open`, `triaged`, `in_progress`, `resolved`, `wontfix`), resolution notes, commit SHA, or issue link. |
-| `hollerkit_quests_status` | `agent:read` | Summarizes pass/fail/unsure counts and tester coverage for each active quest. |
-| `hollerkit_quests_retire_candidates` | `agent:read` | Lists quests that have passed testing on their current definition with zero failures, ready to be removed from `hollerkit-quests.json`. |
+| `feedback_inbox` | `agent:read` | Lists bug reports and quest runs. Defaults to `triage="new"`; pass `triage="all"` (with `cursor` pagination) to retrieve all items. Supports filtering by `triage`, `kind`, `result`, `area`, `since`, `build`, `questId`, `limit`, and `cursor`. |
+| `feedback_get` | `agent:read` | Fetches full details for a single report or quest run (`id`), including timeline events, triage history, and 1-hour signed screenshot URLs. |
+| `feedback_triage` | `agent:triage` | Records a triage decision. Every call requires `id`, `status` (`new`, `triaged`, `resolved`, `wontfix`, or `duplicate`), and a non-empty `summary` (plus optional `links` and `actor`). |
+| `quests_pending` | `agent:read` | Lists untested active quests for a given `build` (quests without a passing run on their current version). |
+| `quests_retirable` | `agent:read` | Lists active quests that have at least one passing run on their current definition (optional `area` filter). Review any failing runs before removing a quest from `hollerkit-quests.json`. |
