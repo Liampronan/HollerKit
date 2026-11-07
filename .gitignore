@@ -4,6 +4,7 @@
 node_modules/
 npm-debug.log*
 server/dist/
+mcp/dist/
 
 # SwiftPM
 .build/
