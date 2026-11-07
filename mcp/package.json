@@ -27,6 +27,16 @@
   "engines": {
     "node": ">=22.6.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Liampronan/HollerKit.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://github.com/Liampronan/HollerKit#readme",
+  "bugs": {
+    "url": "https://github.com/Liampronan/HollerKit/issues"
+  },
+  "author": "Liam Ronan",
   "keywords": [
     "hollerkit",
     "mcp",
