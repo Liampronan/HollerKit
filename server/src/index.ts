@@ -1,6 +1,10 @@
 export { s3Storage, type S3StorageOptions } from './adapters/storage/s3.js'
-export { supabaseStorage, type SupabaseStorageOptions } from './adapters/storage/supabase.js'
-export { runCli, type CliIo } from './cli.js'
+export {
+  SUPABASE_UPLOAD_URL_TTL_SECONDS,
+  supabaseStorage,
+  type SupabaseStorageOptions,
+} from './adapters/storage/supabase.js'
+export { isCliEntrypoint, runCli, type CliIo } from './cli.js'
 export { errorResponse, HollerKitError } from './errors.js'
 export {
   defaultLimits,
@@ -49,10 +53,12 @@ export {
   defaultSinkWhen,
   flushOutbox,
   shouldEnqueueSink,
+  validateUniqueSinks,
   type FeedbackDetail,
   type FlushOutboxOptions,
   type FlushOutboxResult,
   type HollerKitSink,
+  type HollerKitSinkDeliveryContext,
   type SignedFeedbackAttachmentRecord,
 } from './v1/sinks.js'
 export {

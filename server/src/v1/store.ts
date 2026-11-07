@@ -96,6 +96,8 @@ export interface SyncQuestsInput {
 
 export interface SyncQuestsResult {
   quests: QuestVersionRecord[]
+  activatedIds?: string[] | undefined
+  reactivatedIds?: string[] | undefined
   retiredIds: string[]
 }
 
@@ -222,6 +224,7 @@ export interface CreateFeedbackStoreInput {
   events?: FeedbackEventInput[] | undefined
   attachments?: FeedbackAttachmentInput[] | undefined
   sinks?: string[] | undefined
+  shouldEnqueueSink?: ((sinkName: string, feedback: FeedbackRecord) => boolean) | undefined
   now?: Date | undefined
 }
 
@@ -322,6 +325,7 @@ export interface EnqueueOutboxInput {
 
 export interface ClaimPendingOutboxInput {
   limit?: number | undefined
+  leaseMs?: number | undefined
   now?: Date | undefined
 }
 
@@ -388,6 +392,9 @@ export function computeQuestContentHash(quest: QuestHashInput): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }
 
+/**
+ * Computes the lowercase SHA-256 hex digest of a raw `hk_...` API key.
+ */
 export function hashApiKey(rawKey: string): string {
   return createHash('sha256').update(rawKey).digest('hex')
 }

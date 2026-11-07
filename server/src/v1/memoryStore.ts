@@ -67,6 +67,9 @@ interface StoredQuestBuildRow {
   firstSeenAt: string
 }
 
+/**
+ * Creates an in-memory `HollerKitStore` implementation for tests and local development.
+ */
 export function memoryStore(): HollerKitStore {
   const quests: StoredQuestRow[] = []
   const questBuilds = new Map<string, StoredQuestBuildRow>()
@@ -139,6 +142,8 @@ export function memoryStore(): HollerKitStore {
 
       const syncedIds = new Set<string>()
       const syncedRows: StoredQuestRow[] = []
+      const activatedIds: string[] = []
+      const reactivatedIds: string[] = []
 
       for (const def of input.quests) {
         const id = def.id.trim()
@@ -172,6 +177,7 @@ export function memoryStore(): HollerKitStore {
           existingMatch.status = 'active'
           existingMatch.retiredAt = null
           syncedRows.push(existingMatch)
+          reactivatedIds.push(id)
         } else {
           const nextVersion = maxVersionForQuest(id) + 1
           for (const row of quests) {
@@ -202,6 +208,7 @@ export function memoryStore(): HollerKitStore {
           }
           quests.push(created)
           syncedRows.push(created)
+          activatedIds.push(id)
         }
       }
 
@@ -220,6 +227,8 @@ export function memoryStore(): HollerKitStore {
 
       return {
         quests: syncedRows.map(toQuestVersionRecord),
+        activatedIds,
+        reactivatedIds,
         retiredIds,
       }
     },
@@ -522,8 +531,13 @@ export function memoryStore(): HollerKitStore {
       attachmentsByFeedback.set(record.id, attachmentRecords)
       triageByFeedback.set(record.id, [])
 
-      if (input.sinks && input.sinks.length > 0 && triageStatus === 'new') {
+      if (input.sinks && input.sinks.length > 0) {
+        const snapshot = cloneFeedback(record)
         for (const sink of input.sinks) {
+          const shouldEnqueue = input.shouldEnqueueSink
+            ? input.shouldEnqueueSink(sink, snapshot)
+            : triageStatus === 'new'
+          if (!shouldEnqueue) continue
           const outboxId = nextOutboxId++
           outbox.set(outboxId, {
             id: outboxId,
@@ -728,6 +742,8 @@ export function memoryStore(): HollerKitStore {
 
     async claimPendingOutbox(input: ClaimPendingOutboxInput = {}): Promise<OutboxRecord[]> {
       const nowMs = (input.now ?? new Date()).getTime()
+      const leaseMs = Math.max(0, input.leaseMs ?? 60_000)
+      const leaseUntilIso = new Date(nowMs + leaseMs).toISOString()
       const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
       const pending = Array.from(outbox.values())
         .filter((row) => row.deliveredAt === null && new Date(row.nextAttemptAt).getTime() <= nowMs)
@@ -738,7 +754,12 @@ export function memoryStore(): HollerKitStore {
         })
         .slice(0, limit)
 
-      return pending.map((row) => ({ ...row }))
+      return pending.map((row) => {
+        if (leaseMs > 0) {
+          row.nextAttemptAt = leaseUntilIso
+        }
+        return { ...row }
+      })
     },
 
     async markOutboxDelivered(input: MarkOutboxDeliveredInput): Promise<OutboxRecord | null> {

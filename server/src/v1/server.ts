@@ -15,7 +15,7 @@ import {
   type SupabaseJwtOptions,
 } from './auth.js'
 import { defaultV1Limits, resolveV1Limits, type V1LimitConfig } from './limits.js'
-import { shouldEnqueueSink, type HollerKitSink } from './sinks.js'
+import { shouldEnqueueSink, validateUniqueSinks, type HollerKitSink } from './sinks.js'
 import {
   hashApiKey,
   type AttachmentKind,
@@ -67,11 +67,19 @@ export interface CreateHollerKitServerOptions {
   storage: HollerKitStorageAdapter
   authenticate: Authenticator | Authenticator[]
   basePath?: string | undefined
+  /**
+   * Optional notification sinks enrolled in `hollerkit.outbox` when matching feedback is created.
+   * Deployments that configure `sinks` must also invoke `flushOutbox({ store, storage, sinks })`
+   * using the same store and sink registrations so pending outbox notifications are processed.
+   */
   sinks?: Array<HollerKitSink | string> | undefined
   limits?: Partial<V1LimitConfig> | undefined
   now?: (() => Date) | undefined
 }
 
+/**
+ * Creates a deterministic in-memory storage adapter for tests and conformance runs.
+ */
 export function fakeStorage(options: { baseUrl?: string; now?: () => Date } = {}): HollerKitStorageAdapter {
   const baseUrl = (options.baseUrl ?? 'https://storage.hollerkit.test').replace(/\/$/, '')
   const nowFn = options.now ?? (() => new Date())
@@ -105,6 +113,9 @@ const VALID_TRIAGE_STATUSES = new Set<TriageStatus>(['new', 'triaged', 'resolved
 const VALID_ATTACHMENT_KINDS = new Set<AttachmentKind>(['image', 'audio', 'video', 'keyframe', 'mark'])
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/**
+ * Creates the HollerKit v1 Web Fetch handler `(request: Request) => Promise<Response>`.
+ */
 export function createHollerKitServer(
   options: CreateHollerKitServerOptions,
 ): (request: Request) => Promise<Response> {
@@ -113,6 +124,8 @@ export function createHollerKitServer(
   const authenticators = Array.isArray(options.authenticate)
     ? options.authenticate
     : [options.authenticate]
+  const sinksByName = validateUniqueSinks(options.sinks ?? [])
+  const configuredSinkNames = Array.from(sinksByName.keys())
 
   return async function hollerKitV1Handler(request: Request): Promise<Response> {
     try {
@@ -192,6 +205,7 @@ export function createHollerKitServer(
 
         validateUploadAttachmentLimits(kind, mimeType, size, limits)
 
+        const now = nowFn()
         const ext = extensionForMimeType(mimeType, kind)
         const storageKey = `${feedbackId}/${randomUUID()}.${ext}`
         const presigned = await options.storage.presignUpload({
@@ -201,6 +215,12 @@ export function createHollerKitServer(
           expiresInSeconds: limits.uploadGrantTtlSeconds,
         })
 
+        const maxGrantExpiryMs = now.getTime() + limits.uploadGrantTtlSeconds * 1000
+        const presignedExpiryMs = Date.parse(presigned.expiresAt)
+        const grantExpiresAt = Number.isNaN(presignedExpiryMs)
+          ? new Date(maxGrantExpiryMs).toISOString()
+          : new Date(Math.min(presignedExpiryMs, maxGrantExpiryMs)).toISOString()
+
         await options.store.createUploadGrant({
           storageKey,
           feedbackId,
@@ -208,15 +228,15 @@ export function createHollerKitServer(
           kind,
           mimeType,
           size,
-          expiresAt: presigned.expiresAt,
-          now: nowFn(),
+          expiresAt: grantExpiresAt,
+          now,
         })
 
         return protocolJsonResponse({
           ok: true,
           key: storageKey,
           url: presigned.url,
-          expiresAt: presigned.expiresAt,
+          expiresAt: grantExpiresAt,
         })
       }
 
@@ -227,25 +247,23 @@ export function createHollerKitServer(
           const body = await readJsonObject(request, limits)
           const parsed = parseFeedbackCreateBody(body, limits)
 
+          // Selected sinks are persisted atomically with feedback creation inside store.createFeedback.
+          // Deployments configuring `sinks` must run `flushOutbox({ store, storage, sinks })` to deliver them.
           const now = nowFn()
           const created = await options.store.createFeedback({
             ...parsed,
             submitterId: principal.principalId,
+            ...(configuredSinkNames.length > 0
+              ? {
+                  sinks: configuredSinkNames,
+                  shouldEnqueueSink: (sinkName, feedback) => {
+                    const registered = sinksByName.get(sinkName) ?? sinkName
+                    return shouldEnqueueSink(registered, feedback)
+                  },
+                }
+              : {}),
             now,
           })
-
-          if (!created.idempotent && options.sinks && options.sinks.length > 0) {
-            for (const sink of options.sinks) {
-              if (shouldEnqueueSink(sink, created.feedback)) {
-                const sinkName = typeof sink === 'string' ? sink : sink.name
-                await options.store.enqueueOutbox({
-                  feedbackId: created.feedback.id,
-                  sink: sinkName,
-                  now,
-                })
-              }
-            }
-          }
 
           return protocolJsonResponse(
             {
@@ -372,6 +390,8 @@ export function createHollerKitServer(
           return protocolJsonResponse({
             ok: true,
             quests: synced.quests,
+            activatedIds: synced.activatedIds ?? [],
+            reactivatedIds: synced.reactivatedIds ?? [],
             retiredIds: synced.retiredIds,
           })
         }

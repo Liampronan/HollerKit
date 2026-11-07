@@ -4,7 +4,7 @@ export interface V1LimitConfig {
   maxImages: number
   maxImageBytes: number
   maxAudioBytes: number
-  maxVideoBytes?: number | undefined
+  maxVideoBytes: number
   maxMarks: number
   uploadGrantTtlSeconds: number
   readUrlTtlSeconds: number
@@ -19,6 +19,7 @@ export const defaultV1Limits: V1LimitConfig = {
   maxImages: 12, // 12 images per item
   maxImageBytes: 10 * 1024 * 1024, // 10 MB (10,485,760 bytes)
   maxAudioBytes: 10 * 1024 * 1024, // 10 MB (10,485,760 bytes)
+  maxVideoBytes: 50 * 1024 * 1024, // 50 MB (52,428,800 bytes)
   maxMarks: 20, // 20 marks
   uploadGrantTtlSeconds: 10 * 60, // 10 minutes
   readUrlTtlSeconds: 60 * 60, // 1 hour
@@ -27,6 +28,9 @@ export const defaultV1Limits: V1LimitConfig = {
   acceptedVideoMimeTypes: ['video/mp4', 'video/quicktime'],
 }
 
+/**
+ * Merges caller limit overrides with `defaultV1Limits`.
+ */
 export function resolveV1Limits(overrides: Partial<V1LimitConfig> = {}): V1LimitConfig {
   return {
     ...defaultV1Limits,

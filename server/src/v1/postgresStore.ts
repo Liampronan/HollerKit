@@ -46,6 +46,9 @@ export interface PostgresStoreOptions {
   url: string
   max?: number | undefined
   prepare?: boolean | undefined
+  idleTimeout?: number | undefined
+  maxLifetime?: number | undefined
+  fetchTypes?: boolean | undefined
 }
 
 export interface PostgresHollerKitStore extends HollerKitStore {
@@ -53,63 +56,112 @@ export interface PostgresHollerKitStore extends HollerKitStore {
   close(): Promise<void>
 }
 
+/**
+ * Creates a PostgreSQL-backed `HollerKitStore` using `postgres.js`.
+ * Defaults `prepare: false` for compatibility with transaction-mode connection poolers.
+ */
 export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitStore {
   const sql = postgres(options.url, {
     max: options.max ?? 10,
     prepare: options.prepare ?? false,
+    ...(options.idleTimeout !== undefined ? { idle_timeout: options.idleTimeout } : {}),
+    ...(options.maxLifetime !== undefined ? { max_lifetime: options.maxLifetime } : {}),
+    ...(options.fetchTypes !== undefined ? { fetch_types: options.fetchTypes } : {}),
     onnotice: () => {},
   })
 
-  const registeredEmptyBuilds = new Set<string>()
-
-  async function computeCounts(
+  /**
+   * Retrieves grouped quest-run result counts for a batch of `(quest_id, quest_version)` pairs
+   * in a single query.
+   */
+  async function computeCountsBatch(
     db: Sql,
-    questId: string,
-    questVersion: number,
-  ): Promise<QuestResultCounts> {
-    const rows = await db<{ result: QuestResult; count: number }[]>`
-      SELECT result, COUNT(*)::int AS count
+    pairs: ReadonlyArray<{ id: string; version: number }>,
+  ): Promise<Map<string, QuestResultCounts>> {
+    const countsByKey = new Map<string, QuestResultCounts>()
+    for (const pair of pairs) {
+      countsByKey.set(`${pair.id}:${pair.version}`, {
+        pass: 0,
+        fail: 0,
+        unsure: 0,
+        abandoned: 0,
+      })
+    }
+    if (pairs.length === 0) {
+      return countsByKey
+    }
+
+    const questIds = Array.from(new Set(pairs.map((p) => p.id)))
+    const rows = await db<
+      { quest_id: string; quest_version: number; result: QuestResult; count: number }[]
+    >`
+      SELECT quest_id, quest_version::int AS quest_version, result, COUNT(*)::int AS count
       FROM hollerkit.feedback
       WHERE kind = 'quest_run'
-        AND quest_id = ${questId}
-        AND quest_version = ${questVersion}
+        AND quest_id = ANY(${db.array(questIds)})
         AND result IS NOT NULL
-      GROUP BY result
+      GROUP BY quest_id, quest_version, result
     `
-    const counts: QuestResultCounts = { pass: 0, fail: 0, unsure: 0, abandoned: 0 }
+
     for (const row of rows) {
-      if (row.result in counts) {
-        counts[row.result] = Number(row.count)
+      const key = `${row.quest_id}:${Number(row.quest_version)}`
+      const target = countsByKey.get(key)
+      if (target && row.result in target) {
+        target[row.result] = Number(row.count)
       }
     }
-    return counts
+
+    return countsByKey
   }
 
+  /**
+   * Converts raw `hollerkit.quests` rows into `QuestVersionRecord[]` using a single grouped counts query.
+   */
+  async function toQuestVersionRecords(db: Sql, rows: any[]): Promise<QuestVersionRecord[]> {
+    if (rows.length === 0) return []
+    const pairs = rows.map((row) => ({ id: String(row.id), version: Number(row.version) }))
+    const countsByKey = await computeCountsBatch(db, pairs)
+
+    return rows.map((row) => {
+      const version = Number(row.version)
+      const counts = countsByKey.get(`${row.id}:${version}`) ?? {
+        pass: 0,
+        fail: 0,
+        unsure: 0,
+        abandoned: 0,
+      }
+      return {
+        id: row.id,
+        version,
+        contentHash: row.content_hash,
+        title: row.title,
+        area: row.area,
+        setup: asStringArray(row.setup),
+        steps: asStringArray(row.steps),
+        expect: asStringArray(row.expect),
+        needs: asStringArray(row.needs),
+        record: row.record as QuestRecordMode,
+        start: row.start ?? null,
+        source: {
+          pr: row.source_pr !== null && row.source_pr !== undefined ? Number(row.source_pr) : null,
+          sha: row.source_sha ?? null,
+          added: row.source_added ?? null,
+        },
+        status: row.status as QuestStatus,
+        createdAt: toIso(row.created_at)!,
+        retiredAt: toIso(row.retired_at),
+        counts,
+        passedOnCurrentVersion: counts.pass > 0,
+      }
+    })
+  }
+
+  /**
+   * Converts a single `hollerkit.quests` row into a `QuestVersionRecord`.
+   */
   async function toQuestVersionRecord(db: Sql, row: any): Promise<QuestVersionRecord> {
-    const counts = await computeCounts(db, row.id, Number(row.version))
-    return {
-      id: row.id,
-      version: Number(row.version),
-      contentHash: row.content_hash,
-      title: row.title,
-      area: row.area,
-      setup: asStringArray(row.setup),
-      steps: asStringArray(row.steps),
-      expect: asStringArray(row.expect),
-      needs: asStringArray(row.needs),
-      record: row.record as QuestRecordMode,
-      start: row.start ?? null,
-      source: {
-        pr: row.source_pr !== null && row.source_pr !== undefined ? Number(row.source_pr) : null,
-        sha: row.source_sha ?? null,
-        added: row.source_added ?? null,
-      },
-      status: row.status as QuestStatus,
-      createdAt: toIso(row.created_at)!,
-      retiredAt: toIso(row.retired_at),
-      counts,
-      passedOnCurrentVersion: counts.pass > 0,
-    }
+    const records = await toQuestVersionRecords(db, [row])
+    return records[0]!
   }
 
   return {
@@ -120,12 +172,21 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
+
+        // Acquire per-quest transaction advisory locks in sorted ID order to serialize version allocation
+        const sortedIds = Array.from(new Set(input.quests.map((q) => q.id.trim()))).sort()
+        for (const lockId of sortedIds) {
+          await db`SELECT pg_advisory_xact_lock(hashtext('quest:' || ${lockId}))`
+        }
+
         const activeRows = await db<{ id: string }[]>`
           SELECT DISTINCT id FROM hollerkit.quests WHERE status = 'active'
         `
         const previouslyActiveIds = new Set(activeRows.map((r) => r.id))
         const syncedIds = new Set<string>()
-        const syncedRecords: QuestVersionRecord[] = []
+        const syncedRawRows: any[] = []
+        const activatedIds: string[] = []
+        const reactivatedIds: string[] = []
 
         for (const def of input.quests) {
           const id = def.id.trim()
@@ -156,7 +217,9 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             await db`
               UPDATE hollerkit.quests
               SET status = 'superseded'
-              WHERE id = ${id} AND version <> ${targetVersion}
+              WHERE id = ${id}
+                AND version <> ${targetVersion}
+                AND status IN ('active', 'draft')
             `
 
             const updatedRows = await db<any[]>`
@@ -177,7 +240,8 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
               WHERE id = ${id} AND version = ${targetVersion}
               RETURNING *
             `
-            syncedRecords.push(await toQuestVersionRecord(db, updatedRows[0]!))
+            syncedRawRows.push(updatedRows[0]!)
+            reactivatedIds.push(id)
           } else {
             const maxRows = await db<{ max_version: number }[]>`
               SELECT COALESCE(MAX(version), 0)::int AS max_version
@@ -190,6 +254,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
               UPDATE hollerkit.quests
               SET status = 'superseded'
               WHERE id = ${id}
+                AND status IN ('active', 'draft')
             `
 
             const insertedRows = await db<any[]>`
@@ -207,7 +272,8 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
               )
               RETURNING *
             `
-            syncedRecords.push(await toQuestVersionRecord(db, insertedRows[0]!))
+            syncedRawRows.push(insertedRows[0]!)
+            activatedIds.push(id)
           }
         }
 
@@ -223,8 +289,12 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           }
         }
 
+        const syncedRecords = await toQuestVersionRecords(db, syncedRawRows)
+
         return {
           quests: syncedRecords,
+          activatedIds,
+          reactivatedIds,
           retiredIds,
         }
       })
@@ -232,11 +302,32 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
     async syncBuildManifest(input: SyncBuildManifestInput): Promise<SyncBuildManifestResult> {
       const nowIso = (input.now ?? new Date()).toISOString()
-      registeredEmptyBuilds.add(input.build)
 
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
-        const statuses: BuildManifestQuestStatus[] = []
+
+        // Ensure hollerkit.builds exists and persist the build registration transactionally
+        await db`
+          CREATE TABLE IF NOT EXISTS hollerkit.builds (
+            build text PRIMARY KEY,
+            app_version text,
+            first_seen_at timestamptz NOT NULL DEFAULT now()
+          )
+        `
+        await db`
+          INSERT INTO hollerkit.builds (build, app_version, first_seen_at)
+          VALUES (${input.build}, ${input.appVersion ?? null}, ${nowIso})
+          ON CONFLICT (build) DO UPDATE
+          SET app_version = COALESCE(EXCLUDED.app_version, hollerkit.builds.app_version)
+        `
+
+        // Acquire per-quest transaction advisory locks in sorted ID order to serialize version allocation
+        const sortedIds = Array.from(new Set(input.quests.map((q) => q.id.trim()))).sort()
+        for (const lockId of sortedIds) {
+          await db`SELECT pg_advisory_xact_lock(hashtext('quest:' || ${lockId}))`
+        }
+
+        const syncedRows: any[] = []
 
         for (const def of input.quests) {
           const id = def.id.trim()
@@ -250,7 +341,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           const record: QuestRecordMode = def.record ?? 'optional'
           const start = def.start && def.start.trim().length > 0 ? def.start.trim() : null
 
-          let rows = await db<any[]>`
+          const rows = await db<any[]>`
             SELECT * FROM hollerkit.quests
             WHERE id = ${id} AND content_hash = ${contentHash}
             LIMIT 1
@@ -293,8 +384,20 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             )
             ON CONFLICT (quest_id, quest_version, build) DO NOTHING
           `
+          syncedRows.push(row)
+        }
 
-          const counts = await computeCounts(db, row.id, version)
+        const pairs = syncedRows.map((r) => ({ id: String(r.id), version: Number(r.version) }))
+        const countsByKey = await computeCountsBatch(db, pairs)
+
+        const statuses: BuildManifestQuestStatus[] = syncedRows.map((row) => {
+          const version = Number(row.version)
+          const counts = countsByKey.get(`${row.id}:${version}`) ?? {
+            pass: 0,
+            fail: 0,
+            unsure: 0,
+            abandoned: 0,
+          }
           let boardStatus: QuestBoardStatus = 'pending'
           if (counts.pass > 0) {
             boardStatus = 'passed'
@@ -302,7 +405,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             boardStatus = 'failed'
           }
 
-          statuses.push({
+          return {
             id: row.id,
             version,
             contentHash: row.content_hash,
@@ -322,8 +425,8 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
               added: row.source_added ?? null,
             },
             counts,
-          })
-        }
+          }
+        })
 
         const pendingCount = statuses.filter((s) => s.boardStatus === 'pending').length
         return {
@@ -335,12 +438,20 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     },
 
     async getPendingQuestsForBuild(build: string): Promise<QuestVersionRecord[]> {
+      await sql`
+        CREATE TABLE IF NOT EXISTS hollerkit.builds (
+          build text PRIMARY KEY,
+          app_version text,
+          first_seen_at timestamptz NOT NULL DEFAULT now()
+        )
+      `
       const buildCheck = await sql<{ exists: boolean }[]>`
-        SELECT EXISTS (
-          SELECT 1 FROM hollerkit.quest_builds WHERE build = ${build}
+        SELECT (
+          EXISTS (SELECT 1 FROM hollerkit.builds WHERE build = ${build})
+          OR EXISTS (SELECT 1 FROM hollerkit.quest_builds WHERE build = ${build})
         ) AS exists
       `
-      const isBuildRegistered = registeredEmptyBuilds.has(build) || Boolean(buildCheck[0]?.exists)
+      const isBuildRegistered = Boolean(buildCheck[0]?.exists)
 
       const rows = isBuildRegistered
         ? await sql<any[]>`
@@ -360,14 +471,8 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             ORDER BY q.created_at ASC, q.id ASC
           `
 
-      const pending: QuestVersionRecord[] = []
-      for (const row of rows) {
-        const record = await toQuestVersionRecord(sql, row)
-        if (!record.passedOnCurrentVersion) {
-          pending.push(record)
-        }
-      }
-      return pending
+      const records = await toQuestVersionRecords(sql, rows)
+      return records.filter((record) => !record.passedOnCurrentVersion)
     },
 
     async listQuests(filter: ListQuestsFilter = {}): Promise<QuestVersionRecord[]> {
@@ -379,18 +484,11 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         ORDER BY created_at ASC, id ASC, version ASC
       `
 
-      const results: QuestVersionRecord[] = []
-      for (const row of rows) {
-        const record = await toQuestVersionRecord(sql, row)
-        if (
-          filter.passedOnCurrentVersion !== undefined &&
-          record.passedOnCurrentVersion !== filter.passedOnCurrentVersion
-        ) {
-          continue
-        }
-        results.push(record)
+      const records = await toQuestVersionRecords(sql, rows)
+      if (filter.passedOnCurrentVersion === undefined) {
+        return records
       }
-      return results
+      return records.filter((record) => record.passedOnCurrentVersion === filter.passedOnCurrentVersion)
     },
 
     async createUploadGrant(input: CreateUploadGrantInput): Promise<UploadGrantRecord> {
@@ -424,8 +522,15 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
 
+        // Serialize concurrent feedback creations for the same feedback ID
+        await db`SELECT pg_advisory_xact_lock(hashtext('feedback:' || ${input.id}))`
+
         const existingRows = await db<any[]>`
-          SELECT f.*, COALESCE(q.area, f.metadata->>'area') AS resolved_area
+          SELECT f.*,
+                 COALESCE(
+                   q.area,
+                   CASE WHEN jsonb_typeof(f.metadata->'area') = 'string' THEN f.metadata->>'area' ELSE NULL END
+                 ) AS resolved_area
           FROM hollerkit.feedback f
           LEFT JOIN hollerkit.quests q
             ON q.id = f.quest_id AND q.version = f.quest_version
@@ -601,8 +706,15 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           `
         }
 
-        if (input.sinks && input.sinks.length > 0 && triageStatus === 'new') {
+        const feedbackRow = { ...insertedRows[0]!, resolved_area: resolvedArea }
+        const createdRecord = toFeedbackRecord(feedbackRow)
+
+        if (input.sinks && input.sinks.length > 0) {
           for (const sink of input.sinks) {
+            const shouldEnqueue = input.shouldEnqueueSink
+              ? input.shouldEnqueueSink(sink, createdRecord)
+              : triageStatus === 'new'
+            if (!shouldEnqueue) continue
             await db`
               INSERT INTO hollerkit.outbox (
                 feedback_id, sink, attempts, last_error, next_attempt_at, delivered_at, link, created_at
@@ -613,8 +725,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           }
         }
 
-        const feedbackRow = { ...insertedRows[0]!, resolved_area: resolvedArea }
-        return { feedback: toFeedbackRecord(feedbackRow), idempotent: false }
+        return { feedback: createdRecord, idempotent: false }
       })
     },
 
@@ -624,24 +735,37 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
       let cursorId: string | null = null
 
       if (filter.cursor) {
-        const cursorRows = await sql<{ id: string; created_at: Date | string }[]>`
-          SELECT id::text AS id, created_at FROM hollerkit.feedback WHERE id = ${filter.cursor} LIMIT 1
+        const cursorRows = await sql<{ id: string; created_at_raw: string }[]>`
+          SELECT id::text AS id, created_at::text AS created_at_raw
+          FROM hollerkit.feedback
+          WHERE id = ${filter.cursor}
+          LIMIT 1
         `
         if (cursorRows[0]) {
-          cursorCreatedAt = toIso(cursorRows[0].created_at)
+          cursorCreatedAt = cursorRows[0].created_at_raw
           cursorId = cursorRows[0].id
         }
       }
 
       const rows = await sql<any[]>`
-        SELECT f.*, COALESCE(q.area, f.metadata->>'area') AS resolved_area
+        SELECT f.*,
+               COALESCE(
+                 q.area,
+                 CASE WHEN jsonb_typeof(f.metadata->'area') = 'string' THEN f.metadata->>'area' ELSE NULL END
+               ) AS resolved_area
         FROM hollerkit.feedback f
         LEFT JOIN hollerkit.quests q
           ON q.id = f.quest_id AND q.version = f.quest_version
         WHERE (${filter.kind ?? null}::text IS NULL OR f.kind = ${filter.kind ?? null})
           AND (${filter.result ?? null}::text IS NULL OR f.result = ${filter.result ?? null})
           AND (${filter.triage ?? null}::text IS NULL OR f.triage_status = ${filter.triage ?? null})
-          AND (${filter.area ?? null}::text IS NULL OR COALESCE(q.area, f.metadata->>'area') = ${filter.area ?? null})
+          AND (
+            ${filter.area ?? null}::text IS NULL
+            OR COALESCE(
+                 q.area,
+                 CASE WHEN jsonb_typeof(f.metadata->'area') = 'string' THEN f.metadata->>'area' ELSE NULL END
+               ) = ${filter.area ?? null}
+          )
           AND (${filter.build ?? null}::text IS NULL OR f.build = ${filter.build ?? null})
           AND (${filter.questId ?? null}::text IS NULL OR f.quest_id = ${filter.questId ?? null})
           AND (${filter.since ?? null}::timestamptz IS NULL OR f.created_at >= ${filter.since ?? null}::timestamptz)
@@ -666,7 +790,11 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
     async getFeedbackById(id: string): Promise<FeedbackDetailRecord | null> {
       const fbRows = await sql<any[]>`
-        SELECT f.*, COALESCE(q.area, f.metadata->>'area') AS resolved_area
+        SELECT f.*,
+               COALESCE(
+                 q.area,
+                 CASE WHEN jsonb_typeof(f.metadata->'area') = 'string' THEN f.metadata->>'area' ELSE NULL END
+               ) AS resolved_area
         FROM hollerkit.feedback f
         LEFT JOIN hollerkit.quests q
           ON q.id = f.quest_id AND q.version = f.quest_version
@@ -758,7 +886,11 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         }
 
         const updatedFbRows = await db<any[]>`
-          SELECT f.*, COALESCE(q.area, f.metadata->>'area') AS resolved_area
+          SELECT f.*,
+                 COALESCE(
+                   q.area,
+                   CASE WHEN jsonb_typeof(f.metadata->'area') = 'string' THEN f.metadata->>'area' ELSE NULL END
+                 ) AS resolved_area
           FROM hollerkit.feedback f
           LEFT JOIN hollerkit.quests q
             ON q.id = f.quest_id AND q.version = f.quest_version
@@ -866,15 +998,33 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     },
 
     async claimPendingOutbox(input: ClaimPendingOutboxInput = {}): Promise<OutboxRecord[]> {
-      const nowIso = (input.now ?? new Date()).toISOString()
+      const now = input.now ?? new Date()
+      const nowIso = now.toISOString()
+      const leaseMs = Math.max(0, input.leaseMs ?? 60_000)
+      const leaseUntilIso = new Date(now.getTime() + leaseMs).toISOString()
       const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
+
       const rows = await sql<any[]>`
-        SELECT *
-        FROM hollerkit.outbox
-        WHERE delivered_at IS NULL
-          AND next_attempt_at <= ${nowIso}::timestamptz
-        ORDER BY next_attempt_at ASC, id ASC
-        LIMIT ${limit}
+        WITH claimed AS (
+          SELECT id
+          FROM hollerkit.outbox
+          WHERE delivered_at IS NULL
+            AND next_attempt_at <= ${nowIso}::timestamptz
+          ORDER BY next_attempt_at ASC, id ASC
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+        ),
+        updated AS (
+          UPDATE hollerkit.outbox o
+          SET next_attempt_at = CASE
+                WHEN ${leaseMs}::bigint > 0 THEN ${leaseUntilIso}::timestamptz
+                ELSE o.next_attempt_at
+              END
+          FROM claimed
+          WHERE o.id = claimed.id
+          RETURNING o.*
+        )
+        SELECT * FROM updated ORDER BY id ASC
       `
       return rows.map(toOutboxRecord)
     },

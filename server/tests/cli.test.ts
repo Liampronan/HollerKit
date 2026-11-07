@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { chmod, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import {
   apiKeys,
   createHollerKitServer,
@@ -15,6 +18,8 @@ import {
   runCli,
   staticTokens,
 } from '../dist/index.js'
+
+const execFileAsync = promisify(execFile)
 
 async function startTestHttpServer(handler: (req: Request) => Promise<Response>): Promise<{
   server: Server
@@ -321,8 +326,34 @@ test('CLI: quests sync, conformance --server, keys create/revoke, and migrations
     assert.ok(copiedFiles.includes('001_hollerkit_v1.sql'))
     const copiedSql = await readFile(join(migrationsTarget, '001_hollerkit_v1.sql'), 'utf8')
     assert.ok(copiedSql.includes('CREATE SCHEMA IF NOT EXISTS hollerkit;'))
+
+    // Re-running migrations copy on an existing destination refuses to overwrite and reports collision
+    const migErr: string[] = []
+    const migDuplicateCode = await runCli(['migrations', 'copy', migrationsTarget], {
+      stdout: () => {},
+      stderr: (l) => migErr.push(l),
+    })
+    assert.equal(migDuplicateCode, 1)
+    assert.ok(migErr.some((l) => l.includes('already exists at destination')))
   } finally {
     await httpServer.close()
+    await rm(tempDir, { recursive: true, force: true })
+  }
+})
+
+test('CLI: symlinked hollerkit bin executable invokes runCli and prints usage', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'hollerkit-cli-symlink-'))
+  try {
+    const cliDistPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js')
+    await chmod(cliDistPath, 0o755)
+    const symlinkBinPath = join(tempDir, 'hollerkit')
+    await symlink(cliDistPath, symlinkBinPath)
+
+    const { stdout, stderr } = await execFileAsync(process.execPath, [symlinkBinPath, '--help'])
+    assert.equal(stderr, '')
+    assert.ok(stdout.includes('HollerKit v1 CLI'))
+    assert.ok(stdout.includes('hollerkit quests validate <file>'))
+  } finally {
     await rm(tempDir, { recursive: true, force: true })
   }
 })

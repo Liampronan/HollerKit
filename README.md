@@ -146,58 +146,68 @@ Audio in the default iOS sheet is transcript-first. HollerKit uses microphone in
 
 ```ts
 import {
-  createBugReportHandler,
-  githubIssues,
+  apiKeys,
+  createHollerKitServer,
+  flushOutbox,
+  postgresStore,
+  supabaseJwt,
   supabaseStorage,
-  dispatchers,
 } from 'hollerkit-server'
 
-export const handler = createBugReportHandler({
-  appSecret: process.env.HOLLERKIT_APP_SECRET!,
-  issue: githubIssues({
-    token: process.env.GITHUB_TOKEN!,
-    repo: 'owner/repo',
-    labels: ['user-report', 'needs-triage'],
-  }),
-
-  // Required for screenshots and annotated images.
-  // Audio reports are transcript-only by default, so raw audio upload is not required.
-  // Text-only reports can omit storage.
-  storage: supabaseStorage({
-    url: process.env.SUPABASE_URL!,
-    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    bucket: 'bug-report-assets',
-    signedUrlExpiresInSeconds: 60 * 60 * 24 * 7,
-  }),
-
-  // Optional. This example comments on every created issue.
-  // Change the template if you want to tag Codex or another agent/bot.
-  dispatch: {
-    when: 'always',
-    handler: dispatchers.comment({
-      template: (report) => `@your-bot-here please investigate this report: ${report.id}`,
-    }),
-  },
+const store = postgresStore({
+  url: process.env.DATABASE_URL!,
 })
+
+const storage = supabaseStorage({
+  url: process.env.SUPABASE_URL!,
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  bucket: 'hollerkit',
+})
+
+const sinks = [
+  {
+    name: 'webhook',
+    async deliver(detail) {
+      await fetch(process.env.WEBHOOK_URL!, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(detail),
+      })
+    },
+  },
+]
+
+export const handler = createHollerKitServer({
+  store,
+  storage,
+  sinks,
+  authenticate: [
+    supabaseJwt({
+      jwksUrl: `${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`,
+      secret: process.env.SUPABASE_JWT_SECRET,
+      store,
+    }),
+    apiKeys({ store }),
+  ],
+})
+
+// Periodically flush pending outbox notifications using the same store and sinks:
+// await flushOutbox({ store, storage, sinks })
 ```
 
-The server expects signed `multipart/form-data` requests. GitHub Issues is the default issue destination.
+The v1 server exposes the Web Fetch `(request: Request) => Promise<Response>` handler for all `/v1/*` endpoints (`POST /v1/uploads`, `POST /v1/feedback`, `GET /v1/feedback`, `GET /v1/feedback/{id}`, `PUT /v1/feedback/{id}/triage`, `PUT /v1/quests`, `GET /v1/quests`, `POST /v1/builds/{build}/manifest`, and `GET /v1/builds/{build}/pending`).
 
-Screenshots and annotated images are uploaded through a `StorageAdapter` before the GitHub issue is created. Supabase Storage is the easiest starting point if you already use Supabase; S3-compatible storage such as S3, R2, or Backblaze is a good production default. Text-only reports and transcript-only audio reports can run without storage.
+Media attachments (screenshots, audio, and video clips) are uploaded directly to object storage using short-lived presigned upload grants issued by `POST /v1/uploads` through a `HollerKitStorageAdapter` (`supabaseStorage` or `s3Storage`).
 
-To use Supabase Storage, create a bucket such as `bug-report-assets` and keep the service role key on the server only. Private buckets need either `signedUrlExpiresInSeconds` for time-limited links or a `publicUrl(path)` callback that points at your own authenticated asset proxy.
-
-Raw audio upload is intentionally opt-in at the protocol level. The default iOS sheet is transcript-first and sends text, not an audio file.
-
-Dispatchers are optional post-issue actions. Use them when you want HollerKit to comment, label, assign, or call a webhook after an issue is created.
+Notification sinks are optional outbox consumers triggered when a report or failed/unsure quest run is created. Schedule `flushOutbox({ store, storage, sinks })` to deliver pending outbox rows with exponential backoff.
 
 ## What You Need
 
 - An iOS app that includes the `HollerKit` Swift package.
-- A deployed server endpoint using `createBugReportHandler`.
-- A shared HollerKit app secret on the client and server.
-- A GitHub token with permission to create issues in your target repo.
-- Attachment storage for screenshots and annotated images, using Supabase Storage or any S3-compatible provider.
+- A PostgreSQL database initialized with `server/migrations/001_hollerkit_v1.sql` (via `hollerkit migrations copy`).
+- A deployed server endpoint using `createHollerKitServer` with `postgresStore` (or `memoryStore` for local testing).
+- Tester authentication (`supabaseJwt`) and scoped `hk_...` API keys (`apiKeys`, minted with `hollerkit keys create`).
+- Attachment storage using `supabaseStorage` or `s3Storage` (S3, Cloudflare R2, Backblaze B2, MinIO).
 
 ## Development
 

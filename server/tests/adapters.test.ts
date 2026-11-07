@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { createHmac, createHash, randomUUID } from 'node:crypto'
 import test from 'node:test'
 import {
   apiKeys,
@@ -10,8 +10,10 @@ import {
   generateApiKey,
   getApiKeyPrefix,
   hashApiKey,
+  HollerKitError,
   memoryStore,
   s3Storage,
+  SUPABASE_UPLOAD_URL_TTL_SECONDS,
   supabaseJwt,
   supabaseStorage,
   type FeedbackDetail,
@@ -49,9 +51,13 @@ async function signJwtWithHmac(
 async function signJwtWithEs256(
   payload: Record<string, unknown>,
   privateKey: CryptoKey,
-  kid: string,
+  kid?: string,
 ): Promise<string> {
-  const headerB64 = base64UrlEncode(JSON.stringify({ alg: 'ES256', typ: 'JWT', kid }))
+  const headerObj: Record<string, unknown> = { alg: 'ES256', typ: 'JWT' }
+  if (kid !== undefined) {
+    headerObj.kid = kid
+  }
+  const headerB64 = base64UrlEncode(JSON.stringify(headerObj))
   const payloadB64 = base64UrlEncode(JSON.stringify(payload))
   const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`)
   const sig = await crypto.subtle.sign(
@@ -62,16 +68,82 @@ async function signJwtWithEs256(
   return `${headerB64}.${payloadB64}.${base64UrlEncode(new Uint8Array(sig))}`
 }
 
-test('defaultV1Limits matches Stage 2 spec constants', () => {
+function nodeSigV4Expected(params: {
+  method: 'PUT' | 'GET'
+  host: string
+  canonicalUri: string
+  canonicalQueryString: string
+  headers: Record<string, string>
+  accessKeyId: string
+  secretAccessKey: string
+  region: string
+  amzDate: string
+}): string {
+  const dateStamp = params.amzDate.slice(0, 8)
+  const scope = `${dateStamp}/${params.region}/s3/aws4_request`
+  const sortedHeaders = Object.entries(params.headers).sort(([a], [b]) => a.localeCompare(b))
+  const signedHeaders = sortedHeaders.map(([k]) => k).join(';')
+  const canonicalHeaders = sortedHeaders.map(([k, v]) => `${k}:${v}\n`).join('')
+  const canonicalRequest = [
+    params.method,
+    params.canonicalUri,
+    params.canonicalQueryString,
+    canonicalHeaders,
+    signedHeaders,
+    'UNSIGNED-PAYLOAD',
+  ].join('\n')
+  const hashedCanonical = createHash('sha256').update(canonicalRequest, 'utf8').digest('hex')
+  const stringToSign = ['AWS4-HMAC-SHA256', params.amzDate, scope, hashedCanonical].join('\n')
+  const kDate = createHmac('sha256', `AWS4${params.secretAccessKey}`).update(dateStamp, 'utf8').digest()
+  const kRegion = createHmac('sha256', kDate).update(params.region, 'utf8').digest()
+  const kService = createHmac('sha256', kRegion).update('s3', 'utf8').digest()
+  const kSigning = createHmac('sha256', kService).update('aws4_request', 'utf8').digest()
+  return createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex')
+}
+
+test('defaultV1Limits matches Stage 2 spec constants and upload route enforces maxVideoBytes', async () => {
   assert.equal(defaultV1Limits.maxJsonBytes, 262_144)
   assert.equal(defaultV1Limits.maxTextChars, 20_000)
   assert.equal(defaultV1Limits.maxImages, 12)
   assert.equal(defaultV1Limits.maxImageBytes, 10_485_760)
+  assert.equal(defaultV1Limits.maxVideoBytes, 52_428_800)
   assert.equal(defaultV1Limits.maxMarks, 20)
-  assert.equal(defaultV1Limits.maxVideoBytes, undefined)
+
+  const store = memoryStore()
+  await store.upsertTester({ userId: 'tester-video', active: true })
+  const now = new Date('2026-11-07T08:00:00.000Z')
+  const nowSec = Math.floor(now.getTime() / 1000)
+  const token = await signJwtWithHmac(
+    { sub: 'tester-video', aud: 'authenticated', exp: nowSec + 3600 },
+    'video-secret',
+  )
+  const handler = createHollerKitServer({
+    store,
+    storage: fakeStorage({ now: () => now }),
+    authenticate: supabaseJwt({ secret: 'video-secret', store, now: () => now }),
+  })
+
+  const oversizedVideo = await handler(
+    new Request('http://hollerkit.local/v1/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        feedbackId: randomUUID(),
+        kind: 'video',
+        mimeType: 'video/mp4',
+        size: defaultV1Limits.maxVideoBytes + 1,
+      }),
+    }),
+  )
+  assert.equal(oversizedVideo.status, 413)
+  const body = (await oversizedVideo.json()) as { error: { code: string } }
+  assert.equal(body.error.code, 'video_too_large')
 })
 
-test('supabaseStorage presignUpload and signReadUrl hit expected endpoints and return signed URLs', async () => {
+test('supabaseStorage presignUpload and signReadUrl hit expected endpoints, enforce lifetime, and propagate HollerKitError', async () => {
   const calls: Array<{ url: string; method: string; headers: Record<string, string>; body: string | null }> = []
   const fixedNow = new Date('2026-11-07T08:00:00.000Z')
 
@@ -114,7 +186,10 @@ test('supabaseStorage presignUpload and signReadUrl hit expected endpoints and r
     upload.url,
     'https://project.supabase.co/storage/v1/object/upload/sign/hollerkit-media/fb-1/img.png?token=upload-tok',
   )
-  assert.equal(upload.expiresAt, new Date(fixedNow.getTime() + 600 * 1000).toISOString())
+  assert.equal(
+    upload.expiresAt,
+    new Date(fixedNow.getTime() + SUPABASE_UPLOAD_URL_TTL_SECONDS * 1000).toISOString(),
+  )
   assert.equal(calls[0]!.method, 'POST')
   assert.equal(
     calls[0]!.url,
@@ -133,28 +208,61 @@ test('supabaseStorage presignUpload and signReadUrl hit expected endpoints and r
   assert.equal(read.expiresAt, new Date(fixedNow.getTime() + 3600 * 1000).toISOString())
   assert.equal(calls[1]!.method, 'POST')
   assert.deepEqual(JSON.parse(calls[1]!.body!), { expiresIn: 3600 })
+
+  // Dot-segment traversal in storage key is rejected
+  await assert.rejects(
+    () =>
+      storage.presignUpload({
+        key: 'fb-1/../secret.png',
+        mimeType: 'image/png',
+        size: 100,
+      }),
+    (err: unknown) => err instanceof HollerKitError && err.status === 400 && err.code === 'invalid_storage_key',
+  )
+
+  // Upstream failure throws HollerKitError(502, 'storage_error')
+  const failingStorage = supabaseStorage({
+    url: 'https://project.supabase.co',
+    serviceRoleKey: 'service-role-secret',
+    bucket: 'hollerkit-media',
+    fetchImpl: async () => new Response('Bad Gateway', { status: 502 }),
+  })
+  await assert.rejects(
+    () =>
+      failingStorage.presignUpload({
+        key: 'fb-1/img.png',
+        mimeType: 'image/png',
+        size: 100,
+      }),
+    (err: unknown) => err instanceof HollerKitError && err.status === 502 && err.code === 'storage_error',
+  )
 })
 
-test('s3Storage presignUpload and signReadUrl generate pure Web Crypto AWS SigV4 presigned URLs', async () => {
+test('s3Storage presignUpload and signReadUrl generate independently verified AWS SigV4 signatures and reject dot segments', async () => {
   const fixedNow = new Date('2026-11-07T08:00:00.000Z')
+  const accessKeyId = 'AKIAIOSFODNN7EXAMPLE'
+  const secretAccessKey = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+  const region = 'us-east-1'
+
   const storage = s3Storage({
     endpoint: 'https://s3.us-east-1.amazonaws.com',
     bucket: 'hollerkit-bucket',
-    region: 'us-east-1',
-    accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
-    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    region,
+    accessKeyId,
+    secretAccessKey,
     forcePathStyle: true,
     now: () => fixedNow,
   })
 
+  const specialKey = 'fb-123/shot (1)!.png'
   const upload = await storage.presignUpload({
-    key: 'fb-123/shot.png',
+    key: specialKey,
     mimeType: 'image/png',
     size: 4096,
   })
   const uploadUrl = new URL(upload.url)
   assert.equal(uploadUrl.origin, 'https://s3.us-east-1.amazonaws.com')
-  assert.equal(uploadUrl.pathname, '/hollerkit-bucket/fb-123/shot.png')
+  assert.equal(uploadUrl.pathname, '/hollerkit-bucket/fb-123/shot%20%281%29%21.png')
   assert.equal(uploadUrl.searchParams.get('X-Amz-Algorithm'), 'AWS4-HMAC-SHA256')
   assert.equal(
     uploadUrl.searchParams.get('X-Amz-Credential'),
@@ -162,27 +270,76 @@ test('s3Storage presignUpload and signReadUrl generate pure Web Crypto AWS SigV4
   )
   assert.equal(uploadUrl.searchParams.get('X-Amz-Date'), '20261107T080000Z')
   assert.equal(uploadUrl.searchParams.get('X-Amz-Expires'), '600')
-  assert.equal(uploadUrl.searchParams.get('X-Amz-SignedHeaders'), 'host')
-  assert.match(uploadUrl.searchParams.get('X-Amz-Signature') ?? '', /^[0-9a-f]{64}$/)
+  assert.equal(uploadUrl.searchParams.get('X-Amz-SignedHeaders'), 'content-length;content-type;host')
+
+  const expectedPutSig = nodeSigV4Expected({
+    method: 'PUT',
+    host: 's3.us-east-1.amazonaws.com',
+    canonicalUri: '/hollerkit-bucket/fb-123/shot%20%281%29%21.png',
+    canonicalQueryString:
+      'X-Amz-Algorithm=AWS4-HMAC-SHA256' +
+      '&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261107%2Fus-east-1%2Fs3%2Faws4_request' +
+      '&X-Amz-Date=20261107T080000Z' +
+      '&X-Amz-Expires=600' +
+      '&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost',
+    headers: {
+      'content-length': '4096',
+      'content-type': 'image/png',
+      host: 's3.us-east-1.amazonaws.com',
+    },
+    accessKeyId,
+    secretAccessKey,
+    region,
+    amzDate: '20261107T080000Z',
+  })
+  assert.equal(uploadUrl.searchParams.get('X-Amz-Signature'), expectedPutSig)
   assert.equal(upload.expiresAt, new Date(fixedNow.getTime() + 600 * 1000).toISOString())
 
   const read = await storage.signReadUrl({
-    key: 'fb-123/shot.png',
+    key: specialKey,
   })
   const readUrl = new URL(read.url)
   assert.equal(readUrl.searchParams.get('X-Amz-Expires'), '3600')
-  assert.notEqual(
-    readUrl.searchParams.get('X-Amz-Signature'),
-    uploadUrl.searchParams.get('X-Amz-Signature'),
-    'GET and PUT signatures must differ',
+  assert.equal(readUrl.searchParams.get('X-Amz-SignedHeaders'), 'host')
+
+  const expectedGetSig = nodeSigV4Expected({
+    method: 'GET',
+    host: 's3.us-east-1.amazonaws.com',
+    canonicalUri: '/hollerkit-bucket/fb-123/shot%20%281%29%21.png',
+    canonicalQueryString:
+      'X-Amz-Algorithm=AWS4-HMAC-SHA256' +
+      '&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261107%2Fus-east-1%2Fs3%2Faws4_request' +
+      '&X-Amz-Date=20261107T080000Z' +
+      '&X-Amz-Expires=3600' +
+      '&X-Amz-SignedHeaders=host',
+    headers: {
+      host: 's3.us-east-1.amazonaws.com',
+    },
+    accessKeyId,
+    secretAccessKey,
+    region,
+    amzDate: '20261107T080000Z',
+  })
+  assert.equal(readUrl.searchParams.get('X-Amz-Signature'), expectedGetSig)
+  assert.notEqual(expectedGetSig, expectedPutSig, 'GET and PUT signatures must differ')
+
+  // Reject dot segments so URL normalization cannot alter signed key
+  await assert.rejects(
+    () =>
+      storage.presignUpload({
+        key: 'fb-123/../other/shot.png',
+        mimeType: 'image/png',
+        size: 1024,
+      }),
+    (err: unknown) => err instanceof HollerKitError && err.status === 400 && err.code === 'invalid_storage_key',
   )
 
   const vhostStorage = s3Storage({
     endpoint: 'https://s3.us-east-1.amazonaws.com',
     bucket: 'hollerkit-bucket',
-    region: 'us-east-1',
-    accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
-    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    region,
+    accessKeyId,
+    secretAccessKey,
     forcePathStyle: false,
     now: () => fixedNow,
   })
@@ -192,7 +349,7 @@ test('s3Storage presignUpload and signReadUrl generate pure Web Crypto AWS SigV4
   assert.equal(vhostUrl.pathname, '/fb-123/shot.png')
 })
 
-test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and apiKeys authenticates hk_ keys', async () => {
+test('supabaseJwt verifies ES256/HS256, enforces aud/iss/tester checks, rejects forged signatures, and apiKeys sets stable principalId', async () => {
   const store = memoryStore()
   await store.upsertTester({
     userId: 'user-es256',
@@ -210,7 +367,18 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
     active: false,
   })
 
+  // Configuration without store or authorizeTester must throw
+  assert.throws(
+    () => supabaseJwt({ secret: 'some-secret' }),
+    /supabaseJwt requires at least one of store or authorizeTester/,
+  )
+
   const { publicKey, privateKey } = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify'],
+  )
+  const { privateKey: wrongPrivateKey } = await crypto.subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' },
     true,
     ['sign', 'verify'],
@@ -220,9 +388,10 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
 
   const fixedNow = new Date('2026-11-07T08:00:00.000Z')
   const nowSec = Math.floor(fixedNow.getTime() / 1000)
+  const issuer = 'https://project.supabase.co/auth/v1'
 
   const jwtAuth = supabaseJwt({
-    jwksUrl: 'https://project.supabase.co/auth/v1/.well-known/jwks.json',
+    jwksUrl: `${issuer}/.well-known/jwks.json`,
     secret: 'super-secret-jwt-hmac-key-for-supabase',
     store,
     now: () => fixedNow,
@@ -236,7 +405,13 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
 
   // 1. Valid ES256 JWT
   const esToken = await signJwtWithEs256(
-    { sub: 'user-es256', email: 'es256@example.com', exp: nowSec + 3600 },
+    {
+      sub: 'user-es256',
+      email: 'es256@example.com',
+      aud: 'authenticated',
+      iss: issuer,
+      exp: nowSec + 3600,
+    },
     privateKey,
     'key-1',
   )
@@ -246,6 +421,7 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
     }),
   )
   assert.ok(p1)
+  assert.equal(p1.principalId, 'user-es256')
   assert.equal(p1.subject, 'user-es256')
   assert.deepEqual(p1.scopes, ['tester'])
   assert.equal(jwksFetchCount, 1)
@@ -259,9 +435,67 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
   assert.ok(p2)
   assert.equal(jwksFetchCount, 1)
 
+  // Forged ES256 JWT (active tester, valid claims, wrong private key) returns null
+  const forgedEsToken = await signJwtWithEs256(
+    {
+      sub: 'user-es256',
+      email: 'es256@example.com',
+      aud: 'authenticated',
+      iss: issuer,
+      exp: nowSec + 3600,
+    },
+    wrongPrivateKey,
+    'key-1',
+  )
+  assert.equal(
+    await jwtAuth(
+      new Request('http://hollerkit.local/v1/uploads', {
+        headers: { authorization: `Bearer ${forgedEsToken}` },
+      }),
+    ),
+    null,
+  )
+
+  // Unknown kid does not fall back to key-1 and throttles forced JWKS refreshes
+  const unknownKidToken = await signJwtWithEs256(
+    {
+      sub: 'user-es256',
+      aud: 'authenticated',
+      iss: issuer,
+      exp: nowSec + 3600,
+    },
+    privateKey,
+    'unknown-kid-99',
+  )
+  assert.equal(
+    await jwtAuth(
+      new Request('http://hollerkit.local/v1/uploads', {
+        headers: { authorization: `Bearer ${unknownKidToken}` },
+      }),
+    ),
+    null,
+  )
+  assert.equal(jwksFetchCount, 2)
+  // Immediate second unknown-kid request is throttled by cooldown
+  assert.equal(
+    await jwtAuth(
+      new Request('http://hollerkit.local/v1/uploads', {
+        headers: { authorization: `Bearer ${unknownKidToken}` },
+      }),
+    ),
+    null,
+  )
+  assert.equal(jwksFetchCount, 2)
+
   // 2. Valid HS256 JWT fallback
   const hsToken = await signJwtWithHmac(
-    { sub: 'user-hs256', email: 'hs256@example.com', exp: nowSec + 3600 },
+    {
+      sub: 'user-hs256',
+      email: 'hs256@example.com',
+      aud: 'authenticated',
+      iss: issuer,
+      exp: nowSec + 3600,
+    },
     'super-secret-jwt-hmac-key-for-supabase',
   )
   const pHs = await jwtAuth(
@@ -273,9 +507,67 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
   assert.equal(pHs.subject, 'user-hs256')
   assert.deepEqual(pHs.scopes, ['tester'])
 
+  // Forged HS256 JWT (wrong HMAC secret) returns null
+  const forgedHsToken = await signJwtWithHmac(
+    {
+      sub: 'user-hs256',
+      email: 'hs256@example.com',
+      aud: 'authenticated',
+      iss: issuer,
+      exp: nowSec + 3600,
+    },
+    'wrong-hmac-secret',
+  )
+  assert.equal(
+    await jwtAuth(
+      new Request('http://hollerkit.local/v1/uploads', {
+        headers: { authorization: `Bearer ${forgedHsToken}` },
+      }),
+    ),
+    null,
+  )
+
+  // Mismatched audience returns null
+  const wrongAudToken = await signJwtWithHmac(
+    {
+      sub: 'user-hs256',
+      aud: 'other-service',
+      iss: issuer,
+      exp: nowSec + 3600,
+    },
+    'super-secret-jwt-hmac-key-for-supabase',
+  )
+  assert.equal(
+    await jwtAuth(
+      new Request('http://hollerkit.local/v1/uploads', {
+        headers: { authorization: `Bearer ${wrongAudToken}` },
+      }),
+    ),
+    null,
+  )
+
+  // Mismatched issuer returns null
+  const wrongIssToken = await signJwtWithHmac(
+    {
+      sub: 'user-hs256',
+      aud: 'authenticated',
+      iss: 'https://evil.supabase.co/auth/v1',
+      exp: nowSec + 3600,
+    },
+    'super-secret-jwt-hmac-key-for-supabase',
+  )
+  assert.equal(
+    await jwtAuth(
+      new Request('http://hollerkit.local/v1/uploads', {
+        headers: { authorization: `Bearer ${wrongIssToken}` },
+      }),
+    ),
+    null,
+  )
+
   // 3. Expired JWT returns null
   const expiredToken = await signJwtWithHmac(
-    { sub: 'user-hs256', exp: nowSec - 10 },
+    { sub: 'user-hs256', aud: 'authenticated', iss: issuer, exp: nowSec - 10 },
     'super-secret-jwt-hmac-key-for-supabase',
   )
   const pExpired = await jwtAuth(
@@ -287,7 +579,7 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
 
   // 4. Inactive tester returns null
   const inactiveToken = await signJwtWithHmac(
-    { sub: 'user-inactive', exp: nowSec + 3600 },
+    { sub: 'user-inactive', aud: 'authenticated', iss: issuer, exp: nowSec + 3600 },
     'super-secret-jwt-hmac-key-for-supabase',
   )
   const pInactive = await jwtAuth(
@@ -299,9 +591,10 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
 
   // 5. hk_ token returns null from supabaseJwt so apiKeys can handle it
   const rawApiKey = generateApiKey('agent')
+  const keyHash = hashApiKey(rawApiKey)
   assert.ok(rawApiKey.startsWith('hk_agent_'))
   await store.createApiKey({
-    keyHash: hashApiKey(rawApiKey),
+    keyHash,
     keyPrefix: getApiKeyPrefix(rawApiKey),
     label: 'my-agent',
     scopes: ['agent:read', 'agent:triage'],
@@ -315,6 +608,7 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
   const apiKeyAuth = apiKeys({ store })
   const pKey = await apiKeyAuth(hkReq)
   assert.ok(pKey)
+  assert.equal(pKey.principalId, `apikey:${keyHash}`)
   assert.equal(pKey.subject, getApiKeyPrefix(rawApiKey))
   assert.deepEqual(pKey.scopes, ['agent:read', 'agent:triage'])
 
@@ -323,7 +617,7 @@ test('supabaseJwt verifies ES256 JWKS (with caching) and HS256 fallback, and api
   assert.equal(await apiKeyAuth(hkReq), null)
 })
 
-test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, and backs off on failure', async () => {
+test('outbox enqueues matching sinks atomically, delivers with stable deliveryKey, enforces timeout, and backs off on failure', async () => {
   const store = memoryStore()
   const storage = fakeStorage()
   let currentNow = new Date('2026-11-07T09:00:00.000Z')
@@ -337,6 +631,7 @@ test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, 
   })
 
   const deliveredPayloads: FeedbackDetail[] = []
+  const webhookDeliveryKeys: string[] = []
   let shouldFailWebhook = true
 
   const githubSink: HollerKitSink = {
@@ -349,13 +644,28 @@ test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, 
 
   const webhookSink: HollerKitSink = {
     name: 'webhook',
-    async deliver() {
+    async deliver(detail) {
+      if (detail.deliveryKey) {
+        webhookDeliveryKeys.push(detail.deliveryKey)
+      }
       if (shouldFailWebhook) {
         throw new Error('Webhook 503 Service Unavailable')
       }
       return { link: 'https://hooks.acme.test/delivered/1' }
     },
   }
+
+  // Duplicate sink names are rejected
+  assert.throws(
+    () =>
+      createHollerKitServer({
+        store,
+        storage,
+        sinks: [githubSink, { name: 'github', async deliver() {} }],
+        authenticate: apiKeys({ store }),
+      }),
+    /Duplicate sink registration: "github"/,
+  )
 
   const handler = createHollerKitServer({
     store,
@@ -369,7 +679,11 @@ test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, 
   })
 
   const testerJwt = await signJwtWithHmac(
-    { sub: 'tester-1', exp: Math.floor(currentNow.getTime() / 1000) + 3600 },
+    {
+      sub: 'tester-1',
+      aud: 'authenticated',
+      exp: Math.floor(currentNow.getTime() / 1000) + 3600,
+    },
     'test-secret',
   )
 
@@ -415,10 +729,10 @@ test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, 
     }),
   )
   assert.equal(passRes.status, 201)
-  const pendingAfterPass = await store.claimPendingOutbox({ now: currentNow })
+  const pendingAfterPass = await store.claimPendingOutbox({ now: currentNow, leaseMs: 0 })
   assert.equal(pendingAfterPass.length, 0)
 
-  // 2. Report feedback enqueues both sinks
+  // 2. Report feedback enqueues both sinks atomically
   const reportId = randomUUID()
   const reportRes = await handler(
     new Request('http://hollerkit.local/v1/feedback', {
@@ -437,7 +751,7 @@ test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, 
   )
   assert.equal(reportRes.status, 201)
 
-  const pendingBeforeFlush = await store.claimPendingOutbox({ now: currentNow })
+  const pendingBeforeFlush = await store.claimPendingOutbox({ now: currentNow, leaseMs: 0 })
   assert.equal(pendingBeforeFlush.length, 2)
 
   // Flush #1: github succeeds (adds link to feedback.links), webhook fails (attempts=1, backoff +30s)
@@ -483,6 +797,8 @@ test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, 
   assert.equal(flush2.claimed, 1)
   assert.equal(flush2.delivered.length, 1)
   assert.equal(flush2.delivered[0]!.sink, 'webhook')
+  assert.equal(webhookDeliveryKeys.length, 2)
+  assert.equal(webhookDeliveryKeys[0], webhookDeliveryKeys[1], 'deliveryKey must remain stable across retries')
 
   // Verify both sink links are now recorded on the feedback item
   const detail = await store.getFeedbackById(reportId)
@@ -490,4 +806,34 @@ test('outbox enqueues matching sinks on POST /v1/feedback, delivers with links, 
   assert.equal(detail.feedback.links.length, 2)
   assert.ok(detail.feedback.links.some((l) => l.includes('github.com/acme/app/issues/')))
   assert.ok(detail.feedback.links.includes('https://hooks.acme.test/delivered/1'))
+
+  // 3. Sink timeout deadline aborts hanging sink and records failure
+  await store.enqueueOutbox({
+    feedbackId: reportId,
+    sink: 'slow-sink',
+    now: currentNow,
+  })
+  let signalAborted = false
+  const slowSink: HollerKitSink = {
+    name: 'slow-sink',
+    async deliver(_detail, ctx) {
+      await new Promise<void>((_resolve, reject) => {
+        ctx?.signal.addEventListener('abort', () => {
+          signalAborted = true
+          reject(new Error('Aborted'))
+        })
+      })
+    },
+  }
+  const flushTimeout = await flushOutbox({
+    store,
+    storage,
+    sinks: [slowSink],
+    deliveryTimeoutMs: 25,
+    now: () => currentNow,
+  })
+  assert.equal(flushTimeout.claimed, 1)
+  assert.equal(flushTimeout.failed.length, 1)
+  assert.equal(signalAborted, true)
+  assert.match(flushTimeout.failed[0]!.lastError ?? '', /timed out|Aborted/)
 })

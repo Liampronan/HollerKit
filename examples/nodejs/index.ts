@@ -8,15 +8,32 @@ import {
   supabaseJwt,
 } from 'hollerkit-server'
 
+/**
+ * Reads a required environment variable or throws an error naming the missing variable.
+ */
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim()
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`)
+  }
+  return value
+}
+
+const databaseUrl = requireEnv('DATABASE_URL')
+const s3Endpoint = requireEnv('S3_ENDPOINT')
+const s3Bucket = requireEnv('S3_BUCKET')
+const s3AccessKeyId = requireEnv('S3_ACCESS_KEY_ID')
+const s3SecretAccessKey = requireEnv('S3_SECRET_ACCESS_KEY')
+
 const store = postgresStore({
-  url: process.env.DATABASE_URL!,
+  url: databaseUrl,
 })
 
 const storage = s3Storage({
-  endpoint: process.env.S3_ENDPOINT!,
-  bucket: process.env.S3_BUCKET!,
-  accessKeyId: process.env.S3_ACCESS_KEY_ID!,
-  secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
+  endpoint: s3Endpoint,
+  bucket: s3Bucket,
+  accessKeyId: s3AccessKeyId,
+  secretAccessKey: s3SecretAccessKey,
 })
 
 const handler = createHollerKitServer({

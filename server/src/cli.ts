@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { copyFile, mkdir, readdir, readFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import { constants, copyFile, mkdir, readdir, readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { generateApiKey, getApiKeyPrefix, hashApiKey } from './v1/auth.js'
@@ -23,6 +24,9 @@ export interface CliIo {
   storeFactory?: ((dbUrl: string) => HollerKitStore) | undefined
 }
 
+/**
+ * Executes a `hollerkit` CLI command and returns a POSIX exit code (`0` on success, `1` on error).
+ */
 export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
   const stdout = io.stdout ?? ((line: string) => console.log(line))
   const stderr = io.stderr ?? ((line: string) => console.error(line))
@@ -88,7 +92,6 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
         const parsedJson = JSON.parse(rawText)
         const manifest = parseQuestManifest(parsedJson)
 
-        const syncStartMs = Date.now()
         const targetUrl = `${serverUrl.replace(/\/+$/, '')}/v1/quests`
         const response = await fetchFn(targetUrl, {
           method: 'PUT',
@@ -108,6 +111,8 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
         const payload = (await response.json()) as {
           ok?: boolean
           quests?: QuestVersionRecord[]
+          activatedIds?: string[]
+          reactivatedIds?: string[]
           retiredIds?: string[]
           error?: { code?: string; message?: string }
         }
@@ -120,16 +125,12 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
 
         const quests = payload.quests ?? []
         const retiredIds = payload.retiredIds ?? []
-        let activated = 0
-        let reactivated = 0
-        for (const q of quests) {
-          const createdMs = Date.parse(q.createdAt)
-          if (!Number.isNaN(createdMs) && createdMs >= syncStartMs - 2000) {
-            activated += 1
-          } else {
-            reactivated += 1
-          }
-        }
+        const activated = Array.isArray(payload.activatedIds)
+          ? payload.activatedIds.length
+          : quests.length
+        const reactivated = Array.isArray(payload.reactivatedIds)
+          ? payload.reactivatedIds.length
+          : 0
 
         stdout(
           `Synced ${quests.length} quest(s): activated=${activated}, reactivated=${reactivated}, retired=${retiredIds.length}`,
@@ -271,7 +272,15 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
         for (const file of sqlFiles) {
           const srcPath = join(migrationsDir, file)
           const destPath = join(targetDir, file)
-          await copyFile(srcPath, destPath)
+          try {
+            await copyFile(srcPath, destPath, constants.COPYFILE_EXCL)
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === 'EEXIST') {
+              stderr(`Error: Migration file already exists at destination: ${destPath}`)
+              return 1
+            }
+            throw error
+          }
           stdout(`Copied ${file} -> ${destPath}`)
         }
         return 0
@@ -290,6 +299,9 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
   }
 }
 
+/**
+ * Parses CLI positional arguments and `--flag value` / `--flag=value` options.
+ */
 function parseFlags(args: string[]): { positional: string[]; flags: Map<string, string> } {
   const positional: string[] = []
   const flags = new Map<string, string>()
@@ -320,6 +332,9 @@ function parseFlags(args: string[]): { positional: string[]; flags: Map<string, 
   return { positional, flags }
 }
 
+/**
+ * Prints the `hollerkit` CLI usage help message.
+ */
 function printUsage(stdout: (line: string) => void): void {
   stdout(`HollerKit v1 CLI
 
@@ -332,9 +347,21 @@ Usage:
   hollerkit migrations copy <dir>`)
 }
 
-const isMain =
-  process.argv[1] &&
-  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+/**
+ * Determines whether the current module is being executed as the main CLI entrypoint,
+ * resolving symlinks so npm `bin` invocations match `import.meta.url`.
+ */
+export function isCliEntrypoint(argv1: string | undefined, moduleUrl: string): boolean {
+  if (!argv1) return false
+  const modulePath = fileURLToPath(moduleUrl)
+  try {
+    return realpathSync(argv1) === realpathSync(modulePath)
+  } catch {
+    return resolve(argv1) === resolve(modulePath)
+  }
+}
+
+const isMain = isCliEntrypoint(process.argv[1], import.meta.url)
 
 if (isMain) {
   runCli(process.argv.slice(2)).then((code) => {

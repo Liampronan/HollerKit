@@ -13,12 +13,34 @@ export interface SignedFeedbackAttachmentRecord extends FeedbackAttachmentRecord
 
 export interface FeedbackDetail extends Omit<FeedbackDetailRecord, 'attachments'> {
   attachments: SignedFeedbackAttachmentRecord[]
+  /**
+   * Stable outbox row identifier (`hollerkit.outbox.id`) preserved across retries
+   * for at-least-once delivery deduplication.
+   */
+  deliveryId?: number | undefined
+  /**
+   * Stable string idempotency key (`outbox:<id>`) preserved across retries.
+   */
+  deliveryKey?: string | undefined
 }
 
+export interface HollerKitSinkDeliveryContext {
+  signal: AbortSignal
+  deliveryId: number
+  deliveryKey: string
+}
+
+/**
+ * Notification sink invoked by `flushOutbox` under an at-least-once delivery contract.
+ * Sinks should use `detail.deliveryKey` (or `detail.deliveryId`) to deduplicate retries.
+ */
 export interface HollerKitSink {
   name: string
   when?: ((feedback: FeedbackRecord) => boolean) | undefined
-  deliver(feedback: FeedbackDetail): Promise<{ link?: string | undefined } | void>
+  deliver(
+    feedback: FeedbackDetail,
+    context?: HollerKitSinkDeliveryContext,
+  ): Promise<{ link?: string | undefined } | void>
 }
 
 export interface FlushOutboxOptions {
@@ -26,6 +48,8 @@ export interface FlushOutboxOptions {
   storage?: HollerKitStorageAdapter | undefined
   sinks: HollerKitSink[]
   limit?: number | undefined
+  leaseMs?: number | undefined
+  deliveryTimeoutMs?: number | undefined
   now?: Date | (() => Date) | undefined
   baseDelayMs?: number | undefined
   maxDelayMs?: number | undefined
@@ -38,6 +62,9 @@ export interface FlushOutboxResult {
   failed: OutboxRecord[]
 }
 
+/**
+ * Default predicate for notification sinks: fires on bug reports and failed/unsure quest runs.
+ */
 export function defaultSinkWhen(feedback: FeedbackRecord): boolean {
   return (
     feedback.kind === 'report' ||
@@ -46,6 +73,9 @@ export function defaultSinkWhen(feedback: FeedbackRecord): boolean {
   )
 }
 
+/**
+ * Evaluates whether a sink should be enqueued for the given feedback item.
+ */
 export function shouldEnqueueSink(
   sink: HollerKitSink | string,
   feedback: FeedbackRecord,
@@ -57,7 +87,34 @@ export function shouldEnqueueSink(
   return predicate(feedback)
 }
 
+/**
+ * Validates that every configured sink has a non-empty, unique name.
+ */
+export function validateUniqueSinks<T extends HollerKitSink | string>(
+  sinks: ReadonlyArray<T>,
+): Map<string, T> {
+  const byName = new Map<string, T>()
+  for (const sink of sinks) {
+    const rawName = typeof sink === 'string' ? sink : sink.name
+    const name = rawName?.trim()
+    if (!name) {
+      throw new Error('Sink name must be a non-empty string.')
+    }
+    if (byName.has(name)) {
+      throw new Error(`Duplicate sink registration: "${name}".`)
+    }
+    byName.set(name, sink)
+  }
+  return byName
+}
+
+/**
+ * Claims pending outbox rows, invokes matching sinks with a bounded deadline,
+ * and records delivery links or exponential retry backoff.
+ */
 export async function flushOutbox(options: FlushOutboxOptions): Promise<FlushOutboxResult> {
+  const sinksByName = validateUniqueSinks(options.sinks)
+
   const resolveNow = (): Date => {
     if (typeof options.now === 'function') return options.now()
     if (options.now instanceof Date) return options.now
@@ -68,14 +125,11 @@ export async function flushOutbox(options: FlushOutboxOptions): Promise<FlushOut
   const baseDelayMs = options.baseDelayMs ?? 30_000
   const maxDelayMs = options.maxDelayMs ?? 3_600_000
   const readUrlTtlSeconds = options.readUrlTtlSeconds ?? 3600
-
-  const sinksByName = new Map<string, HollerKitSink>()
-  for (const sink of options.sinks) {
-    sinksByName.set(sink.name, sink)
-  }
+  const deliveryTimeoutMs = options.deliveryTimeoutMs ?? 30_000
 
   const pendingRows = await options.store.claimPendingOutbox({
     limit: options.limit,
+    leaseMs: options.leaseMs,
     now,
   })
 
@@ -119,10 +173,16 @@ export async function flushOutbox(options: FlushOutboxOptions): Promise<FlushOut
           )
         : detail.attachments.map((att) => ({ ...att }))
 
-      const result = await sink.deliver({
+      const deliveryId = row.id
+      const deliveryKey = `outbox:${row.id}`
+      const payload: FeedbackDetail = {
         ...detail,
         attachments,
-      })
+        deliveryId,
+        deliveryKey,
+      }
+
+      const result = await deliverWithDeadline(sink, payload, deliveryId, deliveryKey, deliveryTimeoutMs)
 
       const link = result && typeof result.link === 'string' && result.link.trim().length > 0
         ? result.link.trim()
@@ -155,6 +215,44 @@ export async function flushOutbox(options: FlushOutboxOptions): Promise<FlushOut
   }
 }
 
+/**
+ * Invokes `sink.deliver` bounded by a deadline timer and `AbortSignal`.
+ */
+async function deliverWithDeadline(
+  sink: HollerKitSink,
+  payload: FeedbackDetail,
+  deliveryId: number,
+  deliveryKey: string,
+  timeoutMs: number,
+): Promise<{ link?: string | undefined } | void> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error(`Sink "${sink.name}" delivery timed out after ${timeoutMs}ms.`))
+    }, timeoutMs)
+  })
+
+  try {
+    return await Promise.race([
+      sink.deliver(payload, {
+        signal: controller.signal,
+        deliveryId,
+        deliveryKey,
+      }),
+      timeoutPromise,
+    ])
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer)
+    }
+  }
+}
+
+/**
+ * Computes the next retry timestamp using capped exponential backoff.
+ */
 function computeBackoffIso(
   now: Date,
   previousAttempts: number,
