@@ -1,0 +1,1075 @@
+openapi: 3.1.0
+info:
+  title: HollerKit Protocol v1
+  version: 1.0.0
+  description: >
+    HollerKit `/v1` HTTP protocol for iOS shake-sheet bug reports, guided QA quest
+    runs, CI quest manifest syncing, and coding-agent triage.
+servers:
+  - url: https://example.supabase.co/functions/v1/hollerkit
+    description: Supabase Edge Function or standalone HollerKit server
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Either a host-app session JWT (resolved to `tester` scope via `hollerkit.testers`)
+        or a `hk_...` API key resolved via SHA-256 against `hollerkit.api_keys` with
+        scopes `quests:write`, `agent:read`, and/or `agent:triage`.
+
+  headers:
+    HollerKitProtocol:
+      description: Protocol version header (`1`). Always returned on `/v1/*` responses.
+      schema:
+        type: string
+        const: "1"
+
+  parameters:
+    HollerKitProtocolRequestHeader:
+      name: hollerkit-protocol
+      in: header
+      required: false
+      description: Optional client protocol version check. Must be `"1"` if provided; any other value returns `400 unsupported_protocol`.
+      schema:
+        type: string
+        default: "1"
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    QuestSource:
+      type: object
+      properties:
+        pr:
+          type: [integer, "null"]
+        sha:
+          type: [string, "null"]
+        added:
+          type: [string, "null"]
+
+    QuestRecordMode:
+      type: string
+      enum: [none, optional, suggested, required]
+
+    QuestStatus:
+      type: string
+      enum: [draft, active, superseded, retired]
+
+    QuestBoardStatus:
+      type: string
+      enum: [pending, passed, failed]
+
+    QuestDefinitionInput:
+      type: object
+      required: [id, title, area, steps, expect]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        contentHash:
+          type: string
+          description: Optional client-computed SHA-256 hex content hash. Server verifies or computes canonical hash.
+        title:
+          type: string
+          minLength: 1
+        area:
+          type: string
+          minLength: 1
+        setup:
+          type: array
+          items:
+            type: string
+          default: []
+        steps:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        expect:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        needs:
+          type: array
+          items:
+            type: string
+          default: []
+        record:
+          $ref: "#/components/schemas/QuestRecordMode"
+          default: optional
+        start:
+          type: [string, "null"]
+        source:
+          $ref: "#/components/schemas/QuestSource"
+
+    QuestVersionRecord:
+      type: object
+      required:
+        - id
+        - version
+        - contentHash
+        - title
+        - area
+        - setup
+        - steps
+        - expect
+        - needs
+        - record
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+        contentHash:
+          type: string
+        title:
+          type: string
+        area:
+          type: string
+        setup:
+          type: array
+          items:
+            type: string
+        steps:
+          type: array
+          items:
+            type: string
+        expect:
+          type: array
+          items:
+            type: string
+        needs:
+          type: array
+          items:
+            type: string
+        record:
+          $ref: "#/components/schemas/QuestRecordMode"
+        start:
+          type: [string, "null"]
+        source:
+          $ref: "#/components/schemas/QuestSource"
+        status:
+          $ref: "#/components/schemas/QuestStatus"
+        createdAt:
+          type: string
+          format: date-time
+        retiredAt:
+          type: [string, "null"]
+          format: date-time
+        counts:
+          type: object
+          required: [pass, fail, unsure, abandoned]
+          properties:
+            pass:
+              type: integer
+            fail:
+              type: integer
+            unsure:
+              type: integer
+            abandoned:
+              type: integer
+        passedOnCurrentVersion:
+          type: boolean
+
+    BuildManifestQuestStatus:
+      type: object
+      required:
+        - id
+        - version
+        - contentHash
+        - questStatus
+        - boardStatus
+        - title
+        - area
+        - setup
+        - steps
+        - expect
+        - needs
+        - record
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+        contentHash:
+          type: string
+        questStatus:
+          $ref: "#/components/schemas/QuestStatus"
+        boardStatus:
+          $ref: "#/components/schemas/QuestBoardStatus"
+        title:
+          type: string
+        area:
+          type: string
+        setup:
+          type: array
+          items:
+            type: string
+        steps:
+          type: array
+          items:
+            type: string
+        expect:
+          type: array
+          items:
+            type: string
+        needs:
+          type: array
+          items:
+            type: string
+        record:
+          $ref: "#/components/schemas/QuestRecordMode"
+        start:
+          type: [string, "null"]
+        source:
+          $ref: "#/components/schemas/QuestSource"
+        counts:
+          type: object
+          required: [pass, fail, unsure, abandoned]
+          properties:
+            pass:
+              type: integer
+            fail:
+              type: integer
+            unsure:
+              type: integer
+            abandoned:
+              type: integer
+
+    UploadRequest:
+      type: object
+      required: [feedbackId, kind, mimeType, size]
+      properties:
+        feedbackId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [image, audio, video, keyframe, mark]
+        mimeType:
+          type: string
+        size:
+          type: integer
+          minimum: 1
+
+    UploadGrantResponse:
+      type: object
+      required: [ok, key, url, expiresAt]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        key:
+          type: string
+        url:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+
+    FeedbackEventInput:
+      type: object
+      required: [kind]
+      properties:
+        offsetSeconds:
+          type: number
+          default: 0
+        kind:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+
+    FeedbackAttachmentInput:
+      type: object
+      required: [key, kind]
+      properties:
+        key:
+          type: string
+        kind:
+          type: string
+          enum: [image, audio, video, keyframe, mark]
+        mimeType:
+          type: string
+        size:
+          type: integer
+        offsetSeconds:
+          type: [number, "null"]
+        videoStartOffsetSeconds:
+          type: [number, "null"]
+
+    FeedbackCreateRequest:
+      type: object
+      required: [id, kind, build]
+      allOf:
+        - if:
+            properties:
+              kind:
+                const: quest_run
+            required: [kind]
+          then:
+            required: [questId, result]
+            properties:
+              questId:
+                type: string
+                minLength: 1
+              result:
+                type: string
+                enum: [pass, fail, unsure, abandoned]
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [report, quest_run]
+        questId:
+          type: [string, "null"]
+          minLength: 1
+        questVersion:
+          type: [integer, "null"]
+        result:
+          type: [string, "null"]
+          enum: [pass, fail, unsure, abandoned, null]
+        build:
+          type: string
+          minLength: 1
+        appVersion:
+          type: [string, "null"]
+        device:
+          type: [string, "null"]
+        os:
+          type: [string, "null"]
+        comment:
+          type: [string, "null"]
+        transcript:
+          type: [string, "null"]
+        metadata:
+          type: object
+          additionalProperties: true
+        stepsChecked:
+          type: array
+          items:
+            type: boolean
+        startedAt:
+          type: [string, "null"]
+          format: date-time
+        endedAt:
+          type: [string, "null"]
+          format: date-time
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedbackEventInput"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeedbackAttachmentInput"
+
+    TriageStatus:
+      type: string
+      enum: [new, triaged, resolved, wontfix, duplicate]
+
+    TriageEntry:
+      type: object
+      required: [id, feedbackId, status, summary, links, createdAt]
+      properties:
+        id:
+          type: integer
+        feedbackId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/TriageStatus"
+        summary:
+          type: string
+        links:
+          type: array
+          items:
+            type: string
+        actor:
+          type: [string, "null"]
+        createdAt:
+          type: string
+          format: date-time
+
+    FeedbackAttachmentView:
+      type: object
+      required: [id, feedbackId, kind, key, mimeType, size, url, expiresAt, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        feedbackId:
+          type: string
+          format: uuid
+        kind:
+          type: string
+        key:
+          type: string
+        mimeType:
+          type: string
+        size:
+          type: integer
+        offsetSeconds:
+          type: [number, "null"]
+        videoStartOffsetSeconds:
+          type: [number, "null"]
+        url:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    FeedbackItem:
+      type: object
+      required:
+        - id
+        - kind
+        - build
+        - submitterId
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [report, quest_run]
+        questId:
+          type: [string, "null"]
+        questVersion:
+          type: [integer, "null"]
+        area:
+          type: [string, "null"]
+        result:
+          type: [string, "null"]
+          enum: [pass, fail, unsure, abandoned, null]
+        triageStatus:
+          oneOf:
+            - $ref: "#/components/schemas/TriageStatus"
+            - type: "null"
+        triageSummary:
+          type: [string, "null"]
+        links:
+          type: array
+          items:
+            type: string
+        build:
+          type: string
+        appVersion:
+          type: [string, "null"]
+        device:
+          type: [string, "null"]
+        os:
+          type: [string, "null"]
+        submitterId:
+          type: string
+        comment:
+          type: [string, "null"]
+        transcript:
+          type: [string, "null"]
+        metadata:
+          type: object
+          additionalProperties: true
+        stepsChecked:
+          type: array
+          items:
+            type: boolean
+        startedAt:
+          type: [string, "null"]
+          format: date-time
+        endedAt:
+          type: [string, "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+paths:
+  /v1/builds/{build}/manifest:
+    post:
+      operationId: postBuildManifest
+      summary: Report bundled quests for a build and retrieve board statuses
+      description: >
+        Requires `tester` scope. Records `hollerkit.quest_builds` for each bundled quest
+        (upserting `draft` quest versions if not yet synced from `main`) and returns each
+        quest's board status (`pending`, `passed`, `failed`) and active version info.
+      security:
+        - bearerAuth: [tester]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+        - name: build
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quests]
+              properties:
+                appVersion:
+                  type: [string, "null"]
+                quests:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/QuestDefinitionInput"
+      responses:
+        "200":
+          description: Board statuses for bundled quests
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, build, pendingCount, quests]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  build:
+                    type: string
+                  pendingCount:
+                    type: integer
+                  quests:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BuildManifestQuestStatus"
+        "400":
+          description: Invalid manifest or unsupported protocol version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Missing or invalid authentication token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Insufficient scope (`tester` required)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /v1/uploads:
+    post:
+      operationId: createUploadGrant
+      summary: Reserve an upload grant and presign a storage PUT URL
+      description: >
+        Requires `tester` scope. Reserves an `upload_grants` row bound to
+        `(storage_key, feedback_id, submitter_id)` and returns a 10-minute presigned PUT URL.
+      security:
+        - bearerAuth: [tester]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadRequest"
+      responses:
+        "200":
+          description: Presigned upload grant
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadGrantResponse"
+        "400":
+          description: Invalid upload request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden (`tester` required)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "413":
+          description: File size exceeds configured limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "415":
+          description: Unsupported MIME type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /v1/feedback:
+    post:
+      operationId: submitFeedback
+      summary: Submit a bug report or quest run
+      description: >
+        Requires `tester` scope. Consumes matching `upload_grants` rows bound to
+        `(feedback_id, submitter_id, storage_key)`. Idempotent on `feedback.id` for the
+        same submitter. Sets `triage_status` to `'new'` for `kind = 'report'` or
+        `result IN ('fail', 'unsure')`, and `null` for `result IN ('pass', 'abandoned')`.
+      security:
+        - bearerAuth: [tester]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackCreateRequest"
+      responses:
+        "200":
+          description: Idempotent replay of existing feedback item
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, idempotent, feedback]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  idempotent:
+                    type: boolean
+                  feedback:
+                    $ref: "#/components/schemas/FeedbackItem"
+        "201":
+          description: Newly created feedback item
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, idempotent, feedback]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  idempotent:
+                    type: boolean
+                  feedback:
+                    $ref: "#/components/schemas/FeedbackItem"
+        "400":
+          description: Invalid payload or attachment grant mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden (`tester` required or attachment owned by another submitter)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "413":
+          description: Payload or attachment limits exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+    get:
+      operationId: listFeedback
+      summary: Query feedback items (inbox and historical runs)
+      description: >
+        Requires `agent:read` scope. Supports filtering by `kind`, `result`, `triage`,
+        `area`, `since`, `build`, `questId`, `limit`, and `cursor`.
+      security:
+        - bearerAuth: [agent:read]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [report, quest_run]
+        - name: result
+          in: query
+          schema:
+            type: string
+            enum: [pass, fail, unsure, abandoned]
+        - name: triage
+          in: query
+          schema:
+            $ref: "#/components/schemas/TriageStatus"
+        - name: area
+          in: query
+          schema:
+            type: string
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: build
+          in: query
+          schema:
+            type: string
+        - name: questId
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Filtered feedback list
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, items, nextCursor]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeedbackItem"
+                  nextCursor:
+                    type: [string, "null"]
+
+  /v1/feedback/{id}:
+    get:
+      operationId: getFeedback
+      summary: Get full feedback details, timeline events, triage history, and signed attachment URLs
+      description: >
+        Requires `agent:read` scope. Returns the feedback item, associated quest version
+        (when `quest_run`), `events` sorted by `offsetSeconds` ascending, chronological
+        `triage` history, and `attachments` with freshly minted 1-hour read URLs.
+      security:
+        - bearerAuth: [agent:read]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Full feedback details
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, feedback, quest, events, triage, attachments]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  feedback:
+                    $ref: "#/components/schemas/FeedbackItem"
+                  quest:
+                    oneOf:
+                      - $ref: "#/components/schemas/QuestVersionRecord"
+                      - type: "null"
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, offsetSeconds, kind, payload]
+                      properties:
+                        id:
+                          type: integer
+                        offsetSeconds:
+                          type: number
+                        kind:
+                          type: string
+                        payload:
+                          type: object
+                          additionalProperties: true
+                  triage:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TriageEntry"
+                  attachments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeedbackAttachmentView"
+        "404":
+          description: Feedback item not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /v1/feedback/{id}/triage:
+    put:
+      operationId: putFeedbackTriage
+      summary: Append triage decision and update feedback triage cache in one transaction
+      description: >
+        Requires `agent:triage` scope. Appends a row to `hollerkit.triage` and updates
+        `feedback.triage_status`, `feedback.triage_summary`, and `feedback.links` in the
+        same transaction.
+      security:
+        - bearerAuth: [agent:triage]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, summary]
+              properties:
+                status:
+                  $ref: "#/components/schemas/TriageStatus"
+                summary:
+                  type: string
+                  minLength: 1
+                links:
+                  type: array
+                  items:
+                    type: string
+                actor:
+                  type: [string, "null"]
+      responses:
+        "200":
+          description: Updated feedback and appended triage entry
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, feedback, triage]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  feedback:
+                    $ref: "#/components/schemas/FeedbackItem"
+                  triage:
+                    $ref: "#/components/schemas/TriageEntry"
+        "404":
+          description: Feedback item not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /v1/quests:
+    put:
+      operationId: syncQuests
+      summary: Sync canonical quest manifest from main branch
+      description: >
+        Requires `quests:write` scope. Computes canonical `content_hash` for each quest.
+        If `(id, content_hash)` already exists for that quest (even if superseded or retired),
+        reactivates that version as `active` and marks other versions of that quest `superseded`.
+        If new, increments `version` (`max(version) + 1`, starting at 1) and inserts as `active`.
+        Any previously `active` quest omitted from the manifest is marked `retired` with `retired_at = now()`.
+      security:
+        - bearerAuth: [quests:write]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, quests]
+              properties:
+                version:
+                  type: integer
+                  const: 1
+                sha:
+                  type: [string, "null"]
+                pr:
+                  type: [integer, "null"]
+                quests:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/QuestDefinitionInput"
+      responses:
+        "200":
+          description: Synced quests summary
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, quests, retiredIds]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  quests:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QuestVersionRecord"
+                  retiredIds:
+                    type: array
+                    items:
+                      type: string
+
+    get:
+      operationId: listQuests
+      summary: List quest versions and pass/fail counts
+      description: >
+        Requires `agent:read` scope. Filters by `status`, `area`, and `passedOnCurrentVersion`.
+      security:
+        - bearerAuth: [agent:read]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/QuestStatus"
+        - name: area
+          in: query
+          schema:
+            type: string
+        - name: passedOnCurrentVersion
+          in: query
+          schema:
+            type: string
+            enum: ["true", "false"]
+      responses:
+        "200":
+          description: Matching quests
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, quests]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  quests:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QuestVersionRecord"
+
+  /v1/builds/{build}/pending:
+    get:
+      operationId: getBuildPendingQuests
+      summary: List untested active quests for a build
+      description: >
+        Requires `tester` or `agent:read` scope. Returns quests that are currently `active`
+        (and associated with `build` if build manifest was registered, or all active quests)
+        that do not yet have a `pass` feedback on their current version.
+      security:
+        - bearerAuth: [tester]
+        - bearerAuth: [agent:read]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+        - name: build
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pending quests for the build
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, build, pendingCount, quests]
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  build:
+                    type: string
+                  pendingCount:
+                    type: integer
+                  quests:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QuestVersionRecord"
