@@ -1,4 +1,5 @@
 export { createBugReportHandler } from './handler.js'
+export { errorResponse, HollerKitError } from './errors.js'
 export { renderIssueBody } from './issueBody.js'
 export { defaultLimits, resolveLimits } from './limits.js'
 export { githubIssues } from './adapters/issue/github.js'

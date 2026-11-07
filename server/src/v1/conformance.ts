@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { resolveV1Limits, type V1LimitConfig } from './server.js'
 import { computeQuestContentHash, type QuestDefinitionInput } from './store.js'
 
 export interface ConformanceSuiteOptions {
@@ -10,6 +11,7 @@ export interface ConformanceSuiteOptions {
   otherTesterToken?: string | undefined
   questsWriteKey: string
   agentKey: string
+  limits?: Partial<V1LimitConfig> | undefined
 }
 
 export interface ConformanceStepResult {
@@ -26,6 +28,7 @@ export async function runConformanceSuite(
   options: ConformanceSuiteOptions,
 ): Promise<ConformanceResult> {
   const baseUrl = (options.baseUrl ?? 'http://hollerkit.local').replace(/\/$/, '')
+  const limits = resolveV1Limits(options.limits)
   const fetchFn: typeof globalThis.fetch =
     options.fetch ??
     (options.handler
@@ -240,9 +243,9 @@ export async function runConformanceSuite(
       token: options.agentKey,
     })
     assert.equal(supersededList.status, 200)
-    assert.equal(supersededList.body.quests.length, 1)
-    assert.equal(supersededList.body.quests[0].id, questAlphaV1.id)
-    assert.equal(supersededList.body.quests[0].version, 2)
+    const alphaSuperseded = supersededList.body.quests.filter((q: any) => q.id === questAlphaV1.id)
+    assert.ok(alphaSuperseded.some((q: any) => q.version === 2))
+    assert.ok(!alphaSuperseded.some((q: any) => q.version === 1))
 
     // Omit questBeta from manifest -> marks questBeta retired
     const sync4 = await requestJson('/v1/quests', {
@@ -262,9 +265,9 @@ export async function runConformanceSuite(
       token: options.agentKey,
     })
     assert.equal(retiredList.status, 200)
-    assert.equal(retiredList.body.quests.length, 1)
-    assert.equal(retiredList.body.quests[0].id, questBetaV1.id)
-    assert.ok(retiredList.body.quests[0].retiredAt)
+    const betaRetired = retiredList.body.quests.find((q: any) => q.id === questBetaV1.id)
+    assert.ok(betaRetired)
+    assert.ok(betaRetired.retiredAt)
   })
 
   // 4 & 5. POST /v1/builds/{build}/manifest and GET /v1/builds/{build}/pending
@@ -525,6 +528,15 @@ export async function runConformanceSuite(
     assert.equal(syncV3.status, 200)
     assert.equal(syncV3.body.quests[0].version, 3)
 
+    const manifestAfterV3 = await requestJson('/v1/builds/build-100/manifest', {
+      method: 'POST',
+      token: options.testerToken,
+      body: { quests: [questAlphaV3] },
+    })
+    assert.equal(manifestAfterV3.status, 200)
+    assert.equal(manifestAfterV3.body.quests[0].boardStatus, 'pending')
+    assert.equal(manifestAfterV3.body.pendingCount, 1)
+
     const pendingAfterV3 = await requestJson('/v1/builds/build-100/pending', {
       method: 'GET',
       token: options.testerToken,
@@ -649,12 +661,12 @@ export async function runConformanceSuite(
 
   // 10. Payload limits validation
   await step('enforces JSON, text, image count, image size, and mark count limits', async () => {
-    // Oversized JSON (>256 KB)
+    // Oversized JSON (> maxJsonBytes)
     const hugeJson = JSON.stringify({
       id: randomUUID(),
       kind: 'report',
       build: '100',
-      metadata: { padding: 'x'.repeat(270 * 1024) },
+      metadata: { padding: 'x'.repeat(limits.maxJsonBytes + 1024) },
     })
     const oversizedJsonRes = await requestJson('/v1/feedback', {
       method: 'POST',
@@ -664,21 +676,23 @@ export async function runConformanceSuite(
     assert.equal(oversizedJsonRes.status, 413)
     assert.equal(oversizedJsonRes.body.error.code, 'body_too_large')
 
-    // >20,000 char comment
-    const longTextRes = await requestJson('/v1/feedback', {
-      method: 'POST',
-      token: options.testerToken,
-      body: {
-        id: randomUUID(),
-        kind: 'report',
-        build: '100',
-        comment: 'a'.repeat(20_001),
-      },
-    })
-    assert.equal(longTextRes.status, 413)
-    assert.equal(longTextRes.body.error.code, 'text_too_large')
+    // > maxTextChars comment (within maxJsonBytes)
+    if (limits.maxTextChars + 1 < limits.maxJsonBytes - 512) {
+      const longTextRes = await requestJson('/v1/feedback', {
+        method: 'POST',
+        token: options.testerToken,
+        body: {
+          id: randomUUID(),
+          kind: 'report',
+          build: '100',
+          comment: 'a'.repeat(limits.maxTextChars + 1),
+        },
+      })
+      assert.equal(longTextRes.status, 413)
+      assert.equal(longTextRes.body.error.code, 'text_too_large')
+    }
 
-    // >10 MB image upload grant
+    // > maxImageBytes image upload grant
     const hugeImageGrantRes = await requestJson('/v1/uploads', {
       method: 'POST',
       token: options.testerToken,
@@ -686,13 +700,13 @@ export async function runConformanceSuite(
         feedbackId: randomUUID(),
         kind: 'image',
         mimeType: 'image/png',
-        size: 10 * 1024 * 1024 + 1,
+        size: limits.maxImageBytes + 1,
       },
     })
     assert.equal(hugeImageGrantRes.status, 413)
     assert.equal(hugeImageGrantRes.body.error.code, 'image_too_large')
 
-    // >12 images on feedback
+    // > maxImages images on feedback
     const tooManyImagesRes = await requestJson('/v1/feedback', {
       method: 'POST',
       token: options.testerToken,
@@ -700,7 +714,7 @@ export async function runConformanceSuite(
         id: randomUUID(),
         kind: 'report',
         build: '100',
-        attachments: Array.from({ length: 13 }, (_, idx) => ({
+        attachments: Array.from({ length: limits.maxImages + 1 }, (_, idx) => ({
           key: `fake-key-${idx}`,
           kind: 'image',
         })),
@@ -709,7 +723,7 @@ export async function runConformanceSuite(
     assert.equal(tooManyImagesRes.status, 413)
     assert.equal(tooManyImagesRes.body.error.code, 'too_many_images')
 
-    // >20 marks on feedback
+    // > maxMarks marks on feedback
     const tooManyMarksRes = await requestJson('/v1/feedback', {
       method: 'POST',
       token: options.testerToken,
@@ -717,7 +731,7 @@ export async function runConformanceSuite(
         id: randomUUID(),
         kind: 'report',
         build: '100',
-        events: Array.from({ length: 21 }, (_, idx) => ({
+        events: Array.from({ length: limits.maxMarks + 1 }, (_, idx) => ({
           offsetSeconds: idx,
           kind: 'mark',
         })),

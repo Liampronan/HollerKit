@@ -65,6 +65,7 @@ interface StoredQuestBuildRow {
 export function memoryStore(): HollerKitStore {
   const quests: StoredQuestRow[] = []
   const questBuilds = new Map<string, StoredQuestBuildRow>()
+  const registeredBuilds = new Set<string>()
   const uploadGrants = new Map<string, UploadGrantRecord>()
   const feedbacks = new Map<string, FeedbackRecord>()
   const eventsByFeedback = new Map<string, FeedbackEventRecord[]>()
@@ -140,7 +141,11 @@ export function memoryStore(): HollerKitStore {
         const existingMatch = quests.find((row) => row.id === id && row.contentHash === contentHash)
         if (existingMatch) {
           for (const row of quests) {
-            if (row.id === id && row.version !== existingMatch.version) {
+            if (
+              row.id === id &&
+              row.version !== existingMatch.version &&
+              (row.status === 'active' || row.status === 'draft')
+            ) {
               row.status = 'superseded'
             }
           }
@@ -163,7 +168,7 @@ export function memoryStore(): HollerKitStore {
         } else {
           const nextVersion = maxVersionForQuest(id) + 1
           for (const row of quests) {
-            if (row.id === id) {
+            if (row.id === id && (row.status === 'active' || row.status === 'draft')) {
               row.status = 'superseded'
             }
           }
@@ -215,6 +220,7 @@ export function memoryStore(): HollerKitStore {
     async syncBuildManifest(input: SyncBuildManifestInput): Promise<SyncBuildManifestResult> {
       const nowIso = (input.now ?? new Date()).toISOString()
       const statuses: BuildManifestQuestStatus[] = []
+      registeredBuilds.add(input.build)
 
       for (const def of input.quests) {
         const id = def.id.trim()
@@ -293,10 +299,14 @@ export function memoryStore(): HollerKitStore {
       }
     },
 
-    async getPendingQuestsForBuild(_build: string): Promise<QuestVersionRecord[]> {
+    async getPendingQuestsForBuild(build: string): Promise<QuestVersionRecord[]> {
+      const isBuildRegistered = registeredBuilds.has(build)
       const pending: QuestVersionRecord[] = []
       for (const row of quests) {
         if (row.status !== 'active') continue
+        if (isBuildRegistered && !questBuilds.has(`${row.id}:${row.version}:${build}`)) {
+          continue
+        }
         const record = toQuestVersionRecord(row)
         if (!record.passedOnCurrentVersion) {
           pending.push(record)
@@ -389,11 +399,29 @@ export function memoryStore(): HollerKitStore {
             `Attachment kind (${att.kind}) does not match upload grant kind (${grant.kind}).`,
           )
         }
+        if (att.mimeType !== undefined && att.mimeType.toLowerCase() !== grant.mimeType.toLowerCase()) {
+          throw new HollerKitError(
+            400,
+            'invalid_attachment_grant',
+            `Attachment mimeType (${att.mimeType}) does not match upload grant mimeType (${grant.mimeType}).`,
+          )
+        }
+        if (att.size !== undefined && att.size !== grant.size) {
+          throw new HollerKitError(
+            400,
+            'invalid_attachment_grant',
+            `Attachment size (${att.size}) does not match upload grant size (${grant.size}).`,
+          )
+        }
         if (grant.consumedAt !== null) {
-          throw new HollerKitError(400, 'grant_already_consumed', 'Attachment grant has already been consumed.')
+          throw new HollerKitError(
+            400,
+            'expired_or_consumed_grant',
+            'Attachment grant has already been consumed.',
+          )
         }
         if (new Date(grant.expiresAt).getTime() <= now.getTime()) {
-          throw new HollerKitError(400, 'grant_expired', 'Attachment grant has expired.')
+          throw new HollerKitError(400, 'expired_or_consumed_grant', 'Attachment grant has expired.')
         }
         grantsToConsume.push(grant)
       }
@@ -450,7 +478,7 @@ export function memoryStore(): HollerKitStore {
         submitterId: input.submitterId,
         comment: input.comment ?? null,
         transcript: input.transcript ?? null,
-        metadata: input.metadata ? { ...input.metadata } : {},
+        metadata: input.metadata ? structuredClone(input.metadata) : {},
         stepsChecked: input.stepsChecked ? [...input.stepsChecked] : [],
         startedAt: input.startedAt ?? null,
         endedAt: input.endedAt ?? null,
@@ -465,7 +493,7 @@ export function memoryStore(): HollerKitStore {
         feedbackId: record.id,
         offsetSeconds: typeof ev.offsetSeconds === 'number' ? ev.offsetSeconds : 0,
         kind: ev.kind,
-        payload: ev.payload ? { ...ev.payload } : {},
+        payload: ev.payload ? structuredClone(ev.payload) : {},
       }))
       eventsByFeedback.set(record.id, eventRecords)
 
@@ -474,10 +502,10 @@ export function memoryStore(): HollerKitStore {
         return {
           id: randomUUID(),
           feedbackId: record.id,
-          kind: att.kind ?? grant.kind,
+          kind: grant.kind,
           key: grant.storageKey,
-          mimeType: att.mimeType ?? grant.mimeType,
-          size: att.size ?? grant.size,
+          mimeType: grant.mimeType,
+          size: grant.size,
           offsetSeconds: att.offsetSeconds ?? null,
           videoStartOffsetSeconds: att.videoStartOffsetSeconds ?? null,
           expiresAt: null,
@@ -492,7 +520,9 @@ export function memoryStore(): HollerKitStore {
 
     async listFeedback(filter: ListFeedbackFilter = {}): Promise<ListFeedbackResult> {
       const sinceMs = filter.since ? new Date(filter.since).getTime() : null
+      const cursorRecord = filter.cursor ? feedbacks.get(filter.cursor) : undefined
       const all = Array.from(feedbacks.values()).filter((fb) => {
+        if (cursorRecord && compareFeedbackDesc(fb, cursorRecord) <= 0) return false
         if (filter.kind && fb.kind !== filter.kind) return false
         if (filter.result && fb.result !== filter.result) return false
         if (filter.triage !== undefined && fb.triageStatus !== filter.triage) return false
@@ -505,23 +535,11 @@ export function memoryStore(): HollerKitStore {
         return true
       })
 
-      all.sort((a, b) => {
-        const diff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        if (diff !== 0) return diff
-        return b.id.localeCompare(a.id)
-      })
+      all.sort(compareFeedbackDesc)
 
       const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200)
-      let startIndex = 0
-      if (filter.cursor) {
-        const cursorIdx = all.findIndex((item) => item.id === filter.cursor)
-        if (cursorIdx >= 0) {
-          startIndex = cursorIdx + 1
-        }
-      }
-
-      const slice = all.slice(startIndex, startIndex + limit)
-      const nextCursor = startIndex + limit < all.length ? (slice[slice.length - 1]?.id ?? null) : null
+      const slice = all.slice(0, limit)
+      const nextCursor = limit < all.length ? (slice[slice.length - 1]?.id ?? null) : null
 
       return {
         items: slice.map(cloneFeedback),
@@ -557,7 +575,7 @@ export function memoryStore(): HollerKitStore {
       return {
         feedback: cloneFeedback(fb),
         quest,
-        events: events.map((ev) => ({ ...ev, payload: { ...ev.payload } })),
+        events: events.map((ev) => ({ ...ev, payload: structuredClone(ev.payload) })),
         triage: triage.map((tr) => ({ ...tr, links: [...tr.links] })),
         attachments: attachments.map((att) => ({ ...att })),
       }
@@ -657,11 +675,17 @@ export function memoryStore(): HollerKitStore {
   }
 }
 
+function compareFeedbackDesc(a: FeedbackRecord, b: FeedbackRecord): number {
+  const diff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  if (diff !== 0) return diff
+  return b.id.localeCompare(a.id)
+}
+
 function cloneFeedback(fb: FeedbackRecord): FeedbackRecord {
   return {
     ...fb,
     links: [...fb.links],
-    metadata: { ...fb.metadata },
+    metadata: structuredClone(fb.metadata),
     stepsChecked: [...fb.stepsChecked],
   }
 }

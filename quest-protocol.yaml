@@ -321,6 +321,21 @@ components:
     FeedbackCreateRequest:
       type: object
       required: [id, kind, build]
+      allOf:
+        - if:
+            properties:
+              kind:
+                const: quest_run
+            required: [kind]
+          then:
+            required: [questId, result]
+            properties:
+              questId:
+                type: string
+                minLength: 1
+              result:
+                type: string
+                enum: [pass, fail, unsure, abandoned]
       properties:
         id:
           type: string
@@ -330,6 +345,7 @@ components:
           enum: [report, quest_run]
         questId:
           type: [string, "null"]
+          minLength: 1
         questVersion:
           type: [integer, "null"]
         result:

@@ -86,6 +86,7 @@ export interface CreateHollerKitServerOptions {
   store: HollerKitStore
   storage: HollerKitStorageAdapter
   authenticate: Authenticator | Authenticator[]
+  basePath?: string | undefined
   sinks?: string[] | undefined
   limits?: Partial<V1LimitConfig> | undefined
   now?: (() => Date) | undefined
@@ -118,12 +119,12 @@ export function staticTokens(
 ): Authenticator {
   return (request: Request): AuthPrincipal | null => {
     const token = extractBearerToken(request)
-    if (!token) return null
+    if (!token || !Object.hasOwn(tokens, token)) return null
     const entry = tokens[token]
     if (!entry) return null
     if (Array.isArray(entry)) {
       return {
-        principalId: `token:${token.slice(0, 12)}`,
+        principalId: `token:${hashApiKey(token)}`,
         scopes: [...entry],
       }
     }
@@ -144,7 +145,7 @@ export function apiKeysAuthenticator(options: { store: HollerKitStore }): Authen
     const record = await options.store.getApiKeyByHash(keyHash)
     if (!record || record.revokedAt !== null) return null
     return {
-      principalId: `apikey:${record.keyPrefix}`,
+      principalId: `apikey:${record.keyHash}`,
       scopes: [...record.scopes],
       kind: 'api_key',
       label: record.label,
@@ -191,7 +192,7 @@ export function createHollerKitServer(
       }
 
       const url = new URL(request.url)
-      const routePath = normalizeV1Path(url.pathname)
+      const routePath = normalizeV1Path(url.pathname, options.basePath)
       if (!routePath) {
         throw new HollerKitError(404, 'not_found', `Route not found: ${url.pathname}`)
       }
@@ -330,7 +331,7 @@ export function createHollerKitServer(
           throw new HollerKitError(405, 'method_not_allowed', 'Expected GET.')
         }
         await requireAuth(request, authenticators, ['agent:read'])
-        const feedbackId = decodePathSegment(feedbackDetailMatch[1]!)
+        const feedbackId = decodePathSegment(feedbackDetailMatch[1]!).trim().toLowerCase()
         const detail = await options.store.getFeedbackById(feedbackId)
         if (!detail) {
           throw new HollerKitError(404, 'not_found', `Feedback not found: ${feedbackId}.`)
@@ -375,7 +376,7 @@ export function createHollerKitServer(
           throw new HollerKitError(405, 'method_not_allowed', 'Expected PUT.')
         }
         const principal = await requireAuth(request, authenticators, ['agent:triage'])
-        const feedbackId = decodePathSegment(feedbackTriageMatch[1]!)
+        const feedbackId = decodePathSegment(feedbackTriageMatch[1]!).trim().toLowerCase()
         const body = await readJsonObject(request, limits)
 
         const status = parseTriageStatus(body.status, 'status')
@@ -478,17 +479,22 @@ export function createHollerKitServer(
   }
 }
 
-function normalizeV1Path(pathname: string): string | null {
-  const cleaned = pathname.replace(/\/+$/, '') || '/'
+function normalizeV1Path(pathname: string, basePath?: string): string | null {
+  let cleaned = pathname.replace(/\/+$/, '') || '/'
+  if (basePath) {
+    const normalizedBase = ('/' + basePath.replace(/^\/+|\/+$/g, '')).replace(/\/+$/, '')
+    if (normalizedBase !== '/' && cleaned.startsWith(normalizedBase + '/')) {
+      cleaned = cleaned.slice(normalizedBase.length)
+    } else if (normalizedBase !== '/' && cleaned === normalizedBase) {
+      cleaned = '/'
+    }
+  }
+  const routeMatch = cleaned.match(/\/v1(?=\/(?:builds|uploads|feedback|quests)(?:\/|$)|$).*$/)
+  if (routeMatch) {
+    return routeMatch[0]
+  }
   if (cleaned === '/v1' || cleaned.startsWith('/v1/')) {
     return cleaned
-  }
-  const idx = cleaned.lastIndexOf('/v1/')
-  if (idx >= 0) {
-    return cleaned.slice(idx)
-  }
-  if (cleaned.endsWith('/v1')) {
-    return '/v1'
   }
   return null
 }
@@ -547,11 +553,7 @@ async function readJsonObject(request: Request, limits: V1LimitConfig): Promise<
     }
   }
 
-  const buffer = await request.arrayBuffer()
-  if (buffer.byteLength > limits.maxJsonBytes) {
-    throw new HollerKitError(413, 'body_too_large', 'JSON payload exceeds maximum byte limit.')
-  }
-
+  const buffer = await readBoundedBody(request, limits.maxJsonBytes)
   const text = new TextDecoder().decode(buffer)
   let parsed: unknown
   try {
@@ -565,6 +567,40 @@ async function readJsonObject(request: Request, limits: V1LimitConfig): Promise<
   }
 
   return parsed
+}
+
+async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+  if (!request.body) {
+    return new Uint8Array(0)
+  }
+
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      totalBytes += value.byteLength
+      if (totalBytes > maxBytes) {
+        await reader.cancel()
+        throw new HollerKitError(413, 'body_too_large', 'JSON payload exceeds maximum byte limit.')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const merged = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
 }
 
 function validateUploadAttachmentLimits(
@@ -822,8 +858,8 @@ function parseListFeedbackQuery(params: URLSearchParams) {
   let limit: number | undefined
   if (limitParam !== null && limitParam !== '') {
     const parsed = Number(limitParam)
-    if (!Number.isInteger(parsed) || parsed < 1) {
-      throw new HollerKitError(400, 'invalid_limit', 'limit must be a positive integer.')
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
+      throw new HollerKitError(400, 'invalid_limit', 'limit must be an integer between 1 and 200.')
     }
     limit = parsed
   }
