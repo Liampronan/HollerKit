@@ -10,27 +10,31 @@ private struct HollerKitPresenterModifier: ViewModifier {
     @ObservedObject private var presenter = HollerKit.presenterState
 
     func body(content: Content) -> some View {
-        content
-            .background {
-                InvocationObserver(
-                    invocation: HollerKit.currentInvocation,
-                    onShake: {
-                        HollerKit.present()
-                    },
-                    onScreenshot: { attachment in
-                        if let attachment {
-                            HollerKit.present(attachments: [attachment])
-                        } else {
-                            HollerKit.present()
+        if HollerKit.isEnabled {
+            content
+                .background {
+                    InvocationObserver(
+                        invocation: HollerKit.currentInvocation,
+                        onShake: {
+                            HollerKit.presentBugReport()
+                        },
+                        onScreenshot: { attachment in
+                            if let attachment {
+                                HollerKit.presentBugReport(attachments: [attachment])
+                            } else {
+                                HollerKit.presentBugReport()
+                            }
                         }
-                    }
-                )
-            }
-            .sheet(isPresented: $presenter.isPresented, onDismiss: {
-                HollerKit.clearPresentationAttachments()
-            }) {
-                HollerKit.presentationView()
-            }
+                    )
+                }
+                .sheet(isPresented: $presenter.isPresented, onDismiss: {
+                    HollerKit.clearPresentationAttachments()
+                }) {
+                    HollerKit.presentationView()
+                }
+        } else {
+            content
+        }
     }
 }
 

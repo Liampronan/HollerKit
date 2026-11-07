@@ -29,7 +29,7 @@ public struct HollerKitTranscript: Codable, Equatable, Sendable {
     }
 }
 
-public struct HollerKitAttachment: Sendable {
+public struct HollerKitAttachment: Equatable, Sendable {
     public var filename: String
     public var mimeType: String
     public var data: Data
@@ -42,29 +42,90 @@ public struct HollerKitAttachment: Sendable {
 }
 
 public struct HollerKitReportPayload: Sendable {
+    public var id: UUID
     public var inputMode: HollerKitInputMode
     public var comment: String?
     public var transcript: HollerKitTranscript?
     public var metadata: [String: String]
     public var breadcrumbs: [HollerKitBreadcrumb]
-    public var userIdHash: String?
     public var images: [HollerKitAttachment]
 
     public init(
+        id: UUID = UUID(),
         inputMode: HollerKitInputMode,
         comment: String? = nil,
         transcript: HollerKitTranscript? = nil,
         metadata: [String: String] = [:],
         breadcrumbs: [HollerKitBreadcrumb] = [],
-        userIdHash: String? = nil,
         images: [HollerKitAttachment] = []
     ) {
+        self.id = id
         self.inputMode = inputMode
         self.comment = comment
         self.transcript = transcript
         self.metadata = metadata
         self.breadcrumbs = breadcrumbs
-        self.userIdHash = userIdHash
         self.images = images
+    }
+
+    public func toFeedbackSubmission(build: String? = nil) -> (
+        request: FeedbackSubmissionRequest,
+        attachments: [OutboxAttachmentPayload]
+    ) {
+        var enrichedMetadata = metadata
+        enrichedMetadata["inputMode"] = inputMode.wireValue
+        if let transcript {
+            enrichedMetadata["transcriptLocale"] = transcript.locale
+            enrichedMetadata["transcriptEngine"] = transcript.engine.rawValue
+            if let confidence = transcript.confidence {
+                enrichedMetadata["transcriptConfidence"] = String(confidence)
+            }
+            if let durationSeconds = transcript.durationSeconds {
+                enrichedMetadata["transcriptDurationSeconds"] = String(durationSeconds)
+            }
+        }
+
+        let resolvedBuild = build ?? MetadataCollector.currentBuild(from: enrichedMetadata)
+        let appVersion = MetadataCollector.currentAppVersion(from: enrichedMetadata)
+        let device = enrichedMetadata["deviceModel"]
+        let os = enrichedMetadata["osVersion"]
+
+        let isoFormatter = ISO8601DateFormatter()
+        let events: [FeedbackEventInput] = breadcrumbs.map { crumb in
+            var payload = crumb.metadata
+            payload["message"] = crumb.message
+            payload["timestamp"] = isoFormatter.string(from: crumb.timestamp)
+            if let category = crumb.category {
+                payload["category"] = category
+            }
+            return FeedbackEventInput(
+                offsetSeconds: 0,
+                kind: "breadcrumb",
+                payload: payload
+            )
+        }
+
+        let outboxAttachments: [OutboxAttachmentPayload] = images.map { attachment in
+            OutboxAttachmentPayload(
+                kind: "image",
+                mimeType: attachment.mimeType,
+                data: attachment.data
+            )
+        }
+
+        let request = FeedbackSubmissionRequest(
+            id: id,
+            kind: "report",
+            build: resolvedBuild,
+            appVersion: appVersion,
+            device: device,
+            os: os,
+            comment: comment,
+            transcript: transcript?.text,
+            metadata: enrichedMetadata,
+            events: events
+        )
+
+        return (request, outboxAttachments)
     }
 }

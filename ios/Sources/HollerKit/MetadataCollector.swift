@@ -12,8 +12,12 @@ public enum MetadataCollector {
         var metadata = extra
         metadata["locale"] = Locale.current.identifier
         metadata["timeZone"] = TimeZone.current.identifier
-        metadata["appVersion"] = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
-        metadata["appBuild"] = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String, !appVersion.isEmpty {
+            metadata["appVersion"] = appVersion
+        }
+        if let appBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String, !appBuild.isEmpty {
+            metadata["appBuild"] = appBuild
+        }
         metadata["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
         metadata["appUptimeSeconds"] = String(Int(Date().timeIntervalSince(launchDate)))
 
@@ -24,6 +28,30 @@ public enum MetadataCollector {
         #endif
 
         return metadata
+    }
+
+    public static func currentBuild(from metadata: [String: String] = [:]) -> String {
+        if let build = metadata["appBuild"]?.trimmingCharacters(in: .whitespacesAndNewlines), !build.isEmpty {
+            return build
+        }
+        if let bundleBuild = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !bundleBuild.isEmpty {
+            return bundleBuild
+        }
+        return "1"
+    }
+
+    public static func currentAppVersion(from metadata: [String: String] = [:]) -> String? {
+        if let version = metadata["appVersion"]?.trimmingCharacters(in: .whitespacesAndNewlines), !version.isEmpty {
+            return version
+        }
+        if let bundleVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !bundleVersion.isEmpty {
+            return bundleVersion
+        }
+        return nil
     }
 }
 
