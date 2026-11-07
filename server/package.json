@@ -11,8 +11,12 @@
       "default": "./dist/index.js"
     }
   },
+  "bin": {
+    "hollerkit": "./dist/cli.js"
+  },
   "files": [
-    "dist"
+    "dist",
+    "migrations"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -32,5 +36,8 @@
   "devDependencies": {
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "postgres": "^3.4.9"
   }
 }

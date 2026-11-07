@@ -302,6 +302,42 @@ export interface CreateApiKeyInput {
   now?: Date | undefined
 }
 
+export interface OutboxRecord {
+  id: number
+  feedbackId: string
+  sink: string
+  attempts: number
+  lastError: string | null
+  nextAttemptAt: string
+  deliveredAt: string | null
+  link: string | null
+  createdAt: string
+}
+
+export interface EnqueueOutboxInput {
+  feedbackId: string
+  sink: string
+  now?: Date | undefined
+}
+
+export interface ClaimPendingOutboxInput {
+  limit?: number | undefined
+  now?: Date | undefined
+}
+
+export interface MarkOutboxDeliveredInput {
+  id: number
+  link?: string | null | undefined
+  now?: Date | undefined
+}
+
+export interface MarkOutboxFailedInput {
+  id: number
+  error: string
+  nextAttemptAt: string
+  now?: Date | undefined
+}
+
 export interface HollerKitStore {
   syncQuests(input: SyncQuestsInput): Promise<SyncQuestsResult>
   syncBuildManifest(input: SyncBuildManifestInput): Promise<SyncBuildManifestResult>
@@ -317,10 +353,19 @@ export interface HollerKitStore {
   triageFeedback(input: TriageFeedbackInput): Promise<{ feedback: FeedbackRecord; triage: TriageRecord }>
 
   getTester(userId: string): Promise<TesterRecord | null>
+  isTester(userId: string): Promise<boolean>
   upsertTester(input: UpsertTesterInput): Promise<TesterRecord>
   getApiKeyByHash(keyHash: string): Promise<ApiKeyRecord | null>
+  findApiKeyByHash(keyHash: string): Promise<ApiKeyRecord | null>
   createApiKey(input: CreateApiKeyInput): Promise<ApiKeyRecord>
   revokeApiKey(prefixOrLabel: string, now?: Date): Promise<boolean>
+
+  enqueueOutbox(input: EnqueueOutboxInput): Promise<OutboxRecord>
+  claimPendingOutbox(input?: ClaimPendingOutboxInput): Promise<OutboxRecord[]>
+  markOutboxDelivered(input: MarkOutboxDeliveredInput): Promise<OutboxRecord | null>
+  markOutboxFailed(input: MarkOutboxFailedInput): Promise<OutboxRecord | null>
+
+  close?(): Promise<void>
 }
 
 /**

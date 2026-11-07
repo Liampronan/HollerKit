@@ -1,92 +1,109 @@
-import type { ReportFile, StorageAdapter, UploadedFile } from '../../types.js'
+import type { HollerKitStorageAdapter } from '../../v1/server.js'
 
-export type SupabaseStorageOptions = {
+export interface SupabaseStorageOptions {
   url: string
   serviceRoleKey: string
   bucket: string
-  prefix?: string
-  publicUrl?: (path: string) => string
-  signedUrlExpiresInSeconds?: number
+  fetchImpl?: typeof globalThis.fetch | undefined
+  now?: (() => Date) | undefined
 }
 
-export function supabaseStorage(options: SupabaseStorageOptions): StorageAdapter {
+export function supabaseStorage(options: SupabaseStorageOptions): HollerKitStorageAdapter {
   const baseUrl = options.url.replace(/\/$/, '')
-  if (!options.publicUrl && options.signedUrlExpiresInSeconds == null) {
-    throw new Error('Supabase storage requires publicUrl or signedUrlExpiresInSeconds for GitHub issue links.')
-  }
+  const fetchFn = options.fetchImpl ?? globalThis.fetch
+  const nowFn = options.now ?? (() => new Date())
 
   return {
-    async upload(reportId: string, files: ReportFile[]): Promise<UploadedFile[]> {
-      return Promise.all(files.map(async (file) => {
-        const path = objectPath(options.prefix, reportId, file)
-        const response = await fetch(`${baseUrl}/storage/v1/object/${options.bucket}/${encodePath(path)}`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${options.serviceRoleKey}`,
-            apikey: options.serviceRoleKey,
-            'content-type': file.mimeType,
-            'x-upsert': 'false',
-          },
-          body: file.data,
-        })
+    async presignUpload(input) {
+      const expiresInSeconds = input.expiresInSeconds ?? 600
+      const expiresAt = new Date(nowFn().getTime() + expiresInSeconds * 1000).toISOString()
+      const encodedKey = encodeStorageKey(input.key)
+      const endpoint = `${baseUrl}/storage/v1/object/upload/sign/${encodeURIComponent(options.bucket)}/${encodedKey}`
 
-        if (!response.ok) {
-          throw new Error(`Supabase storage upload failed with ${response.status}.`)
-        }
+      const response = await fetchFn(endpoint, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${options.serviceRoleKey}`,
+          apikey: options.serviceRoleKey,
+          'x-upsert': 'false',
+        },
+      })
 
-        return {
-          kind: file.kind,
-          filename: file.filename,
-          mimeType: file.mimeType,
-          size: file.size,
-          url: await resolveUrl(baseUrl, options, path),
-        }
-      }))
+      if (!response.ok) {
+        throw new Error(`Supabase storage presignUpload failed with ${response.status}.`)
+      }
+
+      const payload = (await response.json()) as {
+        url?: string
+        signedURL?: string
+        signedUrl?: string
+      }
+      const rawUrl = payload.url ?? payload.signedURL ?? payload.signedUrl
+      if (!rawUrl) {
+        throw new Error('Supabase storage presignUpload response did not include a signed URL.')
+      }
+
+      return {
+        url: normalizeSupabaseSignedUrl(baseUrl, rawUrl),
+        expiresAt,
+      }
+    },
+
+    async signReadUrl(input) {
+      const expiresInSeconds = input.expiresInSeconds ?? 3600
+      const expiresAt = new Date(nowFn().getTime() + expiresInSeconds * 1000).toISOString()
+      const encodedKey = encodeStorageKey(input.key)
+      const endpoint = `${baseUrl}/storage/v1/object/sign/${encodeURIComponent(options.bucket)}/${encodedKey}`
+
+      const response = await fetchFn(endpoint, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${options.serviceRoleKey}`,
+          apikey: options.serviceRoleKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ expiresIn: expiresInSeconds }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`Supabase storage signReadUrl failed with ${response.status}.`)
+      }
+
+      const payload = (await response.json()) as {
+        signedURL?: string
+        signedUrl?: string
+        url?: string
+      }
+      const rawUrl = payload.signedURL ?? payload.signedUrl ?? payload.url
+      if (!rawUrl) {
+        throw new Error('Supabase storage signReadUrl response did not include signedURL.')
+      }
+
+      return {
+        url: normalizeSupabaseSignedUrl(baseUrl, rawUrl),
+        expiresAt,
+      }
     },
   }
 }
 
-async function resolveUrl(baseUrl: string, options: SupabaseStorageOptions, path: string): Promise<string> {
-  if (options.publicUrl) return options.publicUrl(path)
-  if (options.signedUrlExpiresInSeconds != null) {
-    return createSignedUrl(baseUrl, options, path)
+function normalizeSupabaseSignedUrl(baseUrl: string, rawUrl: string): string {
+  if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+    return rawUrl
   }
-
-  throw new Error('Supabase storage requires publicUrl or signedUrlExpiresInSeconds for GitHub issue links.')
-}
-
-async function createSignedUrl(baseUrl: string, options: SupabaseStorageOptions, path: string): Promise<string> {
-  const response = await fetch(`${baseUrl}/storage/v1/object/sign/${options.bucket}/${encodePath(path)}`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${options.serviceRoleKey}`,
-      apikey: options.serviceRoleKey,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ expiresIn: options.signedUrlExpiresInSeconds }),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Supabase signed URL creation failed with ${response.status}.`)
+  if (rawUrl.startsWith('/storage/v1/')) {
+    return `${baseUrl}${rawUrl}`
   }
-
-  const payload = await response.json() as { signedURL?: string; signedUrl?: string }
-  const signedPath = payload.signedURL ?? payload.signedUrl
-  if (!signedPath) {
-    throw new Error('Supabase signed URL response did not include signedURL.')
+  if (rawUrl.startsWith('/object/')) {
+    return `${baseUrl}/storage/v1${rawUrl}`
   }
-
-  return signedPath.startsWith('http') ? signedPath : `${baseUrl}${signedPath}`
+  return `${baseUrl}/${rawUrl.replace(/^\/+/, '')}`
 }
 
-function objectPath(prefix: string | undefined, reportId: string, file: ReportFile): string {
-  return [prefix, reportId, sanitizeFilename(file.filename)].filter(Boolean).join('/')
-}
-
-function sanitizeFilename(filename: string): string {
-  return filename.replace(/[^a-zA-Z0-9._-]/g, '_')
-}
-
-function encodePath(path: string): string {
-  return path.split('/').map(encodeURIComponent).join('/')
+function encodeStorageKey(key: string): string {
+  return key
+    .replace(/^\/+/, '')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')
 }

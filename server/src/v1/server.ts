@@ -1,6 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import { HollerKitError } from '../errors.js'
 import {
+  apiKeys,
+  apiKeysAuthenticator,
+  extractBearerToken,
+  generateApiKey,
+  getApiKeyPrefix,
+  staticTokens,
+  supabaseJwt,
+  type ApiKeysAuthOptions,
+  type Authenticator,
+  type AuthPrincipal,
+  type JwtClaims,
+  type SupabaseJwtOptions,
+} from './auth.js'
+import { defaultV1Limits, resolveV1Limits, type V1LimitConfig } from './limits.js'
+import { shouldEnqueueSink, type HollerKitSink } from './sinks.js'
+import {
   hashApiKey,
   type AttachmentKind,
   type FeedbackAttachmentInput,
@@ -15,71 +31,35 @@ import {
   type TriageStatus,
 } from './store.js'
 
-export interface AuthPrincipal {
-  principalId: string
-  scopes: Scope[]
-  kind?: 'tester' | 'api_key' | undefined
-  label?: string | null | undefined
+export {
+  apiKeys,
+  apiKeysAuthenticator,
+  defaultV1Limits,
+  extractBearerToken,
+  generateApiKey,
+  getApiKeyPrefix,
+  resolveV1Limits,
+  staticTokens,
+  supabaseJwt,
+  type ApiKeysAuthOptions,
+  type Authenticator,
+  type AuthPrincipal,
+  type JwtClaims,
+  type SupabaseJwtOptions,
+  type V1LimitConfig,
 }
-
-export type Authenticator = (
-  request: Request,
-) => Promise<AuthPrincipal | null> | AuthPrincipal | null
 
 export interface HollerKitStorageAdapter {
   presignUpload(input: {
     key: string
     mimeType: string
     size: number
-    expiresInSeconds: number
+    expiresInSeconds?: number | undefined
   }): Promise<{ url: string; expiresAt: string }>
   signReadUrl(input: {
     key: string
-    expiresInSeconds: number
+    expiresInSeconds?: number | undefined
   }): Promise<{ url: string; expiresAt: string }>
-}
-
-export interface V1LimitConfig {
-  maxJsonBytes: number
-  maxTextChars: number
-  maxImages: number
-  maxImageBytes: number
-  maxAudioBytes: number
-  maxVideoBytes: number
-  maxMarks: number
-  uploadGrantTtlSeconds: number
-  readUrlTtlSeconds: number
-  acceptedImageMimeTypes: string[]
-  acceptedAudioMimeTypes: string[]
-  acceptedVideoMimeTypes: string[]
-}
-
-export const defaultV1Limits: V1LimitConfig = {
-  maxJsonBytes: 256 * 1024, // 256 KB
-  maxTextChars: 20_000,
-  maxImages: 12,
-  maxImageBytes: 10 * 1024 * 1024, // 10 MB
-  maxAudioBytes: 10 * 1024 * 1024, // 10 MB
-  maxVideoBytes: 50 * 1024 * 1024, // 50 MB
-  maxMarks: 20,
-  uploadGrantTtlSeconds: 10 * 60, // 10 minutes
-  readUrlTtlSeconds: 60 * 60, // 1 hour
-  acceptedImageMimeTypes: ['image/png', 'image/jpeg', 'image/heic', 'image/heif', 'image/webp'],
-  acceptedAudioMimeTypes: ['audio/mp4', 'audio/aac', 'audio/m4a', 'audio/x-m4a', 'audio/mpeg', 'audio/wav'],
-  acceptedVideoMimeTypes: ['video/mp4', 'video/quicktime'],
-}
-
-export function resolveV1Limits(overrides: Partial<V1LimitConfig> = {}): V1LimitConfig {
-  return {
-    ...defaultV1Limits,
-    ...overrides,
-    acceptedImageMimeTypes:
-      overrides.acceptedImageMimeTypes ?? defaultV1Limits.acceptedImageMimeTypes,
-    acceptedAudioMimeTypes:
-      overrides.acceptedAudioMimeTypes ?? defaultV1Limits.acceptedAudioMimeTypes,
-    acceptedVideoMimeTypes:
-      overrides.acceptedVideoMimeTypes ?? defaultV1Limits.acceptedVideoMimeTypes,
-  }
 }
 
 export interface CreateHollerKitServerOptions {
@@ -87,7 +67,7 @@ export interface CreateHollerKitServerOptions {
   storage: HollerKitStorageAdapter
   authenticate: Authenticator | Authenticator[]
   basePath?: string | undefined
-  sinks?: string[] | undefined
+  sinks?: Array<HollerKitSink | string> | undefined
   limits?: Partial<V1LimitConfig> | undefined
   now?: (() => Date) | undefined
 }
@@ -98,68 +78,22 @@ export function fakeStorage(options: { baseUrl?: string; now?: () => Date } = {}
 
   return {
     async presignUpload(input) {
-      const expiresAt = new Date(nowFn().getTime() + input.expiresInSeconds * 1000).toISOString()
+      const ttl = input.expiresInSeconds ?? 600
+      const expiresAt = new Date(nowFn().getTime() + ttl * 1000).toISOString()
       return {
         url: `${baseUrl}/upload/${encodeURIComponent(input.key)}?expires=${encodeURIComponent(expiresAt)}`,
         expiresAt,
       }
     },
     async signReadUrl(input) {
-      const expiresAt = new Date(nowFn().getTime() + input.expiresInSeconds * 1000).toISOString()
+      const ttl = input.expiresInSeconds ?? 3600
+      const expiresAt = new Date(nowFn().getTime() + ttl * 1000).toISOString()
       return {
         url: `${baseUrl}/read/${encodeURIComponent(input.key)}?expires=${encodeURIComponent(expiresAt)}`,
         expiresAt,
       }
     },
   }
-}
-
-export function staticTokens(
-  tokens: Record<string, AuthPrincipal | Scope[]>,
-): Authenticator {
-  return (request: Request): AuthPrincipal | null => {
-    const token = extractBearerToken(request)
-    if (!token || !Object.hasOwn(tokens, token)) return null
-    const entry = tokens[token]
-    if (!entry) return null
-    if (Array.isArray(entry)) {
-      return {
-        principalId: `token:${hashApiKey(token)}`,
-        scopes: [...entry],
-      }
-    }
-    return {
-      principalId: entry.principalId,
-      scopes: [...entry.scopes],
-      kind: entry.kind,
-      label: entry.label,
-    }
-  }
-}
-
-export function apiKeysAuthenticator(options: { store: HollerKitStore }): Authenticator {
-  return async (request: Request): Promise<AuthPrincipal | null> => {
-    const token = extractBearerToken(request)
-    if (!token || !token.startsWith('hk_')) return null
-    const keyHash = hashApiKey(token)
-    const record = await options.store.getApiKeyByHash(keyHash)
-    if (!record || record.revokedAt !== null) return null
-    return {
-      principalId: `apikey:${record.keyHash}`,
-      scopes: [...record.scopes],
-      kind: 'api_key',
-      label: record.label,
-    }
-  }
-}
-
-export function extractBearerToken(request: Request): string | null {
-  const header = request.headers.get('authorization')
-  if (!header) return null
-  const match = header.match(/^Bearer\s+(.+)$/i)
-  if (!match || !match[1]) return null
-  const token = match[1].trim()
-  return token.length > 0 ? token : null
 }
 
 const VALID_SCOPES = new Set<Scope>(['tester', 'quests:write', 'agent:read', 'agent:triage'])
@@ -293,12 +227,25 @@ export function createHollerKitServer(
           const body = await readJsonObject(request, limits)
           const parsed = parseFeedbackCreateBody(body, limits)
 
+          const now = nowFn()
           const created = await options.store.createFeedback({
             ...parsed,
             submitterId: principal.principalId,
-            sinks: options.sinks,
-            now: nowFn(),
+            now,
           })
+
+          if (!created.idempotent && options.sinks && options.sinks.length > 0) {
+            for (const sink of options.sinks) {
+              if (shouldEnqueueSink(sink, created.feedback)) {
+                const sinkName = typeof sink === 'string' ? sink : sink.name
+                await options.store.enqueueOutbox({
+                  feedbackId: created.feedback.id,
+                  sink: sinkName,
+                  now,
+                })
+              }
+            }
+          }
 
           return protocolJsonResponse(
             {
@@ -634,7 +581,7 @@ function validateUploadAttachmentLimits(
     if (!limits.acceptedVideoMimeTypes.includes(normalizedMime)) {
       throw new HollerKitError(415, 'unsupported_media_type', `Unsupported video MIME type: ${mimeType}.`)
     }
-    if (size > limits.maxVideoBytes) {
+    if (limits.maxVideoBytes !== undefined && size > limits.maxVideoBytes) {
       throw new HollerKitError(413, 'video_too_large', 'Video size exceeds maximum byte limit.')
     }
   }
@@ -877,7 +824,18 @@ function parseListFeedbackQuery(params: URLSearchParams) {
   }
 }
 
-function parseQuestDefinitionArray(value: unknown, field: string): QuestDefinitionInput[] {
+export function parseQuestManifest(raw: unknown): { version: 1; quests: QuestDefinitionInput[] } {
+  if (!isPlainObject(raw)) {
+    throw new HollerKitError(400, 'invalid_manifest', 'Quest manifest must be a JSON object.')
+  }
+  if (raw.version !== 1) {
+    throw new HollerKitError(400, 'invalid_manifest_version', 'Manifest version must be 1.')
+  }
+  const quests = parseQuestDefinitionArray(raw.quests, 'quests')
+  return { version: 1, quests }
+}
+
+export function parseQuestDefinitionArray(value: unknown, field: string): QuestDefinitionInput[] {
   if (!Array.isArray(value)) {
     throw new HollerKitError(400, 'invalid_quests', `${field} must be an array of quest definitions.`)
   }
