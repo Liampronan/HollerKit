@@ -1,0 +1,41 @@
+{
+  "name": "hollerkit-mcp",
+  "version": "0.1.0",
+  "description": "MCP server and client for HollerKit v1 feedback triage and QA quest management.",
+  "type": "module",
+  "bin": {
+    "hollerkit-mcp": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "test": "npm run build && node --test --experimental-strip-types tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "hollerkit",
+    "mcp",
+    "model-context-protocol",
+    "qa",
+    "bug-reporting"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}
