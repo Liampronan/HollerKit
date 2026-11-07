@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    base_branches:
+      - "main"
+
+  path_filters:
+    - "!**/node_modules/**"
+    - "!server/dist/**"
+    - "!server/package-lock.json"
+    - "!**/.build/**"
+    - "!**/DerivedData/**"
+    - "!**/.swiftpm/**"
+    - "!**/*.xcresult/**"
+    - "!assets/**"
+    - "!examples/ios-demo/Screenshots/**"
+
+  path_instructions:
+    - path: "ios/Sources/HollerKit/**/*.swift"
+      instructions: |
+        Review the iOS SDK with a focus on:
+        1. Swift 6 strict concurrency compliance (`Sendable` conformances, `@MainActor` isolation on `HollerKit`, `HollerKitPresenterState`, `BugReportSheet`, `AnnotationView`, and `SpeechTranscriber`, and safe cross-actor callbacks).
+        2. Multipart wire protocol and HMAC signing parity (`MultipartClient`, `MultipartBodyBuilder`, `ReportPayload`): ensure `x-hollerkit-timestamp` and `x-hollerkit-signature` (`HMAC-SHA256` of `body || timestamp`) stay strictly aligned with `server/src/hmac.ts`, `PROTOCOL.md`, and `openapi.yaml`.
+        3. Speech recognition and audio capture lifecycle (`SpeechTranscriber`, `SpeechNoteCapture`, `AudioOnlyCaptureView`): proper `AVAudioEngine` / `SFSpeechRecognizer` cleanup, permission handling, and transcript-first privacy defaults.
+        4. UI, screenshot capture, and annotation correctness (`AnnotationView`, `ScreenshotDetector`, `ShakeDetector`, `HollerKitPresenterModifier`): safe window/scene lookup, image rendering scale and redaction accuracy, and clean sheet presentation/dismissal state.
+    - path: "server/src/**/*.ts"
+      instructions: |
+        Review the server package with a focus on:
+        1. Security, HMAC verification, and DoS resilience (`hmac.ts`, `limits.ts`, `normalize.ts`, `handler.ts`): constant-time signature comparison, streaming body byte-limit enforcement (`maxBodyBytes`) prior to full buffering, timestamp drift checks, and strict multipart field/MIME validation.
+        2. Storage, issue adapter, and dispatcher reliability (`adapters/storage/*.ts`, `adapters/issue/github.ts`, `dispatchers/*.ts`): safe storage key construction, structured error propagation via `HollerKitError`, and preventing secret or token leakage in responses or logs.
+        3. Wire contract parity with `ios/Sources/HollerKit`, `openapi.yaml`, and `PROTOCOL.md`.
+    - path: "openapi.yaml"
+      instructions: |
+        Ensure OpenAPI 3.1 schema definitions, multipart field encodings, security headers (`x-hollerkit-timestamp`, `x-hollerkit-signature`, `x-hollerkit-request-id`), error codes, and default limits remain synchronized with `PROTOCOL.md`, `server/src/`, and `ios/Sources/HollerKit/`.
+    - path: "ios/Tests/**/*.swift"
+      instructions: |
+        Review iOS unit tests for deterministic verification of HMAC signature generation, multipart body serialization, breadcrumb ring-buffer behavior, and payload encoding without external network dependencies.
+    - path: "server/tests/**/*.ts"
+      instructions: |
+        Review server tests for thorough coverage of HMAC verification, streaming body limits, timestamp drift, multipart parsing, storage/issue adapters, and dispatchers using deterministic mocks.
+
+  tools:
+    swiftlint:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+
+chat:
+  auto_reply: true
