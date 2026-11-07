@@ -1,7 +1,7 @@
 {
   "name": "hollerkit-server",
-  "version": "0.1.0",
-  "description": "Self-hosted server handler for HollerKit bug reports.",
+  "version": "1.0.0-beta.1",
+  "description": "Self-hosted /v1 server handler, storage adapters, and CLI for HollerKit bug reports and QA quests.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

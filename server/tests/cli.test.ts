@@ -112,6 +112,24 @@ test('CLI: quests validate succeeds on valid manifest and fails on invalid manif
     assert.equal(err.length, 0)
     assert.ok(out.some((line) => line.startsWith('feed-zoom\t') && line.length > 20))
 
+    // Also validate the sample manifest in examples/ios-demo/hollerkit-quests.json
+    const demoManifestPath = fileURLToPath(
+      new URL('../../examples/ios-demo/hollerkit-quests.json', import.meta.url),
+    )
+    const demoOut: string[] = []
+    const demoErr: string[] = []
+    const demoCode = await runCli(
+      ['quests', 'validate', demoManifestPath],
+      {
+        stdout: (l) => demoOut.push(l),
+        stderr: (l) => demoErr.push(l),
+      },
+    )
+    assert.equal(demoCode, 0)
+    assert.equal(demoErr.length, 0)
+    assert.ok(demoOut.some((line) => line.startsWith('checkout-promo-math\t')))
+    assert.ok(demoOut.some((line) => line.startsWith('profile-avatar-upload\t')))
+
     // Invalid manifest (missing expect array)
     const invalidPath = join(tempDir, 'invalid-quests.json')
     await writeFile(
