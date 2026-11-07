@@ -1,0 +1,12 @@
+# Disable Supabase's built-in gateway JWT verification for the HollerKit function
+# so both tester Supabase Auth JWTs and `hk_...` API keys (used by CI `quests sync`
+# and `hollerkit-mcp`) reach HollerKit's own authenticator chain (`supabaseJwt` + `apiKeys`).
+#
+# When adding HollerKit to an existing Supabase project:
+# 1. Copy `functions/hollerkit/index.ts` (or `index.ts`) to `supabase/functions/hollerkit/index.ts`.
+# 2. Merge the `[functions.hollerkit]` block below into your project's `supabase/config.toml`
+#    (or deploy with `supabase functions deploy hollerkit --no-verify-jwt`) so the Supabase
+#    gateway does not reject `hk_...` API keys before HollerKit authenticates them.
+[functions.hollerkit]
+verify_jwt = false
+entrypoint = "./functions/hollerkit/index.ts"
