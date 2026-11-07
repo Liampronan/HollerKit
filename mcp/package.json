@@ -19,12 +19,13 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:server": "tsc -p ../server/tsconfig.build.json --typeRoots ./node_modules/@types",
     "prepack": "npm run build",
-    "test": "npm run build && node --test --experimental-strip-types tests/*.test.ts",
+    "test": "npm run build:server && npm run build && node --test --experimental-strip-types tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.6.0"
   },
   "keywords": [
     "hollerkit",

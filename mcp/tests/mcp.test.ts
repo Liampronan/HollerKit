@@ -15,6 +15,7 @@ import {
   type FeedbackGetOutput,
   type FeedbackInboxOutput,
   type FeedbackTriageOutput,
+  type JsonRpcErrorResponse,
   type JsonRpcSuccessResponse,
   type McpCallToolResult,
   type QuestsPendingOutput,
@@ -23,6 +24,9 @@ import {
 
 const BASE_URL = 'https://example.supabase.co/functions/v1/hollerkit'
 
+/**
+ * Creates an in-process HollerKit v1 test server seeded with quests, build manifests, upload grants, and feedback items.
+ */
 async function createSeededTestHarness() {
   const store = memoryStore()
   const storage = fakeStorage({
@@ -86,7 +90,55 @@ async function createSeededTestHarness() {
     return v1Handler(request)
   }
 
-  // 1. Seed canonical quests via PUT /v1/quests
+  // 1a. Initial sync including `camera-flash-retired-passed` so we can pass it and then retire it
+  const initialSyncRes = await inProcessFetch(`${BASE_URL}/v1/quests`, {
+    method: 'PUT',
+    headers: {
+      authorization: `Bearer ${questsWriteKey}`,
+      'content-type': 'application/json',
+      'hollerkit-protocol': '1',
+    },
+    body: JSON.stringify({
+      version: 1,
+      sha: '000init',
+      pr: 39,
+      quests: [
+        {
+          id: 'camera-flash-retired-passed',
+          title: 'Camera flash toggle persists across mode switches',
+          area: 'camera',
+          setup: [],
+          steps: ['Toggle flash on', 'Switch mode'],
+          expect: ['Flash remains enabled'],
+          needs: [],
+          record: 'optional',
+          start: 'hollerkit://camera',
+        },
+      ],
+    }),
+  })
+  assert.equal(initialSyncRes.status, 200)
+
+  const retiredPassRes = await inProcessFetch(`${BASE_URL}/v1/feedback`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${testerToken}`,
+      'content-type': 'application/json',
+      'hollerkit-protocol': '1',
+    },
+    body: JSON.stringify({
+      id: '44444444-4444-4444-8444-444444444444',
+      kind: 'quest_run',
+      questId: 'camera-flash-retired-passed',
+      questVersion: 1,
+      result: 'pass',
+      build: '104',
+      stepsChecked: [true, true],
+    }),
+  })
+  assert.equal(retiredPassRes.status, 201)
+
+  // 1b. Sync canonical quests via PUT /v1/quests (retiring `camera-flash-retired-passed` and adding active quests)
   const syncRes = await inProcessFetch(`${BASE_URL}/v1/quests`, {
     method: 'PUT',
     headers: {
@@ -122,6 +174,17 @@ async function createSeededTestHarness() {
           record: 'required',
           start: 'hollerkit://camera',
           source: { pr: 41, sha: '222bbbb', added: '2026-04-19' },
+        },
+        {
+          id: 'camera-zoom-active-unpassed',
+          title: 'Pinch-to-zoom smoothly interpolates up to 3x',
+          area: 'camera',
+          setup: [],
+          steps: ['Pinch out on viewfinder'],
+          expect: ['Zoom indicator reaches 3.0x smoothly'],
+          needs: [],
+          record: 'optional',
+          start: 'hollerkit://camera',
         },
       ],
     }),
@@ -385,14 +448,17 @@ test('exercises all 5 MCP tools end-to-end via callTool dispatcher and verifies 
   assert.equal(pendingCall.structuredContent.quests.length, 1)
   assert.equal(pendingCall.structuredContent.quests[0]?.id, 'feed-scroll-restore')
 
-  // 5. quests_retirable -> returns camera-flip-latency (active + passedOnCurrentVersion=true)
+  // 5. quests_retirable -> returns camera-flip-latency (active + passedOnCurrentVersion=true),
+  // and excludes same-area active-unpassed (`camera-zoom-active-unpassed`) and retired-passed (`camera-flash-retired-passed`) quests.
   const retirableCall = (await mcp.callTool('quests_retirable', {
     area: 'camera',
   })) as McpCallToolResult<QuestsRetirableOutput>
   assert.equal(retirableCall.isError, false)
   assert.equal(retirableCall.structuredContent.ok, true)
-  assert.equal(retirableCall.structuredContent.quests.length, 1)
-  assert.equal(retirableCall.structuredContent.quests[0]?.id, 'camera-flip-latency')
+  const retirableIds = retirableCall.structuredContent.quests.map((q) => q.id)
+  assert.deepEqual(retirableIds, ['camera-flip-latency'])
+  assert.ok(!retirableIds.includes('camera-zoom-active-unpassed'))
+  assert.ok(!retirableIds.includes('camera-flash-retired-passed'))
   assert.equal(retirableCall.structuredContent.quests[0]?.passedOnCurrentVersion, true)
 
   // Verify every request sent Authorization: Bearer <apiKey> and hollerkit-protocol: 1
@@ -567,7 +633,7 @@ test('exercises full JSON-RPC 2.0 stdio protocol (initialize, notifications/init
   }
 })
 
-test('surfaces 401, 403, 404, and protocol errors clearly as MCP tool errors', async () => {
+test('surfaces 401, 403, 404, timeout, validation, and protocol errors clearly', async () => {
   const harness = await createSeededTestHarness()
 
   // 1. 401 Unauthorized (invalid API key)
@@ -633,8 +699,8 @@ test('surfaces 401, 403, 404, and protocol errors clearly as MCP tool errors', a
     'unsupported_protocol',
   )
 
-  // 5. Unknown MCP tool via JSON-RPC tools/call
-  const unknownToolRpc = await fullServer.handleJsonRpc({
+  // 5. Unknown MCP tool via JSON-RPC tools/call returns JSON-RPC protocol error (-32602)
+  const unknownToolRpc = (await fullServer.handleJsonRpc({
     jsonrpc: '2.0',
     id: 99,
     method: 'tools/call',
@@ -642,13 +708,88 @@ test('surfaces 401, 403, 404, and protocol errors clearly as MCP tool errors', a
       name: 'nonexistent_tool',
       arguments: {},
     },
+  })) as JsonRpcErrorResponse
+  assert.ok(unknownToolRpc && !Array.isArray(unknownToolRpc) && 'error' in unknownToolRpc)
+  assert.equal(unknownToolRpc.error.code, -32602)
+  assert.match(unknownToolRpc.error.message, /Unknown MCP tool: nonexistent_tool/)
+
+  // 6. Unknown tool argument property is rejected before dispatch
+  const unknownPropResult = await fullServer.callTool('feedback_inbox', {
+    triageStatus: 'all',
   })
-  assert.ok(unknownToolRpc && !Array.isArray(unknownToolRpc) && 'result' in unknownToolRpc)
-  const unknownToolResult = unknownToolRpc.result as McpCallToolResult
-  assert.equal(unknownToolResult.isError, true)
-  assert.equal(unknownToolResult.structuredContent.status, 404)
+  assert.equal(unknownPropResult.isError, true)
+  assert.equal(unknownPropResult.structuredContent.status, 400)
   assert.equal(
-    (unknownToolResult.structuredContent.error as { code: string }).code,
-    'unknown_tool',
+    (unknownPropResult.structuredContent.error as { code: string }).code,
+    'invalid_arguments',
+  )
+
+  // 7. Non-string area in quests_retirable is rejected
+  const invalidAreaResult = await fullServer.callTool('quests_retirable', {
+    area: 123 as unknown as string,
+  })
+  assert.equal(invalidAreaResult.isError, true)
+  assert.equal(invalidAreaResult.structuredContent.status, 400)
+  assert.equal(
+    (invalidAreaResult.structuredContent.error as { code: string }).code,
+    'invalid_arguments',
+  )
+
+  // 8. Explicit null arguments, scalar params, and invalid request IDs in JSON-RPC
+  const nullArgsRpc = (await fullServer.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 100,
+    method: 'tools/call',
+    params: {
+      name: 'feedback_inbox',
+      arguments: null,
+    },
+  })) as JsonRpcErrorResponse
+  assert.equal(nullArgsRpc.error.code, -32602)
+
+  const scalarParamsRpc = (await fullServer.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 101,
+    method: 'tools/list',
+    params: false,
+  })) as JsonRpcErrorResponse
+  assert.equal(scalarParamsRpc.error.code, -32600)
+
+  const invalidIdRpc = (await fullServer.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: { bad: true },
+    method: 'tools/call',
+    params: {
+      name: 'feedback_triage',
+      arguments: {
+        id: harness.bugReportFeedbackId,
+        status: 'wontfix',
+        summary: 'Must not execute',
+      },
+    },
+  })) as JsonRpcErrorResponse
+  assert.equal(invalidIdRpc.error.code, -32600)
+
+  // 9. Request timeout during slow response body consumption
+  const slowServer = createHollerKitMcpServer({
+    baseUrl: BASE_URL,
+    apiKey: harness.agentFullKey,
+    timeoutMs: 25,
+    fetch: async () =>
+      new Response(
+        new ReadableStream({
+          start() {
+            // Never closes stream
+          },
+        }),
+        { status: 200, headers: { 'hollerkit-protocol': '1' } },
+      ),
+  })
+  const timeoutResult = await slowServer.callTool('quests_retirable', {})
+  assert.equal(timeoutResult.isError, true)
+  assert.equal(timeoutResult.structuredContent.status, 504)
+  assert.equal(
+    (timeoutResult.structuredContent.error as { code: string }).code,
+    'request_timeout',
   )
 })

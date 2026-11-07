@@ -22,6 +22,7 @@ import type {
 } from './types.js'
 
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05'
+const DEFAULT_MAX_PENDING_REQUESTS = 64
 export const HOLLERKIT_MCP_VERSION = '0.1.0'
 const SUPPORTED_MCP_PROTOCOL_VERSIONS = new Set([
   '2024-11-05',
@@ -46,11 +47,25 @@ export interface HollerKitMcpServer {
   ): { close: () => void }
 }
 
+/**
+ * Creates a HollerKit MCP server exposing the 5 `/v1` coding-agent tools over programmatic and JSON-RPC 2.0 stdio interfaces.
+ */
 export function createHollerKitMcpServer(
   config: HollerKitMcpConfig = {},
 ): HollerKitMcpServer {
   const client = createHollerKitMcpClient(config)
+  const maxPendingRequests =
+    typeof config.maxPendingRequests === 'number' &&
+    Number.isInteger(config.maxPendingRequests) &&
+    config.maxPendingRequests > 0
+      ? config.maxPendingRequests
+      : DEFAULT_MAX_PENDING_REQUESTS
 
+  const canceledRequestIds = new Set<string | number>()
+
+  /**
+   * Dispatches a validated MCP tool invocation to the corresponding HollerKit `/v1` client method.
+   */
   async function dispatchTool(
     name: HollerKitToolName,
     args: Record<string, unknown>,
@@ -69,17 +84,21 @@ export function createHollerKitMcpServer(
     }
   }
 
+  /**
+   * Executes one of the 5 HollerKit MCP tools by name and formats the response as an MCP CallToolResult.
+   */
   async function callTool(
     name: string,
-    args: Record<string, unknown> = {},
+    args?: Record<string, unknown> | undefined,
   ): Promise<McpCallToolResult> {
+    const resolvedArgs = arguments.length < 2 || args === undefined ? {} : args
     try {
       const toolDef = HOLLERKIT_MCP_TOOLS.find((tool) => tool.name === name)
       if (!toolDef) {
         throw new HollerKitMcpError(404, 'unknown_tool', `Unknown MCP tool: ${name}.`)
       }
 
-      if (!isPlainObject(args)) {
+      if (!isPlainObject(resolvedArgs)) {
         throw new HollerKitMcpError(
           400,
           'invalid_arguments',
@@ -87,7 +106,9 @@ export function createHollerKitMcpServer(
         )
       }
 
-      const result = await dispatchTool(toolDef.name, args)
+      validateToolInputSchema(toolDef, resolvedArgs)
+
+      const result = await dispatchTool(toolDef.name, resolvedArgs)
       const structured = isPlainObject(result)
         ? result
         : ({ ok: true, data: result } as Record<string, unknown>)
@@ -125,6 +146,9 @@ export function createHollerKitMcpServer(
     }
   }
 
+  /**
+   * Processes a single JSON-RPC 2.0 request or notification object.
+   */
   async function handleSingleRpc(
     message: unknown,
   ): Promise<JsonRpcResponse | null> {
@@ -134,12 +158,29 @@ export function createHollerKitMcpServer(
     }
 
     const hasId = Object.prototype.hasOwnProperty.call(message, 'id')
-    const id: JsonRpcId = hasId && isValidRpcId(message.id) ? message.id : null
+    if (hasId && !isValidRpcId(message.id)) {
+      return jsonRpcError(null, -32600, 'Invalid Request: "id" must be a string, number, or null.')
+    }
+    const id: JsonRpcId = hasId ? (message.id as JsonRpcId) : null
     const method = message.method
     const params = message.params
 
+    if (params !== undefined && !isPlainObject(params) && !Array.isArray(params)) {
+      return jsonRpcError(
+        id,
+        -32600,
+        'Invalid Request: "params" must be an object or array when provided.',
+      )
+    }
+
     // Notifications (requests without an `id` member) produce no response.
     if (!hasId) {
+      recordCancelFromRpcObject(message, canceledRequestIds)
+      return null
+    }
+
+    if ((typeof id === 'string' || typeof id === 'number') && canceledRequestIds.has(id)) {
+      canceledRequestIds.delete(id)
       return null
     }
 
@@ -192,11 +233,19 @@ export function createHollerKitMcpServer(
           if (!isPlainObject(params) || typeof params.name !== 'string' || params.name.trim().length === 0) {
             return jsonRpcError(id, -32602, 'Invalid params: tools/call requires a non-empty string "name".')
           }
-          const rawArgs = params.arguments ?? {}
+          const toolDef = HOLLERKIT_MCP_TOOLS.find((tool) => tool.name === params.name)
+          if (!toolDef) {
+            return jsonRpcError(id, -32602, `Unknown MCP tool: ${params.name}.`)
+          }
+          const rawArgs = params.arguments === undefined ? {} : params.arguments
           if (!isPlainObject(rawArgs)) {
             return jsonRpcError(id, -32602, 'Invalid params: tools/call "arguments" must be an object.')
           }
-          const toolResult = await callTool(params.name, rawArgs)
+          if ((typeof id === 'string' || typeof id === 'number') && canceledRequestIds.has(id)) {
+            canceledRequestIds.delete(id)
+            return null
+          }
+          const toolResult = await callTool(toolDef.name, rawArgs)
           return {
             jsonrpc: '2.0',
             id,
@@ -213,6 +262,9 @@ export function createHollerKitMcpServer(
     }
   }
 
+  /**
+   * Handles a parsed JSON-RPC 2.0 message or batch array.
+   */
   async function handleJsonRpc(
     message: unknown,
   ): Promise<JsonRpcResponse | JsonRpcResponse[] | null> {
@@ -220,13 +272,24 @@ export function createHollerKitMcpServer(
       if (message.length === 0) {
         return jsonRpcError(null, -32600, 'Invalid Request: empty batch')
       }
-      const responses = await Promise.all(message.map((item) => handleSingleRpc(item)))
+      for (const item of message) {
+        if (isPlainObject(item) && !Object.prototype.hasOwnProperty.call(item, 'id')) {
+          recordCancelFromRpcObject(item, canceledRequestIds)
+        }
+      }
+      const responses: (JsonRpcResponse | null)[] = []
+      for (const item of message) {
+        responses.push(await handleSingleRpc(item))
+      }
       const filtered = responses.filter((item): item is JsonRpcResponse => item !== null)
       return filtered.length > 0 ? filtered : null
     }
     return handleSingleRpc(message)
   }
 
+  /**
+   * Parses and handles a single newline-delimited JSON-RPC 2.0 line.
+   */
   async function handleJsonRpcLine(line: string): Promise<string | null> {
     const trimmed = line.trim()
     if (!trimmed) return null
@@ -243,6 +306,9 @@ export function createHollerKitMcpServer(
     return JSON.stringify(response)
   }
 
+  /**
+   * Connects the MCP server to newline-delimited JSON-RPC 2.0 input and output streams with bounded queueing, backpressure, cancellation, and error handling.
+   */
   function connectStdio(
     input: Readable = process.stdin,
     output: Writable = process.stdout,
@@ -252,23 +318,106 @@ export function createHollerKitMcpServer(
       crlfDelay: Infinity,
     })
 
-    let chain = Promise.resolve()
-    rl.on('line', (line) => {
-      chain = chain
-        .then(async () => {
-          const reply = await handleJsonRpcLine(line)
-          if (reply !== null) {
-            output.write(`${reply}\n`)
+    const pendingLines: string[] = []
+    let processing = false
+    let inputPaused = false
+    let closed = false
+
+    /**
+     * Pauses the input stream when the bounded queue reaches capacity or output backpressure is active.
+     */
+    const pauseInput = () => {
+      if (!inputPaused && !closed) {
+        inputPaused = true
+        rl.pause()
+        input.pause()
+      }
+    }
+
+    /**
+     * Resumes the input stream once queued requests drop below the high-water mark.
+     */
+    const maybeResumeInput = () => {
+      if (inputPaused && !closed && pendingLines.length < maxPendingRequests) {
+        inputPaused = false
+        input.resume()
+        rl.resume()
+      }
+    }
+
+    /**
+     * Shuts down the stdio transport and detaches stream listeners.
+     */
+    const shutdown = () => {
+      if (closed) return
+      closed = true
+      pendingLines.length = 0
+      output.removeListener('error', onStreamError)
+      output.removeListener('close', onStreamClose)
+      input.removeListener('error', onStreamError)
+      rl.close()
+    }
+
+    const onStreamError = () => {
+      shutdown()
+    }
+
+    const onStreamClose = () => {
+      shutdown()
+    }
+
+    output.on('error', onStreamError)
+    output.on('close', onStreamClose)
+    input.on('error', onStreamError)
+
+    /**
+     * Sequentially drains queued JSON-RPC lines while respecting output backpressure and stream closure.
+     */
+    const drainQueue = async () => {
+      if (processing || closed) return
+      processing = true
+      try {
+        while (pendingLines.length > 0 && !closed) {
+          const nextLine = pendingLines.shift()!
+          maybeResumeInput()
+
+          const reply = await handleJsonRpcLine(nextLine)
+          if (reply !== null && !closed) {
+            const canContinue = writeLineSafely(output, `${reply}\n`, shutdown)
+            if (!canContinue && !closed) {
+              pauseInput()
+              await waitForDrainOrClose(output, () => closed)
+              maybeResumeInput()
+            }
           }
-        })
-        .catch(() => {
-          // Ignore write failures if output stream closed early
-        })
+        }
+      } finally {
+        processing = false
+      }
+    }
+
+    rl.on('line', (line) => {
+      if (closed) return
+      if (recordCancellationFromRawLine(line, canceledRequestIds)) {
+        return
+      }
+      pendingLines.push(line)
+      if (pendingLines.length >= maxPendingRequests) {
+        pauseInput()
+      }
+      void drainQueue()
+    })
+
+    rl.on('close', () => {
+      closed = true
+      output.removeListener('error', onStreamError)
+      output.removeListener('close', onStreamClose)
+      input.removeListener('error', onStreamError)
     })
 
     return {
       close() {
-        rl.close()
+        shutdown()
       },
     }
   }
@@ -283,6 +432,124 @@ export function createHollerKitMcpServer(
   }
 }
 
+/**
+ * Validates that tool arguments only include properties allowed by the tool's JSON schema.
+ */
+function validateToolInputSchema(
+  toolDef: McpToolDefinition,
+  args: Record<string, unknown>,
+): void {
+  const allowedProps = toolDef.inputSchema.properties
+  if (toolDef.inputSchema.additionalProperties === false) {
+    for (const key of Object.keys(args)) {
+      if (!Object.prototype.hasOwnProperty.call(allowedProps, key)) {
+        throw new HollerKitMcpError(
+          400,
+          'invalid_arguments',
+          `Unknown argument "${key}" for tool "${toolDef.name}".`,
+        )
+      }
+    }
+  }
+}
+
+/**
+ * Records a cancellation request ID if the given JSON-RPC notification is a cancellation message.
+ */
+function recordCancelFromRpcObject(
+  message: Record<string, unknown>,
+  canceledRequestIds: Set<string | number>,
+): boolean {
+  if (message.jsonrpc !== '2.0') return false
+  if (message.method !== 'notifications/cancelled' && message.method !== '$/cancelRequest') {
+    return false
+  }
+  if (!isPlainObject(message.params)) return false
+  const reqId = message.params.requestId ?? message.params.id
+  if (typeof reqId === 'string' || typeof reqId === 'number') {
+    canceledRequestIds.add(reqId)
+    return true
+  }
+  return false
+}
+
+/**
+ * Inspects a raw JSON-RPC line on arrival and immediately records any cancellation notifications before queueing.
+ */
+function recordCancellationFromRawLine(
+  line: string,
+  canceledRequestIds: Set<string | number>,
+): boolean {
+  const trimmed = line.trim()
+  if (!trimmed.includes('cancel')) return false
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (
+      isPlainObject(parsed) &&
+      !Object.prototype.hasOwnProperty.call(parsed, 'id') &&
+      recordCancelFromRpcObject(parsed, canceledRequestIds)
+    ) {
+      return true
+    }
+  } catch {
+    // Let normal line processing report any JSON parse error.
+  }
+  return false
+}
+
+/**
+ * Writes a serialized JSON-RPC line to the output stream, shutting down the transport on synchronous error.
+ */
+function writeLineSafely(
+  output: Writable,
+  chunk: string,
+  onError: () => void,
+): boolean {
+  if (output.destroyed || !output.writable) {
+    onError()
+    return true
+  }
+  try {
+    return output.write(chunk, (err) => {
+      if (err) {
+        onError()
+      }
+    })
+  } catch {
+    onError()
+    return true
+  }
+}
+
+/**
+ * Waits for a backpressured writable stream to emit `drain`, `close`, or `error`.
+ */
+function waitForDrainOrClose(
+  output: Writable,
+  isClosed: () => boolean,
+): Promise<void> {
+  if (isClosed() || output.destroyed || !output.writable) {
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve) => {
+    const cleanup = () => {
+      output.removeListener('drain', onDone)
+      output.removeListener('close', onDone)
+      output.removeListener('error', onDone)
+    }
+    const onDone = () => {
+      cleanup()
+      resolve()
+    }
+    output.once('drain', onDone)
+    output.once('close', onDone)
+    output.once('error', onDone)
+  })
+}
+
+/**
+ * Constructs a standard JSON-RPC 2.0 error response envelope.
+ */
 function jsonRpcError(
   id: JsonRpcId,
   code: number,
@@ -296,10 +563,16 @@ function jsonRpcError(
   }
 }
 
+/**
+ * Checks whether a value is a non-null, non-array plain object.
+ */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Checks whether a value is a valid JSON-RPC 2.0 request identifier (string, number, or null).
+ */
 function isValidRpcId(value: unknown): value is JsonRpcId {
   return typeof value === 'string' || typeof value === 'number' || value === null
 }

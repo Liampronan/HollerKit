@@ -7,11 +7,16 @@ export type AttachmentKind = 'image' | 'audio' | 'video' | 'keyframe' | 'mark'
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
+/**
+ * Configuration options for creating a HollerKit MCP client or server.
+ */
 export interface HollerKitMcpConfig {
   baseUrl?: string | undefined
   apiKey?: string | undefined
   fetch?: FetchLike | undefined
   protocolVersion?: string | undefined
+  timeoutMs?: number | undefined
+  maxPendingRequests?: number | undefined
 }
 
 export interface FeedbackItem {
