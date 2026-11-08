@@ -79,10 +79,12 @@ public actor SpeechTranscriber {
 
         let locale = Locale(identifier: options.localeIdentifier)
         var candidates: [SFSpeechRecognizer] = []
-        if let requested = SFSpeechRecognizer(locale: locale) {
+        if let requested = SFSpeechRecognizer(locale: locale),
+           SpeechNoteCapture.matchesRequestedLanguage(requested.locale, requestedLocale: locale) {
             candidates.append(requested)
         }
         if let fallback = SFSpeechRecognizer(),
+           SpeechNoteCapture.matchesRequestedLanguage(fallback.locale, requestedLocale: locale),
            !candidates.contains(where: { $0.locale.identifier == fallback.locale.identifier }) {
             candidates.append(fallback)
         }

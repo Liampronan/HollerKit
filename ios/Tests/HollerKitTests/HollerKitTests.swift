@@ -1246,7 +1246,14 @@ final class HollerKitTests: XCTestCase {
         }
 
         // Wait until stopAsync() enters its stopping state before delivering the final transcript
+        let stoppingDeadline = Date().addingTimeInterval(2)
         while !capture.isStopping {
+            if Date() >= stoppingDeadline {
+                stopTask.cancel()
+                _ = try? await stopTask.value
+                XCTFail("stopAsync() did not enter its stopping state")
+                return
+            }
             await Task.yield()
         }
         state.recordResult(text: "Delayed final transcript after endAudio", confidence: 0.95, isFinal: true)
@@ -1257,6 +1264,164 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(transcript.confidence ?? -1, 0.95, accuracy: 0.001)
         XCTAssertFalse(capture.isCapturing)
         XCTAssertFalse(capture.isStopping)
+    }
+
+    @MainActor
+    func testStopAsyncPreservesSessionMetadataAndReportsMidCaptureOrTimeoutErrors() async throws {
+        let capture = SpeechNoteCapture()
+        let stateA = LiveRecognitionState()
+        capture.startForTesting(
+            state: stateA,
+            options: SpeechTranscriberOptions(
+                locale: Locale(identifier: "fr_FR"),
+                requireOnDeviceRecognition: false
+            )
+        )
+        stateA.recordResult(text: "Texte en français", confidence: 0.91, isFinal: false)
+
+        let stopTaskA = Task { @MainActor in
+            try await capture.stopAsync()
+        }
+
+        let stoppingDeadline = Date().addingTimeInterval(2)
+        while !capture.isStopping {
+            if Date() >= stoppingDeadline {
+                stopTaskA.cancel()
+                _ = try? await stopTaskA.value
+                XCTFail("stopAsync() did not enter its stopping state")
+                return
+            }
+            await Task.yield()
+        }
+
+        // Start session B with different locale and engine while session A is still stopping
+        let stateB = LiveRecognitionState()
+        capture.startForTesting(
+            state: stateB,
+            options: SpeechTranscriberOptions(
+                locale: Locale(identifier: "en_US"),
+                requireOnDeviceRecognition: true
+            )
+        )
+        stateA.recordResult(text: "Texte en français complet", confidence: 0.94, isFinal: true)
+
+        let transcriptA = try await stopTaskA.value
+        XCTAssertEqual(transcriptA.text, "Texte en français complet")
+        XCTAssertEqual(transcriptA.locale, "fr_FR")
+        XCTAssertEqual(transcriptA.engine, .appleNetwork)
+
+        // Mid-capture failure after partial text stops capture while preserving partial transcriptText
+        stateB.recordResult(text: "Partial English text", confidence: 0.88, isFinal: false)
+        stateB.recordError(NSError(
+            domain: "kAFAssistantErrorDomain",
+            code: 1101,
+            userInfo: [NSLocalizedDescriptionKey: "Speech service interrupted"]
+        ))
+        capture.handleRecognitionCallbackError(for: stateB)
+        XCTAssertFalse(capture.isCapturing)
+        XCTAssertEqual(capture.transcriptText, "Partial English text")
+        XCTAssertTrue(capture.lastError?.contains("kAFAssistantErrorDomain code 1101") == true)
+
+        // Timeout before final result throws recognitionFailed instead of returning partial text as final
+        let stateC = LiveRecognitionState()
+        capture.startForTesting(
+            state: stateC,
+            options: SpeechTranscriberOptions(locale: Locale(identifier: "en_US"))
+        )
+        stateC.recordResult(text: "Unfinished partial text", confidence: 0.75, isFinal: false)
+        do {
+            _ = try await capture.stopAsync(timeout: 0.03)
+            XCTFail("Expected stopAsync() timeout to throw recognitionFailed")
+        } catch let error as SpeechNoteCaptureError {
+            guard case .recognitionFailed = error else {
+                XCTFail("Expected .recognitionFailed, got \(error)")
+                return
+            }
+        }
+    }
+
+    @MainActor
+    func testSpeechCaptureControllerWaitsForInFlightStopAndCancelsPendingPermissionStart() async {
+        // 1. matchesRequestedLanguage allows same-language region fallback and rejects cross-language fallback
+        XCTAssertTrue(SpeechNoteCapture.matchesRequestedLanguage(
+            Locale(identifier: "en_US"),
+            requestedLocale: Locale(identifier: "en-AU")
+        ))
+        XCTAssertFalse(SpeechNoteCapture.matchesRequestedLanguage(
+            Locale(identifier: "en_US"),
+            requestedLocale: Locale(identifier: "fr-FR")
+        ))
+
+        // 2. finalizeIfCapturing waits for an already-running stop operation
+        let controller = SpeechCaptureController()
+        let state = LiveRecognitionState()
+        controller.capture.startForTesting(
+            state: state,
+            options: SpeechTranscriberOptions(locale: Locale(identifier: "en_US"))
+        )
+        controller.isCapturing = true
+
+        let toggleStopTask = Task { @MainActor in
+            await controller.toggle(
+                configuration: .transcriptOnly(maxDuration: 60, requireOnDeviceTranscription: false)
+            )
+        }
+        let stoppingDeadline = Date().addingTimeInterval(2)
+        while !controller.isStopping {
+            if Date() >= stoppingDeadline {
+                toggleStopTask.cancel()
+                await toggleStopTask.value
+                XCTFail("Controller did not enter stopping state")
+                return
+            }
+            await Task.yield()
+        }
+
+        let finalizeTask = Task { @MainActor in
+            await controller.finalizeIfCapturing()
+        }
+        await Task.yield()
+        state.recordResult(text: "Transcript completed during in-flight stop", confidence: 0.96, isFinal: true)
+
+        await finalizeTask.value
+        await toggleStopTask.value
+        XCTAssertEqual(controller.transcript?.text, "Transcript completed during in-flight stop")
+        XCTAssertFalse(controller.isStopping)
+        XCTAssertFalse(controller.isCapturing)
+
+        // 3. cancelCapture invalidates a pending start while permission prompt is awaiting
+        var resumePermission: CheckedContinuation<SpeechTranscriberAuthorizationStatus, Never>?
+        controller.capture.speechAuthorizationProvider = {
+            await withCheckedContinuation { continuation in
+                resumePermission = continuation
+            }
+        }
+        controller.capture.microphonePermissionProvider = { true }
+
+        let startTask = Task { @MainActor in
+            await controller.toggle(
+                configuration: .transcriptOnly(maxDuration: 60, requireOnDeviceTranscription: false)
+            )
+        }
+        let permissionDeadline = Date().addingTimeInterval(2)
+        while resumePermission == nil {
+            if Date() >= permissionDeadline {
+                startTask.cancel()
+                await startTask.value
+                XCTFail("Pending start did not reach permission await")
+                return
+            }
+            await Task.yield()
+        }
+
+        // Sheet dismisses while permission alert is still visible
+        controller.cancelCapture()
+        resumePermission?.resume(returning: .authorized)
+        await startTask.value
+
+        XCTAssertFalse(controller.isCapturing)
+        XCTAssertFalse(controller.capture.isCapturing)
+        XCTAssertNil(controller.errorMessage)
     }
     #endif
 
@@ -1289,6 +1454,18 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(
             SpeechCaptureController.mergeTranscript("123456", into: longComment),
             longComment
+        )
+
+        // Counts UTF-16 code units so surrogate-pair emoji cannot exceed the 20,000 UTF-16 server limit
+        let emojiComment = String(repeating: "😀", count: 10_000)
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript("x", into: emojiComment),
+            emojiComment
+        )
+        let oversizedEmojiTranscript = String(repeating: "😀", count: 10_001)
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript(oversizedEmojiTranscript, into: ""),
+            ""
         )
 
         // consumeTranscriptForCommentMerge merges each completed transcript once so later user edits are preserved

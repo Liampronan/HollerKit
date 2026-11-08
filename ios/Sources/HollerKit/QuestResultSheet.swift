@@ -215,7 +215,7 @@ public struct QuestResultSheet: View {
                             await submit()
                         }
                     }
-                    .disabled(isSubmitting || questState.activeQuest == nil)
+                    .disabled(isSubmitting || speechCapture.isStopping || questState.activeQuest == nil)
                     .accessibilityIdentifier("HollerKitQuestResultSubmitButton")
                 }
             }

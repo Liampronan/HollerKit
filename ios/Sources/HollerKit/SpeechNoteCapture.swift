@@ -84,6 +84,40 @@ final class LiveRecognitionState: @unchecked Sendable {
     private var confidence: Double?
     private var isFinal: Bool = false
     private var errorDescription: String?
+    private var localeIdentifier: String
+    private var engine: HollerKitTranscript.Engine
+    private var startedAt: Date
+
+    /// Creates a new recognition state container for a single capture session.
+    init(
+        localeIdentifier: String = Locale.current.identifier,
+        engine: HollerKitTranscript.Engine = .appleNetwork,
+        startedAt: Date = Date()
+    ) {
+        self.localeIdentifier = localeIdentifier
+        self.engine = engine
+        self.startedAt = startedAt
+    }
+
+    /// Updates the session metadata associated with this recognition state.
+    func configureSessionMetadata(
+        localeIdentifier: String,
+        engine: HollerKitTranscript.Engine,
+        startedAt: Date = Date()
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.localeIdentifier = localeIdentifier
+        self.engine = engine
+        self.startedAt = startedAt
+    }
+
+    /// Returns the session metadata captured when this recognition session started.
+    func sessionMetadata() -> (localeIdentifier: String, engine: HollerKitTranscript.Engine, startedAt: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (localeIdentifier, engine, startedAt)
+    }
 
     /// Records a partial or final transcription result.
     func recordResult(text: String, confidence: Double?, isFinal: Bool) {
@@ -135,22 +169,65 @@ public final class SpeechNoteCapture: ObservableObject {
     private var startedAt: Date?
     private var confidence: Double?
     private var resolvedEngine: HollerKitTranscript.Engine = .appleNetwork
+    private var startGeneration: UInt64 = 0
+
+    var speechAuthorizationProvider: (() async -> SpeechTranscriberAuthorizationStatus)?
+    var microphonePermissionProvider: (() async -> Bool)?
 
     /// Creates a new live speech note capture coordinator.
     public init() {}
+
+    /// Returns `true` when `candidateLocale` shares the same primary language code as `requestedLocale`.
+    nonisolated static func matchesRequestedLanguage(_ candidateLocale: Locale, requestedLocale: Locale) -> Bool {
+        let requestedLanguage = primaryLanguageCode(for: requestedLocale)
+        let candidateLanguage = primaryLanguageCode(for: candidateLocale)
+        guard let requestedLanguage, !requestedLanguage.isEmpty,
+              let candidateLanguage, !candidateLanguage.isEmpty else {
+            return candidateLocale.identifier.caseInsensitiveCompare(requestedLocale.identifier) == .orderedSame
+        }
+        return requestedLanguage == candidateLanguage
+    }
+
+    /// Extracts the normalized lowercase ISO language code from `locale`.
+    private nonisolated static func primaryLanguageCode(for locale: Locale) -> String? {
+        if let code = locale.language.languageCode?.identifier.lowercased(), !code.isEmpty {
+            return code
+        }
+        return locale.identifier
+            .split(whereSeparator: { $0 == "-" || $0 == "_" })
+            .first
+            .map { String($0).lowercased() }
+    }
 
     /// Starts live microphone capture and speech recognition with the provided options.
     public func start(options: SpeechTranscriberOptions = SpeechTranscriberOptions()) async throws {
         #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
         let hadActiveSession = isCapturing || isStopping || audioEngine != nil || recognitionTask != nil
         cleanupCaptureState(deactivateSession: hadActiveSession)
+        let currentGeneration = startGeneration
         lastError = nil
 
-        let speechStatus = await SpeechTranscriber.requestAuthorization()
+        let speechStatus: SpeechTranscriberAuthorizationStatus
+        if let speechAuthorizationProvider {
+            speechStatus = await speechAuthorizationProvider()
+        } else {
+            speechStatus = await SpeechTranscriber.requestAuthorization()
+        }
+        guard !Task.isCancelled, startGeneration == currentGeneration else {
+            throw CancellationError()
+        }
         guard speechStatus == .authorized else { throw SpeechNoteCaptureError.authorizationDenied }
 
         let audioSession = AVAudioSession.sharedInstance()
-        let microphoneAllowed = await requestMicrophonePermission(audioSession: audioSession)
+        let microphoneAllowed: Bool
+        if let microphonePermissionProvider {
+            microphoneAllowed = await microphonePermissionProvider()
+        } else {
+            microphoneAllowed = await requestMicrophonePermission(audioSession: audioSession)
+        }
+        guard !Task.isCancelled, startGeneration == currentGeneration else {
+            throw CancellationError()
+        }
         guard microphoneAllowed else { throw SpeechNoteCaptureError.authorizationDenied }
 
         let locale = Locale(identifier: options.localeIdentifier)
@@ -165,7 +242,14 @@ public final class SpeechNoteCapture: ObservableObject {
             throw SpeechNoteCaptureError.audioSessionFailed(SpeechNoteCaptureError.describeError(error))
         }
 
-        let state = LiveRecognitionState()
+        let sessionLocaleIdentifier = recognizer.locale.identifier
+        let sessionEngine: HollerKitTranscript.Engine = options.requireOnDeviceRecognition ? .appleOnDevice : .appleNetwork
+        let sessionStartedAt = Date()
+        let state = LiveRecognitionState(
+            localeIdentifier: sessionLocaleIdentifier,
+            engine: sessionEngine,
+            startedAt: sessionStartedAt
+        )
         self.liveState = state
 
         do {
@@ -187,11 +271,11 @@ public final class SpeechNoteCapture: ObservableObject {
             }
 
             self.options = options
-            self.resolvedLocaleIdentifier = recognizer.locale.identifier
-            self.resolvedEngine = options.requireOnDeviceRecognition ? .appleOnDevice : .appleNetwork
+            self.resolvedLocaleIdentifier = sessionLocaleIdentifier
+            self.resolvedEngine = sessionEngine
             self.transcriptText = ""
             self.confidence = nil
-            self.startedAt = Date()
+            self.startedAt = sessionStartedAt
             self.recognitionRequest = request
             self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
                 if let result {
@@ -213,12 +297,7 @@ public final class SpeechNoteCapture: ObservableObject {
                 if let error {
                     state.recordError(error)
                     Task { @MainActor [weak self] in
-                        guard let self, self.liveState === state, self.isCapturing, !self.isStopping else { return }
-                        let snapshot = state.snapshot()
-                        guard snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                              let errorDescription = snapshot.errorDescription else { return }
-                        self.cleanupCaptureState(deactivateSession: true)
-                        self.lastError = SpeechNoteCaptureError.recognitionFailed(errorDescription).errorDescription
+                        self?.handleRecognitionCallbackError(for: state)
                     }
                 }
             }
@@ -235,27 +314,25 @@ public final class SpeechNoteCapture: ObservableObject {
         #endif
     }
 
-    /// Stops audio input, waits briefly for buffered speech recognition results to flush, and returns the transcript.
-    public func stopAsync() async throws -> HollerKitTranscript {
+    /// Stops audio input, waits for speech recognition to produce a final result or error, and returns the transcript.
+    public func stopAsync(timeout: TimeInterval = 5.0) async throws -> HollerKitTranscript {
         #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
         let stateAtStop = liveState
         stopAudioInput()
 
-        // Allow a brief flush window after endAudio() so SFSpeechRecognizer can deliver final buffers.
-        for _ in 0..<16 {
-            guard liveState === stateAtStop else { break }
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while liveState === stateAtStop && !Task.isCancelled {
             let current = stateAtStop.snapshot()
-            let hasTranscript = !current.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            if current.isFinal || (hasTranscript && current.errorDescription != nil) {
+            if current.isFinal || current.errorDescription != nil {
                 break
             }
-            if !hasTranscript && current.errorDescription != nil {
+            if Date() >= deadline {
                 break
             }
             try? await Task.sleep(for: .milliseconds(25))
         }
 
-        return try finalizeStop(expectedState: stateAtStop)
+        return try finalizeStop(expectedState: stateAtStop, requireFinalResult: true)
         #else
         throw SpeechNoteCaptureError.unavailable
         #endif
@@ -266,9 +343,21 @@ public final class SpeechNoteCapture: ObservableObject {
         #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
         let stateAtStop = liveState
         stopAudioInput()
-        return try finalizeStop(expectedState: stateAtStop)
+        return try finalizeStop(expectedState: stateAtStop, requireFinalResult: false)
         #else
         throw SpeechNoteCaptureError.unavailable
+        #endif
+    }
+
+    /// Cancels any pending or active speech capture session and deactivates the audio session if needed.
+    public func cancel() {
+        #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
+        let hadActiveSession = isCapturing || isStopping || audioEngine != nil || recognitionTask != nil
+        cleanupCaptureState(deactivateSession: hadActiveSession)
+        #else
+        startGeneration &+= 1
+        isStopping = false
+        isCapturing = false
         #endif
     }
 
@@ -277,29 +366,56 @@ public final class SpeechNoteCapture: ObservableObject {
         state: LiveRecognitionState,
         options: SpeechTranscriberOptions = SpeechTranscriberOptions()
     ) {
+        startGeneration &+= 1
+        let sessionEngine: HollerKitTranscript.Engine = options.requireOnDeviceRecognition ? .appleOnDevice : .appleNetwork
+        let sessionStartedAt = Date()
+        state.configureSessionMetadata(
+            localeIdentifier: options.localeIdentifier,
+            engine: sessionEngine,
+            startedAt: sessionStartedAt
+        )
         self.liveState = state
         self.options = options
         self.resolvedLocaleIdentifier = options.localeIdentifier
-        self.resolvedEngine = options.requireOnDeviceRecognition ? .appleOnDevice : .appleNetwork
+        self.resolvedEngine = sessionEngine
         self.transcriptText = ""
         self.confidence = nil
         self.lastError = nil
-        self.startedAt = Date()
+        self.startedAt = sessionStartedAt
         self.isStopping = false
         self.isCapturing = true
     }
 
     #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
-    /// Selects an available `SFSpeechRecognizer` for `locale`, falling back to the default recognizer if needed.
+    /// Handles an unexpected recognition failure during active capture by stopping audio while preserving any partial text.
+    func handleRecognitionCallbackError(for state: LiveRecognitionState) {
+        guard self.liveState === state, self.isCapturing, !self.isStopping else { return }
+        let snapshot = state.snapshot()
+        guard let errorDescription = snapshot.errorDescription else { return }
+        let preservedText = snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? self.transcriptText
+            : snapshot.text
+        let preservedConfidence = snapshot.confidence ?? self.confidence
+        self.cleanupCaptureState(deactivateSession: true)
+        if !preservedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            self.transcriptText = preservedText
+            self.confidence = preservedConfidence
+        }
+        self.lastError = SpeechNoteCaptureError.recognitionFailed(errorDescription).errorDescription
+    }
+
+    /// Selects an available `SFSpeechRecognizer` for `locale`, falling back to the default recognizer only if its language matches.
     static func selectRecognizer(
         for locale: Locale,
         requireOnDeviceRecognition: Bool
     ) throws -> SFSpeechRecognizer {
         var candidates: [SFSpeechRecognizer] = []
-        if let requested = SFSpeechRecognizer(locale: locale) {
+        if let requested = SFSpeechRecognizer(locale: locale),
+           matchesRequestedLanguage(requested.locale, requestedLocale: locale) {
             candidates.append(requested)
         }
         if let fallback = SFSpeechRecognizer(),
+           matchesRequestedLanguage(fallback.locale, requestedLocale: locale),
            !candidates.contains(where: { $0.locale.identifier == fallback.locale.identifier }) {
             candidates.append(fallback)
         }
@@ -352,8 +468,12 @@ public final class SpeechNoteCapture: ObservableObject {
     }
 
     /// Cancels the recognition task, deactivates the audio session, and constructs the final `HollerKitTranscript`.
-    private func finalizeStop(expectedState: LiveRecognitionState) throws -> HollerKitTranscript {
+    private func finalizeStop(
+        expectedState: LiveRecognitionState,
+        requireFinalResult: Bool = false
+    ) throws -> HollerKitTranscript {
         let snapshot = expectedState.snapshot()
+        let metadata = expectedState.sessionMetadata()
         let isCurrentSession = (liveState === expectedState)
         if isCurrentSession {
             recognitionTask?.cancel()
@@ -371,20 +491,29 @@ public final class SpeechNoteCapture: ObservableObject {
             : fallbackText
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedConfidence = snapshot.confidence ?? (isCurrentSession ? confidence : nil)
-        let duration = isCurrentSession ? startedAt.map { Date().timeIntervalSince($0) } : nil
+        let duration = Date().timeIntervalSince(metadata.startedAt)
         if isCurrentSession {
             startedAt = nil
-        }
-
-        if !text.isEmpty {
-            if isCurrentSession {
+            if !text.isEmpty {
                 transcriptText = text
                 confidence = resolvedConfidence
             }
+        }
+
+        if requireFinalResult && !snapshot.isFinal {
+            if let errorDescription = snapshot.errorDescription {
+                throw SpeechNoteCaptureError.recognitionFailed(errorDescription)
+            }
+            throw SpeechNoteCaptureError.recognitionFailed(
+                "Speech recognition did not finish before the stop timeout expired."
+            )
+        }
+
+        if !text.isEmpty {
             return HollerKitTranscript(
                 text: text,
-                locale: resolvedLocaleIdentifier,
-                engine: resolvedEngine,
+                locale: metadata.localeIdentifier,
+                engine: metadata.engine,
                 confidence: resolvedConfidence,
                 durationSeconds: duration
             )
@@ -413,6 +542,7 @@ public final class SpeechNoteCapture: ObservableObject {
 
     /// Stops any active audio engine or recognition task and resets capture state.
     private func cleanupCaptureState(deactivateSession: Bool) {
+        startGeneration &+= 1
         if let engine = audioEngine {
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
