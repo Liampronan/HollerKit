@@ -12,7 +12,11 @@ public struct QuestResultSheet: View {
     @StateObject private var speechCapture = SpeechCaptureController()
     @State private var selectedMarkForAnnotation: AnnotatableMarkImage?
     @State private var isSubmitting = false
+    @State private var submissionStage: SubmissionProgressStage?
     @State private var submissionError: String?
+    @State private var submissionOutcome: OutboxSubmissionOutcome?
+    @State private var submittedSessionId: UUID?
+    @State private var autoDismissTask: Task<Void, Never>?
 
     private static let selectableResults: [QuestResult] = [.pass, .fail, .unsure]
 
@@ -110,14 +114,30 @@ public struct QuestResultSheet: View {
                     }
 
                     Section("Note (Optional)") {
-                        TextEditor(text: $comment)
-                            .frame(minHeight: 100)
+                        ZStack(alignment: .topLeading) {
+                            if comment.isEmpty {
+                                Text("Add an optional note about this quest run...")
+                                    .foregroundStyle(.tertiary)
+                                    .padding(.top, 8)
+                                    .padding(.leading, 5)
+                                    .allowsHitTesting(false)
+                            }
+                            TextEditor(text: $comment)
+                                .frame(minHeight: 100)
+                                .disabled(isSubmitting)
+                                .accessibilityIdentifier("HollerKitQuestResultCommentEditor")
+                        }
 
                         if let audioConfig = HollerKit.currentConfiguration?.audio, audioConfig.isEnabled {
-                            Button(speechCapture.isCapturing ? "Stop Dictation" : "Dictate Note") {
+                            Button {
                                 Task {
                                     await speechCapture.toggle(configuration: audioConfig)
                                 }
+                            } label: {
+                                Label(
+                                    speechCapture.isCapturing ? "Stop Dictation" : "Dictate Note",
+                                    systemImage: speechCapture.isCapturing ? "stop.circle.fill" : "mic.fill"
+                                )
                             }
                             .disabled(isSubmitting || speechCapture.isStopping)
 
@@ -186,9 +206,23 @@ public struct QuestResultSheet: View {
 
                     if let submissionError {
                         Section {
-                            Text(submissionError)
-                                .font(.footnote)
-                                .foregroundStyle(.red)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label(submissionError, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.footnote)
+                                    .foregroundStyle(.red)
+                                    .accessibilityIdentifier("HollerKitSubmissionErrorText")
+
+                                Button {
+                                    Task {
+                                        await submit()
+                                    }
+                                } label: {
+                                    Label("Retry Submission", systemImage: "arrow.clockwise")
+                                        .font(.footnote.weight(.semibold))
+                                }
+                                .disabled(isSubmitting || speechCapture.isStopping)
+                                .accessibilityIdentifier("HollerKitRetrySubmitButton")
+                            }
                         }
                     }
                 } else {
@@ -196,6 +230,21 @@ public struct QuestResultSheet: View {
                         Text("No active quest session.")
                             .foregroundStyle(.secondary)
                     }
+                }
+            }
+            .disabled(isSubmitting || submissionOutcome != nil)
+            .overlay {
+                if isSubmitting || submissionOutcome != nil {
+                    SubmissionFeedbackOverlayView(
+                        isSubmitting: isSubmitting,
+                        stage: submissionStage,
+                        outcome: submissionOutcome,
+                        sentTitle: "Quest Submitted",
+                        onDone: {
+                            finishSubmittedQuestAndDismiss()
+                        },
+                        onSendAnother: nil
+                    )
                 }
             }
             .navigationTitle("Complete Quest")
@@ -207,16 +256,23 @@ public struct QuestResultSheet: View {
                         questState.dismissResultSheet()
                         dismiss()
                     }
-                    .disabled(isSubmitting)
+                    .disabled(isSubmitting || submissionOutcome != nil)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isSubmitting ? "Submitting..." : "Submit") {
-                        Task {
-                            await submit()
+                    if submissionOutcome != nil {
+                        Button("Done") {
+                            finishSubmittedQuestAndDismiss()
                         }
+                        .accessibilityIdentifier("HollerKitQuestResultDoneButton")
+                    } else {
+                        Button(isSubmitting ? "Submitting..." : "Submit") {
+                            Task {
+                                await submit()
+                            }
+                        }
+                        .disabled(isSubmitting || speechCapture.isStopping || questState.activeQuest == nil)
+                        .accessibilityIdentifier("HollerKitQuestResultSubmitButton")
                     }
-                    .disabled(isSubmitting || speechCapture.isStopping || questState.activeQuest == nil)
-                    .accessibilityIdentifier("HollerKitQuestResultSubmitButton")
                 }
             }
         }
@@ -224,7 +280,12 @@ public struct QuestResultSheet: View {
             comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
         }
         .onDisappear {
+            autoDismissTask?.cancel()
+            autoDismissTask = nil
             speechCapture.cancelCapture()
+            if submissionOutcome != nil, let submittedSessionId {
+                questState.completeSubmittedSession(id: submittedSessionId)
+            }
         }
         .sheet(item: $selectedMarkForAnnotation) { item in
             #if canImport(UIKit)
@@ -244,24 +305,68 @@ public struct QuestResultSheet: View {
         .accessibilityIdentifier("HollerKitQuestResultSheet")
     }
 
+    /// Completes session teardown and dismisses the quest result sheet after submission.
+    @MainActor
+    private func finishSubmittedQuestAndDismiss() {
+        autoDismissTask?.cancel()
+        autoDismissTask = nil
+        speechCapture.reset()
+        comment = ""
+        if let submittedSessionId {
+            questState.completeSubmittedSession(id: submittedSessionId)
+        }
+        dismiss()
+    }
+
     /// Finalizes any active speech capture and submits the completed quest run.
     @MainActor
     private func submit() async {
+        guard !isSubmitting, let session = questState.activeQuest else { return }
+        autoDismissTask?.cancel()
+        autoDismissTask = nil
         isSubmitting = true
+        submissionStage = .preparing
         submissionError = nil
-        defer { isSubmitting = false }
+        defer {
+            isSubmitting = false
+            submissionStage = nil
+        }
 
         do {
             await speechCapture.finalizeIfCapturing()
             comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
-            _ = try await questState.submitActiveQuest(
+            let markCount = session.marks.filter { !$0.imageData.isEmpty }.count
+            if markCount > 0 {
+                submissionStage = .uploadingAttachments(count: markCount)
+                await Task.yield()
+            } else {
+                submissionStage = .sending
+            }
+            let commentToSubmit = comment
+            let transcriptToSubmit = speechCapture.transcript
+            submissionStage = .sending
+            let outcome = try await questState.submitActiveQuest(
                 result: selectedResult,
-                comment: comment,
-                transcript: speechCapture.transcript
+                comment: commentToSubmit,
+                transcript: transcriptToSubmit,
+                clearActiveSessionImmediately: false
             )
-            dismiss()
+            submittedSessionId = session.id
+            speechCapture.reset()
+            comment = ""
+            submissionOutcome = outcome
+            SubmissionHaptics.notify(for: outcome)
+
+            if case .sent = outcome {
+                autoDismissTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    guard !Task.isCancelled, submissionOutcome != nil else { return }
+                    finishSubmittedQuestAndDismiss()
+                }
+            }
         } catch {
             submissionError = error.localizedDescription
+            SubmissionHaptics.notifyError()
         }
     }
 

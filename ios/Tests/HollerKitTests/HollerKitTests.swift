@@ -1530,4 +1530,134 @@ final class HollerKitTests: XCTestCase {
             $0.category == "quest_step" && $0.metadata["checkedAll"] == "true"
         }))
     }
+
+    @MainActor
+    func testBugReportDraftResetsAcrossRePresentationSendAnotherAndSwipeToDismiss() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-draft-reset-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let receivedRequestsBox = LockedBox<[[String: Any]]>([])
+        StubURLProtocol.setHandler { request, bodyData in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            if url.path == "/v1/feedback", request.httpMethod == "POST" {
+                let body = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                receivedRequestsBox.withLock { $0.append(body) }
+                let id = (body["id"] as? String) ?? UUID().uuidString.lowercased()
+                let comment = body["comment"] as? String
+                let build = (body["build"] as? String) ?? "1"
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": id,
+                        "kind": "report",
+                        "build": build,
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-08T20:00:00Z",
+                        "updatedAt": "2026-11-08T20:00:00Z",
+                        "comment": comment as Any
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let session = makeStubSession()
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        )
+        HollerKit.configure(config)
+
+        // 1. First shake presentation & submit
+        HollerKit.presentBugReport()
+        let firstPresentationId = HollerKit.currentPresentationId
+        let firstDraft = HollerKit.currentBugReportDraft
+        firstDraft.autoDismissDelaySeconds = 0
+        XCTAssertEqual(firstDraft.comment, "")
+        XCTAssertNil(firstDraft.submissionOutcome)
+        XCTAssertFalse(firstDraft.canSubmit(configuration: config))
+
+        firstDraft.comment = "First report comment"
+        XCTAssertTrue(firstDraft.canSubmit(configuration: config))
+
+        await firstDraft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore
+        )
+
+        // Inputs are cleared immediately after submit so stale text never remains in the comment box
+        XCTAssertEqual(firstDraft.comment, "")
+        XCTAssertNotNil(firstDraft.submissionOutcome)
+        XCTAssertFalse(firstDraft.canSubmit(configuration: config))
+
+        // 2. Second shake presentation creates a fresh empty draft and new presentationId
+        HollerKit.presentBugReport()
+        let secondPresentationId = HollerKit.currentPresentationId
+        let secondDraft = HollerKit.currentBugReportDraft
+        secondDraft.autoDismissDelaySeconds = 0
+        XCTAssertNotEqual(secondPresentationId, firstPresentationId)
+        XCTAssertNotEqual(secondDraft.id, firstDraft.id)
+        XCTAssertEqual(secondDraft.comment, "")
+        XCTAssertNil(secondDraft.submissionOutcome)
+
+        secondDraft.comment = "Second report after re-present"
+        await secondDraft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore
+        )
+        XCTAssertEqual(secondDraft.comment, "")
+        XCTAssertNotNil(secondDraft.submissionOutcome)
+
+        // 3. "Send Another" within the same sheet resets the draft and sends a third distinct report
+        secondDraft.resetForAnotherReport(configuration: config)
+        XCTAssertEqual(secondDraft.comment, "")
+        XCTAssertNil(secondDraft.submissionOutcome)
+        secondDraft.comment = "Third report via Send Another"
+        await secondDraft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore
+        )
+        XCTAssertEqual(secondDraft.comment, "")
+        XCTAssertNotNil(secondDraft.submissionOutcome)
+
+        // 4. Swipe-to-dismiss followed by presenting again starts empty and sends a fourth distinct report
+        HollerKit.clearPresentationAttachments()
+        HollerKit.presentBugReport()
+        let fourthDraft = HollerKit.currentBugReportDraft
+        fourthDraft.autoDismissDelaySeconds = 0
+        XCTAssertEqual(fourthDraft.comment, "")
+        XCTAssertNil(fourthDraft.submissionOutcome)
+        fourthDraft.comment = "Fourth report after swipe dismiss"
+        await fourthDraft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore
+        )
+
+        let submittedRequests = receivedRequestsBox.withLock { $0 }
+        XCTAssertEqual(submittedRequests.count, 4)
+        let comments = submittedRequests.compactMap { $0["comment"] as? String }
+        XCTAssertEqual(comments, [
+            "First report comment",
+            "Second report after re-present",
+            "Third report via Send Another",
+            "Fourth report after swipe dismiss"
+        ])
+        let ids = Set(submittedRequests.compactMap { $0["id"] as? String })
+        XCTAssertEqual(ids.count, 4, "Each submitted report must have a distinct feedback UUID")
+    }
 }

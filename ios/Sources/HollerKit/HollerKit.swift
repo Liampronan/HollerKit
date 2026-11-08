@@ -88,12 +88,12 @@ public enum HollerKit {
             state.breadcrumbs = BreadcrumbStore()
             if presenterState.isPresented {
                 presenterState.isPresented = false
+                presenterState.handleSheetDismissed(configuration: nil)
+            } else if !presenterState.pendingAttachments.isEmpty {
+                presenterState.pendingAttachments = []
             }
             if presenterState.isQuestsPresented {
                 presenterState.isQuestsPresented = false
-            }
-            if !presenterState.pendingAttachments.isEmpty {
-                presenterState.pendingAttachments = []
             }
         }
         return enabled
@@ -158,8 +158,11 @@ public enum HollerKit {
             configuration: state.configuration,
             breadcrumbs: state.breadcrumbs,
             outboxStore: state.outboxStore,
-            invocationAttachments: presenterState.pendingAttachments
+            invocationAttachments: presenterState.pendingAttachments,
+            draft: presenterState.activeDraft,
+            presentationId: presenterState.presentationId
         )
+        .id(presenterState.presentationId)
     }
 
     public static func questBoardView() -> some View {
@@ -172,8 +175,10 @@ public enum HollerKit {
 
     public static func presentBugReport(attachments: [HollerKitAttachment] = []) {
         guard reconcileEnablement() else { return }
-        presenterState.pendingAttachments = attachments
-        presenterState.isPresented = true
+        presenterState.presentBugReport(
+            configuration: state.configuration,
+            attachments: attachments
+        )
     }
 
     public static func present(attachments: [HollerKitAttachment] = []) {
@@ -246,8 +251,16 @@ public enum HollerKit {
         presenterState.pendingAttachments
     }
 
+    static var currentBugReportDraft: BugReportDraft {
+        presenterState.activeDraft
+    }
+
+    static var currentPresentationId: UUID {
+        presenterState.presentationId
+    }
+
     static func clearPresentationAttachments() {
-        presenterState.pendingAttachments = []
+        presenterState.handleSheetDismissed(configuration: state.configuration)
     }
 }
 
@@ -266,5 +279,33 @@ final class HollerKitPresenterState: ObservableObject {
     @Published var isRuntimeEnabled = false
     @Published var isPresented = false
     @Published var isQuestsPresented = false
+    var presentationId = UUID()
+    var activeDraft = BugReportDraft()
     var pendingAttachments: [HollerKitAttachment] = []
+
+    /// Resets the active draft and presents the bug report sheet with fresh state.
+    func presentBugReport(
+        configuration: HollerKitConfiguration?,
+        attachments: [HollerKitAttachment]
+    ) {
+        activeDraft.cancelCapture()
+        pendingAttachments = attachments
+        presentationId = UUID()
+        activeDraft = BugReportDraft(
+            configuration: configuration,
+            invocationAttachments: attachments
+        )
+        isPresented = true
+    }
+
+    /// Cleans up attachments and resets the draft when the bug report sheet is dismissed.
+    func handleSheetDismissed(configuration: HollerKitConfiguration?) {
+        activeDraft.cancelCapture()
+        pendingAttachments = []
+        presentationId = UUID()
+        activeDraft = BugReportDraft(
+            configuration: configuration,
+            invocationAttachments: []
+        )
+    }
 }
