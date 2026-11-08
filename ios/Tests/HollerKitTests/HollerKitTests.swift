@@ -1,4 +1,8 @@
 import Foundation
+import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 import XCTest
 @testable import HollerKit
 
@@ -885,5 +889,284 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(attachments?.count, 1)
         XCTAssertEqual(attachments?.first?["key"] as? String, "\(queuedId.uuidString.lowercased())/att-0.png")
         XCTAssertEqual(attachments?.first?["kind"] as? String, "image")
+    }
+
+    func testOverlayHitPolicyCapturesTouchesOnlyWithinInteractiveFramePlusSlop() {
+        // 1. A zero frame always passes through, even at origin or within the slop radius
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: .zero, interactiveFrame: .zero))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 5, y: 5), interactiveFrame: .zero))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 200, y: 780), interactiveFrame: .zero))
+
+        let pillFrame = CGRect(x: 32, y: 760, width: 326, height: 44)
+
+        // 2. A point inside the frame is captured
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 195, y: 782), interactiveFrame: pillFrame))
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 32, y: 760), interactiveFrame: pillFrame))
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 357, y: 803), interactiveFrame: pillFrame))
+
+        // 3. A point inside the 12pt slop margin is captured
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 20, y: 782), interactiveFrame: pillFrame))
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 369, y: 782), interactiveFrame: pillFrame))
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 195, y: 748), interactiveFrame: pillFrame))
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 195, y: 815), interactiveFrame: pillFrame))
+
+        // 4. A point outside the frame (beyond the 12pt slop margin) passes through
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 19, y: 782), interactiveFrame: pillFrame))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 371, y: 782), interactiveFrame: pillFrame))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 195, y: 747), interactiveFrame: pillFrame))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 195, y: 817), interactiveFrame: pillFrame))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 195, y: 400), interactiveFrame: pillFrame))
+
+        // 5. A frame after a drag offset captures at the new location and passes through at the old one
+        let dragDelta = CGSize(width: -12, height: -320)
+        let draggedFrame = pillFrame.offsetBy(dx: dragDelta.width, dy: dragDelta.height)
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 183, y: 462), interactiveFrame: draggedFrame))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: 195, y: 782), interactiveFrame: draggedFrame))
+    }
+
+    #if canImport(UIKit)
+    @MainActor
+    func testQuestOverlayHostingViewMatchesWindowBoundsAndUpdatesInteractiveFrameWhenExpanded() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-overlay-frame-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let questDef = QuestDefinition(
+            id: "checkout-promo-math",
+            title: "Apply promo RUN2026 and verify total",
+            area: "checkout",
+            steps: [
+                "Inspect Subtotal ($79.00) and Promo RUN2026 (-$12.00)",
+                "Verify Tax ($7.43) and Total calculation",
+                "Tap Pay button"
+            ],
+            expect: ["Total equals $74.43"]
+        )
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { nil },
+            isEnabled: { true },
+            quests: .definitions([questDef]),
+            outboxDirectoryURL: tempDir
+        ))
+
+        let questState = HollerKit.quests
+        guard let item = questState.quests.first else {
+            XCTFail("Expected configured quest item")
+            return
+        }
+        questState.startQuest(item)
+        defer { QuestOverlayWindowManager.shared.hide() }
+
+        let windowBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        var reportedFrame: CGRect = .zero
+
+        let rootView = ZStack(alignment: .bottom) {
+            Color.clear
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+            QuestOverlayView(
+                questState: questState,
+                viewportSize: windowBounds.size,
+                onFrameChange: { frame in
+                    reportedFrame = frame
+                }
+            )
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+
+        let hostingController = UIHostingController(rootView: rootView)
+        hostingController.view.backgroundColor = .clear
+        let window = UIWindow(frame: windowBounds)
+        window.rootViewController = hostingController
+        window.isHidden = false
+        hostingController.view.frame = window.bounds
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        XCTAssertEqual(hostingController.view.frame, window.bounds)
+        let collapsedFrame = reportedFrame
+        XCTAssertNotEqual(collapsedFrame, .zero)
+        XCTAssertTrue(window.bounds.contains(collapsedFrame), "Collapsed frame \(collapsedFrame) should lie inside window bounds \(window.bounds)")
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: CGPoint(x: collapsedFrame.midX, y: collapsedFrame.midY), interactiveFrame: collapsedFrame))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: CGPoint(x: windowBounds.midX, y: 120), interactiveFrame: collapsedFrame))
+
+        // Expand the overlay card and verify onFrameChange reports the larger expanded card frame
+        questState.setOverlayExpanded(true)
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+
+        let expandedFrame = reportedFrame
+        XCTAssertGreaterThan(expandedFrame.height, collapsedFrame.height + 80)
+        XCTAssertLessThan(expandedFrame.minY, collapsedFrame.minY)
+        XCTAssertTrue(window.bounds.contains(expandedFrame), "Expanded frame \(expandedFrame) should lie inside window bounds \(window.bounds)")
+        // Top of the expanded card (above the old collapsed pill) must now capture touches
+        let expandedHeaderPoint = CGPoint(x: expandedFrame.midX, y: expandedFrame.minY + 20)
+        XCTAssertTrue(OverlayHitPolicy.capturesTouch(at: expandedHeaderPoint, interactiveFrame: expandedFrame))
+        XCTAssertFalse(OverlayHitPolicy.capturesTouch(at: expandedHeaderPoint, interactiveFrame: collapsedFrame))
+    }
+
+    @MainActor
+    func testHollerKitPresenterPreservesHostViewStateAcrossEnablementChanges() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-presenter-identity-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let enabledBox = LockedBox(false)
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { nil },
+            isEnabled: { enabledBox.withLock { $0 } },
+            invocation: [.shake, .screenshot],
+            outboxDirectoryURL: tempDir
+        ))
+
+        let observedCounters = LockedBox<[Int]>([])
+        var incrementTrigger: (() -> Void)?
+
+        struct StatefulHostView: View {
+            @State private var counter = 0
+            let onRender: (Int, @escaping () -> Void) -> Void
+
+            var body: some View {
+                let _ = onRender(counter) {
+                    counter += 1
+                }
+                Text("Count: \(counter)")
+            }
+        }
+
+        let rootView = StatefulHostView { current, increment in
+            observedCounters.withLock { $0.append(current) }
+            incrementTrigger = increment
+        }
+        .hollerKitPresenter()
+
+        let hostingController = UIHostingController(rootView: rootView)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = hostingController
+        window.isHidden = false
+        hostingController.view.frame = window.bounds
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertEqual(observedCounters.withLock { $0.last }, 0)
+
+        // Mutate @State while HollerKit is disabled
+        incrementTrigger?()
+        incrementTrigger?()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(observedCounters.withLock { $0.last }, 2)
+
+        // Flip enablement false -> true and verify @State is preserved
+        enabledBox.withLock { $0 = true }
+        XCTAssertTrue(HollerKit.reconcileEnablement())
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(observedCounters.withLock { $0.last }, 2)
+
+        // Flip enablement true -> false and verify @State is still preserved
+        enabledBox.withLock { $0 = false }
+        XCTAssertFalse(HollerKit.reconcileEnablement())
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(observedCounters.withLock { $0.last }, 2)
+    }
+    #endif
+
+    @MainActor
+    func testConfigureLoadsQuestsWhenEnablementFlipsFromFalseToTrue() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-deferred-enable-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let enabledBox = LockedBox(false)
+        let manifestSyncCount = LockedBox(0)
+        let manifestSynced = expectation(description: "manifest synced after deferred enablement")
+        manifestSynced.assertForOverFulfill = false
+        let session = makeStubSession()
+
+        StubURLProtocol.setHandler { request, _ in
+            let url = request.url!
+            if url.path.hasSuffix("/manifest") {
+                manifestSyncCount.withLock { $0 += 1 }
+                manifestSynced.fulfill()
+                let json = """
+                {
+                  "ok": true,
+                  "build": "400",
+                  "pendingCount": 1,
+                  "quests": [
+                    {
+                      "id": "deferred-quest",
+                      "version": 1,
+                      "contentHash": "abc123",
+                      "questStatus": "active",
+                      "boardStatus": "pending",
+                      "title": "Verify deferred enablement",
+                      "area": "auth",
+                      "setup": [],
+                      "steps": ["Sign in"],
+                      "expect": ["Quests appear"],
+                      "needs": [],
+                      "record": "optional"
+                    }
+                  ]
+                }
+                """
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["hollerkit-protocol": "1"]
+                )!
+                return (response, Data(json.utf8))
+            }
+            throw URLError(.badURL)
+        }
+
+        let questDef = QuestDefinition(
+            id: "deferred-quest",
+            title: "Verify deferred enablement",
+            area: "auth",
+            steps: ["Sign in"],
+            expect: ["Quests appear"]
+        )
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { enabledBox.withLock { $0 } },
+            metadata: { ["appBuild": "400", "appVersion": "1.0.0"] },
+            quests: .definitions([questDef]),
+            urlSession: session,
+            outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
+        ))
+
+        // While disabled at configure() time, quests remain empty
+        XCTAssertFalse(HollerKit.isEnabled)
+        XCTAssertTrue(HollerKit.quests.quests.isEmpty)
+        XCTAssertEqual(HollerKit.quests.pendingCount, 0)
+
+        // Async TestFlight / tester check resolves to true
+        enabledBox.withLock { $0 = true }
+        XCTAssertTrue(HollerKit.reconcileEnablement())
+
+        // Local quest manifest is loaded immediately on false -> true transition
+        XCTAssertEqual(HollerKit.quests.quests.count, 1)
+        XCTAssertEqual(HollerKit.quests.quests.first?.id, "deferred-quest")
+        XCTAssertEqual(HollerKit.quests.pendingCount, 1)
+
+        // And the background refresh syncs with the server
+        await fulfillment(of: [manifestSynced], timeout: 2.0)
+        XCTAssertGreaterThanOrEqual(manifestSyncCount.withLock { $0 }, 1)
     }
 }

@@ -9,13 +9,19 @@ public enum HollerKit {
     static let presenterState = HollerKitPresenterState()
     private static let lifecycleMonitor = OutboxLifecycleMonitor {
         Task { @MainActor in
-            if HollerKit.reconcileEnablement() {
-                _ = await HollerKit.flushOutbox()
-                await HollerKit.quests.refresh()
-            }
+            let wasConfiguredWhileEnabled = state.configuredWhileEnabled
+            guard HollerKit.reconcileEnablement() else { return }
+            guard wasConfiguredWhileEnabled, state.activationTask == nil else { return }
+            let generation = state.activationGeneration
+            _ = await HollerKit.flushOutbox()
+            guard !Task.isCancelled,
+                  state.configuredWhileEnabled,
+                  state.activationGeneration == generation else { return }
+            await HollerKit.quests.refresh()
         }
     }
 
+    /// Configures HollerKit with the given server URL, authentication provider, and runtime options.
     public static func configure(
         server: URL,
         auth: @escaping @Sendable () async throws -> String?,
@@ -45,39 +51,39 @@ public enum HollerKit {
         ))
     }
 
+    /// Configures HollerKit with an explicit `HollerKitConfiguration` value and reconciles enablement.
     public static func configure(_ configuration: HollerKitConfiguration) {
         state.configuration = configuration
+        state.activationGeneration &+= 1
+        state.activationTask?.cancel()
+        state.activationTask = nil
+        state.configuredWhileEnabled = false
         let targetOutboxURL = (configuration.outboxDirectoryURL ?? OutboxStore.defaultOutboxDirectoryURL()).standardizedFileURL
         if state.outboxStore.rootDirectoryURL.standardizedFileURL != targetOutboxURL {
             state.outboxStore = OutboxStore(rootDirectoryURL: configuration.outboxDirectoryURL)
         }
 
         lifecycleMonitor.start()
-        if reconcileEnablement() {
-            let metadata = MetadataCollector.collect(extra: configuration.metadata())
-            let build = MetadataCollector.currentBuild(from: metadata)
-            let cacheDir = configuration.outboxDirectoryURL?.deletingLastPathComponent()
-                .appendingPathComponent("QuestCache", isDirectory: true)
-            quests.configure(
-                questsConfiguration: configuration.quests,
-                build: build,
-                cacheDirectoryURL: cacheDir,
-                serverURL: configuration.server
-            )
-            Task { @MainActor in
-                _ = await flushOutbox()
-                await quests.refresh(using: configuration)
-            }
-        }
+        reconcileEnablement()
     }
 
+    /// Re-evaluates the `isEnabled` closure on the active configuration and activates or resets runtime state on transitions.
     @discardableResult
     public static func reconcileEnablement() -> Bool {
         let enabled = state.configuration?.isEnabled() ?? false
         if presenterState.isRuntimeEnabled != enabled {
             presenterState.isRuntimeEnabled = enabled
         }
-        if !enabled {
+        if enabled {
+            if !state.configuredWhileEnabled, let configuration = state.configuration {
+                state.configuredWhileEnabled = true
+                activateRuntimeConfiguration(configuration)
+            }
+        } else {
+            state.activationGeneration &+= 1
+            state.activationTask?.cancel()
+            state.activationTask = nil
+            state.configuredWhileEnabled = false
             quests.reset()
             state.breadcrumbs = BreadcrumbStore()
             if presenterState.isPresented {
@@ -91,6 +97,41 @@ public enum HollerKit {
             }
         }
         return enabled
+    }
+
+    /// Configures local quest state and schedules a single initial outbox flush and quest refresh for the current activation generation.
+    private static func activateRuntimeConfiguration(_ configuration: HollerKitConfiguration) {
+        state.activationGeneration &+= 1
+        state.activationTask?.cancel()
+        let generation = state.activationGeneration
+
+        let metadata = MetadataCollector.collect(extra: configuration.metadata())
+        let build = MetadataCollector.currentBuild(from: metadata)
+        let cacheDir = configuration.outboxDirectoryURL?.deletingLastPathComponent()
+            .appendingPathComponent("QuestCache", isDirectory: true)
+        quests.configure(
+            questsConfiguration: configuration.quests,
+            build: build,
+            cacheDirectoryURL: cacheDir,
+            serverURL: configuration.server
+        )
+        state.activationTask = Task { @MainActor in
+            defer {
+                if state.activationGeneration == generation {
+                    state.activationTask = nil
+                }
+            }
+            guard !Task.isCancelled,
+                  state.configuredWhileEnabled,
+                  state.activationGeneration == generation else { return }
+            let client = APIClient(configuration: configuration)
+            _ = await state.outboxStore.flush(using: client)
+            guard !Task.isCancelled,
+                  state.configuredWhileEnabled,
+                  state.activationGeneration == generation,
+                  configuration.isEnabled() else { return }
+            await quests.refresh(using: configuration)
+        }
     }
 
     public static var isEnabled: Bool {
@@ -213,6 +254,9 @@ public enum HollerKit {
 @MainActor
 private struct HollerKitState {
     var configuration: HollerKitConfiguration?
+    var configuredWhileEnabled = false
+    var activationGeneration: UInt64 = 0
+    var activationTask: Task<Void, Never>?
     var breadcrumbs = BreadcrumbStore()
     var outboxStore = OutboxStore()
 }
