@@ -31,9 +31,21 @@ public struct AudioOnlyCaptureView: View {
             }
 
             if let errorMessage {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                VStack(spacing: 8) {
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                    Button {
+                        Task {
+                            await retryTranscription()
+                        }
+                    } label: {
+                        Label("Retry Dictation", systemImage: "arrow.clockwise")
+                            .font(.footnote.weight(.semibold))
+                    }
+                    .disabled(capture.isCapturing)
+                }
             }
             Spacer()
         }
@@ -47,13 +59,24 @@ public struct AudioOnlyCaptureView: View {
 
         do {
             if capture.isCapturing {
-                transcript = try capture.stop()
+                transcript = try await capture.stopAsync()
             } else {
                 transcript = nil
                 try await capture.start()
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = SpeechNoteCaptureError.describeError(error)
+        }
+    }
+
+    @MainActor
+    private func retryTranscription() async {
+        errorMessage = nil
+        transcript = nil
+        do {
+            try await capture.start()
+        } catch {
+            errorMessage = SpeechNoteCaptureError.describeError(error)
         }
     }
 }

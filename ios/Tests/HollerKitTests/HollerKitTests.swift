@@ -1169,4 +1169,130 @@ final class HollerKitTests: XCTestCase {
         await fulfillment(of: [manifestSynced], timeout: 2.0)
         XCTAssertGreaterThanOrEqual(manifestSyncCount.withLock { $0 }, 1)
     }
+
+    func testSpeechNoteCaptureErrorDescribesNSErrorDomainCodeAndUnderlyingError() {
+        let genericSpeechError = NSError(
+            domain: "kAFAssistantErrorDomain",
+            code: 1101,
+            userInfo: [
+                NSLocalizedDescriptionKey: "The operation couldn’t be completed."
+            ]
+        )
+        let formattedGeneric = SpeechNoteCaptureError.describeError(genericSpeechError)
+        XCTAssertTrue(formattedGeneric.contains("The operation couldn’t be completed."))
+        XCTAssertTrue(formattedGeneric.contains("[kAFAssistantErrorDomain code 1101]"))
+
+        let underlyingOSStatus = NSError(
+            domain: NSOSStatusErrorDomain,
+            code: 561015905,
+            userInfo: [NSLocalizedDescriptionKey: "Session activation failed"]
+        )
+        let wrappedAudioError = NSError(
+            domain: "com.apple.coreaudio.avfaudio",
+            code: -10868,
+            userInfo: [
+                NSLocalizedDescriptionKey: "The operation couldn’t be completed.",
+                NSLocalizedFailureReasonErrorKey: "Format not supported.",
+                NSUnderlyingErrorKey: underlyingOSStatus
+            ]
+        )
+        let formattedWrapped = SpeechNoteCaptureError.describeError(wrappedAudioError)
+        XCTAssertTrue(formattedWrapped.contains("Format not supported."))
+        XCTAssertTrue(formattedWrapped.contains("[com.apple.coreaudio.avfaudio code -10868]"))
+        XCTAssertTrue(formattedWrapped.contains("NSOSStatusErrorDomain code 561015905"))
+
+        let audioSessionCaptureError = SpeechNoteCaptureError.audioSessionFailed(formattedGeneric)
+        XCTAssertEqual(
+            SpeechNoteCaptureError.describeError(audioSessionCaptureError),
+            "Audio session setup failed: \(formattedGeneric)"
+        )
+
+        let transcriberError = SpeechTranscriberError.transcriptionFailed(formattedGeneric)
+        XCTAssertEqual(
+            SpeechNoteCaptureError.describeError(transcriberError),
+            "Speech transcription failed: \(formattedGeneric)"
+        )
+    }
+
+    func testLiveRecognitionStatePreservesPartialTranscriptAcrossCancelError() {
+        let state = LiveRecognitionState()
+        state.recordResult(text: "Outcome rows work across the whole width", confidence: 0.92, isFinal: false)
+        state.recordError(NSError(
+            domain: "kAFAssistantErrorDomain",
+            code: 216,
+            userInfo: [NSLocalizedDescriptionKey: "Request was canceled"]
+        ))
+
+        let snapshot = state.snapshot()
+        XCTAssertEqual(snapshot.text, "Outcome rows work across the whole width")
+        XCTAssertEqual(snapshot.confidence ?? -1, 0.92, accuracy: 0.001)
+        XCTAssertFalse(snapshot.isFinal)
+        XCTAssertTrue(snapshot.errorDescription?.contains("kAFAssistantErrorDomain code 216") == true)
+    }
+
+    @MainActor
+    func testSpeechCaptureControllerMergeTranscriptFillsAndAppendsWithoutDuplicating() {
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript("Dictated quest note", into: ""),
+            "Dictated quest note"
+        )
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript("   Dictated quest note  ", into: "   "),
+            "Dictated quest note"
+        )
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript("Second sentence", into: "First sentence"),
+            "First sentence\nSecond sentence"
+        )
+        // Idempotent when the same transcript is merged again (e.g. onChange + submit)
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript("Second sentence", into: "First sentence\nSecond sentence"),
+            "First sentence\nSecond sentence"
+        )
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript("   ", into: "Existing note"),
+            "Existing note"
+        )
+    }
+
+    @MainActor
+    func testCheckAllStepsMarksAllQuestStepsAndRecordsBreadcrumb() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-check-all-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let questDef = QuestDefinition(
+            id: "hollerkit-shake-report",
+            title: "Shake to report and run quest",
+            area: "qa",
+            steps: ["Shake device", "Record voice note", "Submit quest run"],
+            expect: ["Transcript fills comment"]
+        )
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            quests: .definitions([questDef]),
+            outboxDirectoryURL: tempDir
+        ))
+
+        guard let item = HollerKit.quests.quests.first else {
+            XCTFail("Expected quest item")
+            return
+        }
+
+        HollerKit.quests.startQuest(item)
+        defer { QuestOverlayWindowManager.shared.hide() }
+
+        XCTAssertEqual(HollerKit.quests.activeQuest?.stepsChecked, [false, false, false])
+
+        HollerKit.quests.checkAllSteps()
+        XCTAssertEqual(HollerKit.quests.activeQuest?.stepsChecked, [true, true, true])
+
+        let breadcrumbs = HollerKit.currentBreadcrumbs.snapshot()
+        XCTAssertTrue(breadcrumbs.contains(where: {
+            $0.category == "quest_step" && $0.metadata["checkedAll"] == "true"
+        }))
+    }
 }

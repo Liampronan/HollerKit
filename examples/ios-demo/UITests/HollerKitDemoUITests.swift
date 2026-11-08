@@ -58,5 +58,14 @@ final class HollerKitDemoUITests: XCTestCase {
         let submitButton = app.buttons["HollerKitQuestResultSubmitButton"]
         XCTAssertTrue(submitButton.waitForExistence(timeout: 5))
         XCTAssertTrue(app.navigationBars["Complete Quest"].exists)
+
+        // 6. Tap the blank right side of the Fail outcome row and verify it responds
+        let failOption = app.buttons["HollerKitQuestResultOption_fail"]
+        XCTAssertTrue(failOption.waitForExistence(timeout: 5))
+        failOption.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+
+        // 7. Verify the Steps section and Check All button appear in the result sheet
+        let checkAllButton = app.buttons["HollerKitQuestResultCheckAllStepsButton"]
+        XCTAssertTrue(checkAllButton.waitForExistence(timeout: 5))
     }
 }

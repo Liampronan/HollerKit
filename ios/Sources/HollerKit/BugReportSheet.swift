@@ -50,6 +50,8 @@ public struct BugReportSheet: View {
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
                         .accessibilityIdentifier("HollerKitOpenQuestsRow")
                     }
@@ -100,9 +102,23 @@ public struct BugReportSheet: View {
                         }
 
                         if let errorMessage = speechCapture.errorMessage {
-                            Text(errorMessage)
-                                .font(.footnote)
-                                .foregroundStyle(.red)
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(errorMessage)
+                                    .font(.footnote)
+                                    .foregroundStyle(.red)
+                                    .accessibilityIdentifier("HollerKitSpeechErrorText")
+
+                                Button {
+                                    Task {
+                                        await retrySpeechCapture()
+                                    }
+                                } label: {
+                                    Label("Retry Dictation", systemImage: "arrow.clockwise")
+                                        .font(.footnote.weight(.semibold))
+                                }
+                                .disabled(isSubmitting || speechCapture.isCapturing)
+                                .accessibilityIdentifier("HollerKitSpeechRetryButton")
+                            }
                         }
                     }
                 }
@@ -175,6 +191,10 @@ public struct BugReportSheet: View {
             images = (invocationAttachments + configuredImages).compactMap(BugReportImage.init(attachment:))
             #endif
         }
+        .onChange(of: speechCapture.transcript) { _, newTranscript in
+            guard !isAudioOnly, let newTranscript else { return }
+            comment = SpeechCaptureController.mergeTranscript(newTranscript.text, into: comment)
+        }
         .accessibilityIdentifier("HollerKitBugReportSheet")
     }
 
@@ -230,6 +250,10 @@ public struct BugReportSheet: View {
         defer { isSubmitting = false }
 
         do {
+            await speechCapture.finalizeIfCapturing()
+            if !isAudioOnly, let transcript = speechCapture.transcript {
+                comment = SpeechCaptureController.mergeTranscript(transcript.text, into: comment)
+            }
             let payload = HollerKitReportPayload(
                 inputMode: configuration.inputMode,
                 comment: isAudioOnly ? nil : normalizedComment,
@@ -274,6 +298,12 @@ public struct BugReportSheet: View {
     private func toggleSpeechCapture() async {
         guard let configuration else { return }
         await speechCapture.toggle(configuration: configuration.audio)
+    }
+
+    @MainActor
+    private func retrySpeechCapture() async {
+        guard let configuration else { return }
+        await speechCapture.retry(configuration: configuration.audio)
     }
 }
 
@@ -321,6 +351,17 @@ final class SpeechCaptureController: ObservableObject {
     private let capture = SpeechNoteCapture()
     private var autoStopTask: Task<Void, Never>?
 
+    static func mergeTranscript(_ transcriptText: String, into existingComment: String) -> String {
+        let trimmedTranscript = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return existingComment }
+        let trimmedExisting = existingComment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedExisting.isEmpty else { return trimmedTranscript }
+        if trimmedExisting.hasSuffix(trimmedTranscript) {
+            return existingComment
+        }
+        return "\(trimmedExisting)\n\(trimmedTranscript)"
+    }
+
     func toggle(configuration: HollerKitAudioConfiguration) async {
         errorMessage = nil
 
@@ -331,18 +372,24 @@ final class SpeechCaptureController: ObservableObject {
         }
     }
 
+    func retry(configuration: HollerKitAudioConfiguration) async {
+        cancelCapture()
+        errorMessage = nil
+        await start(configuration: configuration)
+    }
+
     func finalizeIfCapturing() async {
         guard isCapturing else { return }
         autoStopTask?.cancel()
         autoStopTask = nil
         do {
-            transcript = try capture.stop()
+            transcript = try await capture.stopAsync()
             partialTranscript = ""
             isCapturing = false
         } catch {
             partialTranscript = ""
             isCapturing = false
-            errorMessage = error.localizedDescription
+            recordError(error)
         }
     }
 
@@ -367,7 +414,7 @@ final class SpeechCaptureController: ObservableObject {
             bindPartialTranscript()
             scheduleAutoStop(after: configuration.maxDuration)
         } catch {
-            errorMessage = error.localizedDescription
+            recordError(error)
         }
     }
 
@@ -375,14 +422,14 @@ final class SpeechCaptureController: ObservableObject {
         do {
             autoStopTask?.cancel()
             autoStopTask = nil
-            transcript = try capture.stop()
+            transcript = try await capture.stopAsync()
             partialTranscript = ""
             isCapturing = false
         } catch {
             autoStopTask?.cancel()
             autoStopTask = nil
             isCapturing = false
-            errorMessage = error.localizedDescription
+            recordError(error)
         }
     }
 
@@ -396,12 +443,12 @@ final class SpeechCaptureController: ObservableObject {
             guard !Task.isCancelled, let self, self.isCapturing else { return }
 
             do {
-                self.transcript = try self.capture.stop()
+                self.transcript = try await self.capture.stopAsync()
                 self.partialTranscript = ""
                 self.isCapturing = false
             } catch {
                 self.isCapturing = false
-                self.errorMessage = error.localizedDescription
+                self.recordError(error)
             }
         }
     }
@@ -413,6 +460,16 @@ final class SpeechCaptureController: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(250))
             }
         }
+    }
+
+    private func recordError(_ error: Error) {
+        let described = SpeechNoteCaptureError.describeError(error)
+        errorMessage = described
+        HollerKit.breadcrumb(
+            "Speech capture failed: \(described)",
+            category: "speech_error",
+            metadata: ["error": described]
+        )
     }
 }
 

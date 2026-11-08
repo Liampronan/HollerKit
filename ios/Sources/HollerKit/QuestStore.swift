@@ -455,6 +455,20 @@ public final class HollerKitQuestState: ObservableObject {
         )
     }
 
+    public func checkAllSteps() {
+        guard var session = activeQuest, !session.stepsChecked.isEmpty else {
+            return
+        }
+        guard session.stepsChecked.contains(false) else { return }
+        session.stepsChecked = Array(repeating: true, count: session.stepsChecked.count)
+        activeQuest = session
+        HollerKit.breadcrumb(
+            "Checked all \(session.stepsChecked.count) steps",
+            category: "quest_step",
+            metadata: ["checkedAll": "true"]
+        )
+    }
+
     public func setOverlayExpanded(_ expanded: Bool) {
         guard var session = activeQuest else { return }
         session.isOverlayExpanded = expanded

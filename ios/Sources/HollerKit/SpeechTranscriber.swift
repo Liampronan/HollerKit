@@ -12,12 +12,27 @@ public enum SpeechTranscriberAuthorizationStatus: Sendable, Equatable {
     case unavailable
 }
 
-public enum SpeechTranscriberError: Error, Sendable, Equatable {
+public enum SpeechTranscriberError: Error, LocalizedError, Sendable, Equatable {
     case unavailable
     case authorizationDenied
     case recognizerUnavailable
     case onDeviceRecognitionUnavailable
     case transcriptionFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            return "Speech transcription is unavailable on this platform."
+        case .authorizationDenied:
+            return "Speech recognition permission is required."
+        case .recognizerUnavailable:
+            return "Speech recognition is unavailable for the current locale."
+        case .onDeviceRecognitionUnavailable:
+            return "On-device speech recognition is unavailable for the current locale."
+        case .transcriptionFailed(let detail):
+            return "Speech transcription failed: \(detail)"
+        }
+    }
 }
 
 public struct SpeechTranscriberOptions: Sendable, Equatable {
@@ -63,7 +78,8 @@ public actor SpeechTranscriber {
         }
 
         let locale = Locale(identifier: options.localeIdentifier)
-        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
+        guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(),
+              recognizer.isAvailable else {
             throw SpeechTranscriberError.recognizerUnavailable
         }
 
@@ -81,7 +97,9 @@ public actor SpeechTranscriber {
             state.task = recognizer.recognitionTask(with: request) { result, error in
                 if let error {
                     state.resumeOnce {
-                        continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(error.localizedDescription))
+                        continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
+                            SpeechNoteCaptureError.describeError(error)
+                        ))
                     }
                     return
                 }
