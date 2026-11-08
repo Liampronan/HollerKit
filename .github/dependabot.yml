@@ -5,12 +5,18 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "@types/node"
+        versions: [">= 23.0.0"]
 
   - package-ecosystem: "npm"
     directory: "/mcp"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "@types/node"
+        versions: [">= 23.0.0"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
