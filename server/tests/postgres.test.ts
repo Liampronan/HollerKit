@@ -21,6 +21,7 @@ import {
   runConformanceSuite,
   staticTokens,
 } from '../dist/index.js'
+import { parsePostgresTextArrayLiteral } from '../dist/v1/postgresStore.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -183,7 +184,7 @@ test('runs full v1 conformance suite and Postgres-specific invariants against po
     return
   }
 
-  const store = postgresStore({ url: harness.url })
+  const store = postgresStore({ url: harness.url, max: 2, prepare: false, fetchTypes: false })
   const secondStore = postgresStore({ url: harness.url })
   try {
     const migrationPath = resolve(
@@ -259,6 +260,17 @@ test('runs full v1 conformance suite and Postgres-specific invariants against po
 
     assert.equal(result.ok, true)
     assert.ok(result.steps.length >= 9)
+
+    // Verify API key scopes round-trip with both fetchTypes: false (store) and default fetchTypes (secondStore),
+    // as well as direct Postgres array literal parsing
+    const keyFromFetchTypesFalse = await store.getApiKeyByHash(hashApiKey(agentKey))
+    assert.deepEqual(keyFromFetchTypesFalse?.scopes, ['agent:read', 'agent:triage'])
+    const keyFromDefaultStore = await secondStore.getApiKeyByHash(hashApiKey(agentKey))
+    assert.deepEqual(keyFromDefaultStore?.scopes, ['agent:read', 'agent:triage'])
+    assert.deepEqual(parsePostgresTextArrayLiteral('{agent:read,agent:triage}'), ['agent:read', 'agent:triage'])
+    assert.deepEqual(parsePostgresTextArrayLiteral('{"quests:write","agent:read"}'), ['quests:write', 'agent:read'])
+    assert.deepEqual(parsePostgresTextArrayLiteral('{}'), [])
+    assert.equal(parsePostgresTextArrayLiteral('not-an-array'), null)
 
     // Verify empty build manifest registration persists in PostgreSQL across separate store instances
     await store.syncBuildManifest({

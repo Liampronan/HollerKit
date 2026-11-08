@@ -11,42 +11,50 @@ private struct HollerKitPresenterModifier: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
 
     func body(content: Content) -> some View {
-        Group {
-            if HollerKit.isEnabled {
-                content
-                    .background {
-                        InvocationObserver(
-                            invocation: HollerKit.currentInvocation,
-                            onShake: {
+        let enabled = HollerKit.isEnabled
+        content
+            .background {
+                if enabled {
+                    InvocationObserver(
+                        invocation: HollerKit.currentInvocation,
+                        onShake: {
+                            HollerKit.presentBugReport()
+                        },
+                        onScreenshot: { attachment in
+                            if let attachment {
+                                HollerKit.presentBugReport(attachments: [attachment])
+                            } else {
                                 HollerKit.presentBugReport()
-                            },
-                            onScreenshot: { attachment in
-                                if let attachment {
-                                    HollerKit.presentBugReport(attachments: [attachment])
-                                } else {
-                                    HollerKit.presentBugReport()
-                                }
                             }
-                        )
-                    }
-                    .sheet(isPresented: $presenter.isPresented, onDismiss: {
-                        HollerKit.clearPresentationAttachments()
-                    }) {
-                        HollerKit.presentationView()
-                    }
-                    .sheet(isPresented: $presenter.isQuestsPresented) {
-                        HollerKit.questBoardView()
-                    }
-            } else {
-                content
+                        }
+                    )
+                }
             }
-        }
-        .onAppear {
-            HollerKit.reconcileEnablement()
-        }
-        .onChange(of: scenePhase) { _, _ in
-            HollerKit.reconcileEnablement()
-        }
+            .sheet(
+                isPresented: Binding(
+                    get: { presenter.isRuntimeEnabled && presenter.isPresented },
+                    set: { presenter.isPresented = $0 }
+                ),
+                onDismiss: {
+                    HollerKit.clearPresentationAttachments()
+                }
+            ) {
+                HollerKit.presentationView()
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { presenter.isRuntimeEnabled && presenter.isQuestsPresented },
+                    set: { presenter.isQuestsPresented = $0 }
+                )
+            ) {
+                HollerKit.questBoardView()
+            }
+            .onAppear {
+                HollerKit.reconcileEnablement()
+            }
+            .onChange(of: scenePhase) { _, _ in
+                HollerKit.reconcileEnablement()
+            }
     }
 }
 

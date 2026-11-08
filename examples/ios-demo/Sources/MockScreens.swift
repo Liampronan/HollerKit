@@ -3,6 +3,8 @@ import SwiftUI
 import UIKit
 
 struct CheckoutMockScreen: View {
+    @State private var payTapCount = 0
+
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 8) {
@@ -28,12 +30,16 @@ struct CheckoutMockScreen: View {
                     .stroke(.quaternary, lineWidth: 1)
             }
 
-            Spacer()
+            Button("Pay $91.42") {
+                payTapCount += 1
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .accessibilityIdentifier("DemoPayButton")
+            .accessibilityValue("\(payTapCount)")
 
-            Button("Pay $91.42") {}
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            Spacer()
         }
         .padding(24)
         .background(Color(uiColor: .secondarySystemGroupedBackground))

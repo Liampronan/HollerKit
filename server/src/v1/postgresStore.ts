@@ -98,7 +98,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
       SELECT quest_id, quest_version::int AS quest_version, result, COUNT(*)::int AS count
       FROM hollerkit.feedback
       WHERE kind = 'quest_run'
-        AND quest_id = ANY(${db.array(questIds)})
+        AND quest_id = ANY(ARRAY(SELECT jsonb_array_elements_text(${db.json(questIds)}::jsonb)))
         AND result IS NOT NULL
       GROUP BY quest_id, quest_version, result
     `
@@ -942,7 +942,8 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
     async getApiKeyByHash(keyHash: string): Promise<ApiKeyRecord | null> {
       const rows = await sql<any[]>`
-        SELECT * FROM hollerkit.api_keys
+        SELECT key_hash, key_prefix, label, array_to_json(scopes) AS scopes, created_at, revoked_at
+        FROM hollerkit.api_keys
         WHERE key_hash = ${keyHash} AND revoked_at IS NULL
         LIMIT 1
       `
@@ -951,7 +952,8 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
     async findApiKeyByHash(keyHash: string): Promise<ApiKeyRecord | null> {
       const rows = await sql<any[]>`
-        SELECT * FROM hollerkit.api_keys
+        SELECT key_hash, key_prefix, label, array_to_json(scopes) AS scopes, created_at, revoked_at
+        FROM hollerkit.api_keys
         WHERE key_hash = ${keyHash} AND revoked_at IS NULL
         LIMIT 1
       `
@@ -965,9 +967,9 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           key_hash, key_prefix, label, scopes, created_at, revoked_at
         ) VALUES (
           ${input.keyHash}, ${input.keyPrefix}, ${input.label ?? null},
-          ${sql.array(input.scopes)}, ${nowIso}, NULL
+          ARRAY(SELECT jsonb_array_elements_text(${sql.json(input.scopes)}::jsonb)), ${nowIso}, NULL
         )
-        RETURNING *
+        RETURNING key_hash, key_prefix, label, array_to_json(scopes) AS scopes, created_at, revoked_at
       `
       return toApiKeyRecord(rows[0]!)
     },
@@ -1190,7 +1192,7 @@ function toApiKeyRecord(row: any): ApiKeyRecord {
     keyHash: row.key_hash,
     keyPrefix: row.key_prefix,
     label: row.label ?? null,
-    scopes: Array.isArray(row.scopes) ? (row.scopes as Scope[]) : [],
+    scopes: asStringArray(row.scopes) as Scope[],
     createdAt: toIso(row.created_at)!,
     revokedAt: toIso(row.revoked_at),
   }
@@ -1216,8 +1218,61 @@ function toIso(value: Date | string | null | undefined): string | null {
   return new Date(value).toISOString()
 }
 
+export function parsePostgresTextArrayLiteral(value: string): string[] | null {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+    return null
+  }
+  const inner = trimmed.slice(1, -1)
+  if (inner.length === 0) {
+    return []
+  }
+
+  const items: string[] = []
+  let current = ''
+  let inQuotes = false
+  let escaping = false
+  let tokenStarted = false
+
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!
+    if (escaping) {
+      current += ch
+      escaping = false
+      continue
+    }
+    if (ch === '\\') {
+      escaping = true
+      tokenStarted = true
+      continue
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes
+      tokenStarted = true
+      continue
+    }
+    if (ch === ',' && !inQuotes) {
+      items.push(current)
+      current = ''
+      tokenStarted = false
+      continue
+    }
+    current += ch
+    tokenStarted = true
+  }
+
+  if (tokenStarted || inner.endsWith(',')) {
+    items.push(current)
+  }
+  return items
+}
+
 function asStringArray(value: unknown): string[] {
   if (typeof value === 'string') {
+    const pgArray = parsePostgresTextArrayLiteral(value)
+    if (pgArray !== null) {
+      return pgArray
+    }
     try {
       const parsed = JSON.parse(value)
       if (Array.isArray(parsed)) return parsed.map(String)

@@ -25,7 +25,6 @@ const store = postgresStore({
   url: poolerDbUrl,
   max: 2,
   prepare: false,
-  fetchTypes: false,
   idleTimeout: 5,
   maxLifetime: 600,
 })

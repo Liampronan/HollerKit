@@ -47,28 +47,14 @@ public enum HollerKit {
 
     public static func configure(_ configuration: HollerKitConfiguration) {
         state.configuration = configuration
+        state.configuredWhileEnabled = false
         let targetOutboxURL = (configuration.outboxDirectoryURL ?? OutboxStore.defaultOutboxDirectoryURL()).standardizedFileURL
         if state.outboxStore.rootDirectoryURL.standardizedFileURL != targetOutboxURL {
             state.outboxStore = OutboxStore(rootDirectoryURL: configuration.outboxDirectoryURL)
         }
 
         lifecycleMonitor.start()
-        if reconcileEnablement() {
-            let metadata = MetadataCollector.collect(extra: configuration.metadata())
-            let build = MetadataCollector.currentBuild(from: metadata)
-            let cacheDir = configuration.outboxDirectoryURL?.deletingLastPathComponent()
-                .appendingPathComponent("QuestCache", isDirectory: true)
-            quests.configure(
-                questsConfiguration: configuration.quests,
-                build: build,
-                cacheDirectoryURL: cacheDir,
-                serverURL: configuration.server
-            )
-            Task { @MainActor in
-                _ = await flushOutbox()
-                await quests.refresh(using: configuration)
-            }
-        }
+        reconcileEnablement()
     }
 
     @discardableResult
@@ -77,7 +63,13 @@ public enum HollerKit {
         if presenterState.isRuntimeEnabled != enabled {
             presenterState.isRuntimeEnabled = enabled
         }
-        if !enabled {
+        if enabled {
+            if !state.configuredWhileEnabled, let configuration = state.configuration {
+                state.configuredWhileEnabled = true
+                activateRuntimeConfiguration(configuration)
+            }
+        } else {
+            state.configuredWhileEnabled = false
             quests.reset()
             state.breadcrumbs = BreadcrumbStore()
             if presenterState.isPresented {
@@ -91,6 +83,23 @@ public enum HollerKit {
             }
         }
         return enabled
+    }
+
+    private static func activateRuntimeConfiguration(_ configuration: HollerKitConfiguration) {
+        let metadata = MetadataCollector.collect(extra: configuration.metadata())
+        let build = MetadataCollector.currentBuild(from: metadata)
+        let cacheDir = configuration.outboxDirectoryURL?.deletingLastPathComponent()
+            .appendingPathComponent("QuestCache", isDirectory: true)
+        quests.configure(
+            questsConfiguration: configuration.quests,
+            build: build,
+            cacheDirectoryURL: cacheDir,
+            serverURL: configuration.server
+        )
+        Task { @MainActor in
+            _ = await flushOutbox()
+            await quests.refresh(using: configuration)
+        }
     }
 
     public static var isEnabled: Bool {
@@ -213,6 +222,7 @@ public enum HollerKit {
 @MainActor
 private struct HollerKitState {
     var configuration: HollerKitConfiguration?
+    var configuredWhileEnabled = false
     var breadcrumbs = BreadcrumbStore()
     var outboxStore = OutboxStore()
 }

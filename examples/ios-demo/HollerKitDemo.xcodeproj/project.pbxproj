@@ -11,13 +11,26 @@
 		111111111111111111111113 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111114 /* ContentView.swift */; };
 		111111111111111111111115 /* HollerKit in Frameworks */ = {isa = PBXBuildFile; productRef = 111111111111111111111116 /* HollerKit */; };
 		111111111111111111111133 /* MockScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111134 /* MockScreens.swift */; };
+		111111111111111111111135 /* HollerKitDemoUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 111111111111111111111136 /* HollerKitDemoUITests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		111111111111111111111137 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 111111111111111111111126 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 111111111111111111111122;
+			remoteInfo = HollerKitDemo;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		111111111111111111111117 /* HollerKitDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HollerKitDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		111111111111111111111112 /* HollerKitDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HollerKitDemoApp.swift; sourceTree = "<group>"; };
 		111111111111111111111114 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		111111111111111111111134 /* MockScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockScreens.swift; sourceTree = "<group>"; };
+		111111111111111111111136 /* HollerKitDemoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HollerKitDemoUITests.swift; sourceTree = "<group>"; };
+		111111111111111111111138 /* HollerKitDemoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HollerKitDemoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -29,6 +42,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		111111111111111111111139 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -36,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				111111111111111111111120 /* Sources */,
+				111111111111111111111140 /* UITests */,
 				111111111111111111111121 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -50,10 +71,19 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		111111111111111111111140 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				111111111111111111111136 /* HollerKitDemoUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
 		111111111111111111111121 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				111111111111111111111117 /* HollerKitDemo.app */,
+				111111111111111111111138 /* HollerKitDemoUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -81,6 +111,26 @@
 			productReference = 111111111111111111111117 /* HollerKitDemo.app */;
 			productType = "com.apple.product-type.application";
 		};
+		111111111111111111111141 /* HollerKitDemoUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 111111111111111111111142 /* Build configuration list for PBXNativeTarget "HollerKitDemoUITests" */;
+			buildPhases = (
+				111111111111111111111143 /* Sources */,
+				111111111111111111111139 /* Frameworks */,
+				111111111111111111111144 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				111111111111111111111145 /* PBXTargetDependency */,
+			);
+			name = HollerKitDemoUITests;
+			packageProductDependencies = (
+			);
+			productName = HollerKitDemoUITests;
+			productReference = 111111111111111111111138 /* HollerKitDemoUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -93,6 +143,10 @@
 				TargetAttributes = {
 					111111111111111111111122 = {
 						CreatedOnToolsVersion = 26.3;
+					};
+					111111111111111111111141 = {
+						CreatedOnToolsVersion = 26.3;
+						TestTargetID = 111111111111111111111122;
 					};
 				};
 			};
@@ -114,12 +168,20 @@
 			projectRoot = "";
 			targets = (
 				111111111111111111111122 /* HollerKitDemo */,
+				111111111111111111111141 /* HollerKitDemoUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		111111111111111111111125 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		111111111111111111111144 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -139,7 +201,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		111111111111111111111143 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				111111111111111111111135 /* HollerKitDemoUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		111111111111111111111145 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 111111111111111111111122 /* HollerKitDemo */;
+			targetProxy = 111111111111111111111137 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		111111111111111111111129 /* Debug */ = {
@@ -249,8 +327,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -280,8 +356,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
-				CODE_SIGNING_ALLOWED = NO;
-				CODE_SIGNING_REQUIRED = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -307,6 +381,38 @@
 			};
 			name = Release;
 		};
+		111111111111111111111146 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hollerkit.demo.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HollerKitDemo;
+			};
+			name = Debug;
+		};
+		111111111111111111111147 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hollerkit.demo.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HollerKitDemo;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -324,6 +430,15 @@
 			buildConfigurations = (
 				111111111111111111111131 /* Debug */,
 				111111111111111111111132 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		111111111111111111111142 /* Build configuration list for PBXNativeTarget "HollerKitDemoUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				111111111111111111111146 /* Debug */,
+				111111111111111111111147 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

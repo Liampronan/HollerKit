@@ -65,7 +65,6 @@ const store = postgresStore({
   url: Deno.env.get('HOLLERKIT_DB_POOLER_URL')!,
   max: 2,
   prepare: false, // Required for Supabase Supavisor transaction pooling
-  fetchTypes: false,
 })
 
 const storage = supabaseStorage({

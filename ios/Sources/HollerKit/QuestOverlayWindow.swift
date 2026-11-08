@@ -117,6 +117,18 @@ public final class QuestOverlayWindowManager {
     #endif
 }
 
+enum OverlayHitPolicy {
+    static let slop: CGFloat = 12
+
+    static func capturesTouch(at point: CGPoint, interactiveFrame: CGRect) -> Bool {
+        // Before the bar has been measured, pass everything through rather than block the whole screen.
+        guard interactiveFrame != .zero, !interactiveFrame.isEmpty, !interactiveFrame.isNull else {
+            return false
+        }
+        return interactiveFrame.insetBy(dx: -slop, dy: -slop).contains(point)
+    }
+}
+
 #if canImport(UIKit)
 final class PassthroughOverlayWindow: UIWindow {
     var interactiveFrame: CGRect = .zero
@@ -137,14 +149,16 @@ final class PassthroughOverlayWindow: UIWindow {
         if rootViewController?.presentedViewController != nil {
             return super.hitTest(point, with: event)
         }
-        if interactiveFrame != .zero, !interactiveFrame.insetBy(dx: -12, dy: -12).contains(point) {
+        if let rootView = rootViewController?.view {
+            assert(
+                rootView.frame == bounds,
+                "PassthroughOverlayWindow root view (\(rootView.frame)) must match window bounds (\(bounds)) so SwiftUI .global coordinates align with window hitTest points."
+            )
+        }
+        guard OverlayHitPolicy.capturesTouch(at: point, interactiveFrame: interactiveFrame) else {
             return nil
         }
-        let hitView = super.hitTest(point, with: event)
-        if hitView === self || hitView === rootViewController?.view {
-            return nil
-        }
-        return hitView
+        return super.hitTest(point, with: event)
     }
 }
 #endif
@@ -211,9 +225,13 @@ public struct QuestOverlayView: View {
                         .onChange(of: proxy.size) { _, newSize in
                             cardSize = newSize
                             accumulatedOffset = clampOffset(accumulatedOffset, viewportSize: viewportSize, cardSize: newSize)
+                            onFrameChange(proxy.frame(in: .global))
                         }
                         .onChange(of: proxy.frame(in: .global)) { _, newFrame in
                             onFrameChange(newFrame)
+                        }
+                        .onDisappear {
+                            onFrameChange(.zero)
                         }
                 }
             )
@@ -224,6 +242,7 @@ public struct QuestOverlayView: View {
                 x: accumulatedOffset.width + dragOffset.width,
                 y: accumulatedOffset.height + dragOffset.height
             )
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("HollerKitQuestOverlayView")
         }
     }
@@ -266,6 +285,7 @@ public struct QuestOverlayView: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("HollerKitQuestExpandButton")
 
             Divider()
                 .frame(height: 18)
@@ -273,12 +293,16 @@ public struct QuestOverlayView: View {
             Button {
                 questState.captureMark()
             } label: {
-                Label("Mark", systemImage: "camera.viewfinder")
-                    .font(.caption.weight(.semibold))
+                Label(
+                    session.marks.isEmpty ? "Mark" : "Mark (\(session.marks.count))",
+                    systemImage: "camera.viewfinder"
+                )
+                .font(.caption.weight(.semibold))
             }
             .buttonStyle(.bordered)
             .controlSize(.mini)
             .accessibilityIdentifier("HollerKitQuestMarkButton")
+            .accessibilityValue("\(session.marks.count)")
 
             Button {
                 questState.presentResultSheet()
@@ -331,6 +355,7 @@ public struct QuestOverlayView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Collapse Quest Overlay")
+                .accessibilityIdentifier("HollerKitQuestCollapseButton")
             }
             .contentShape(Rectangle())
             .gesture(dragGesture)
@@ -402,6 +427,7 @@ public struct QuestOverlayView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .accessibilityIdentifier("HollerKitQuestMarkButton")
+                .accessibilityValue("\(session.marks.count)")
 
                 Button(role: .destructive) {
                     Task {
