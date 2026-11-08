@@ -177,6 +177,15 @@ async function provisionDisposableDatabase(): Promise<DisposablePostgresHarness 
   }
 }
 
+test('parsePostgresTextArrayLiteral parses PostgreSQL text[] literals without a database harness', () => {
+  assert.deepEqual(parsePostgresTextArrayLiteral('{agent:read,agent:triage}'), ['agent:read', 'agent:triage'])
+  assert.deepEqual(parsePostgresTextArrayLiteral('{"quests:write","agent:read"}'), ['quests:write', 'agent:read'])
+  assert.deepEqual(parsePostgresTextArrayLiteral('{"agent:read",""}'), ['agent:read', ''])
+  assert.deepEqual(parsePostgresTextArrayLiteral('{"a\\"b","c\\\\d"}'), ['a"b', 'c\\d'])
+  assert.deepEqual(parsePostgresTextArrayLiteral('{}'), [])
+  assert.equal(parsePostgresTextArrayLiteral('not-an-array'), null)
+})
+
 test('runs full v1 conformance suite and Postgres-specific invariants against postgresStore', async (t) => {
   const harness = await provisionDisposableDatabase()
   if (!harness) {

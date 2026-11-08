@@ -1187,12 +1187,13 @@ function toTesterRecord(row: any): TesterRecord {
   }
 }
 
+/** Maps a database `api_keys` row to an `ApiKeyRecord`. */
 function toApiKeyRecord(row: any): ApiKeyRecord {
   return {
     keyHash: row.key_hash,
     keyPrefix: row.key_prefix,
     label: row.label ?? null,
-    scopes: asStringArray(row.scopes) as Scope[],
+    scopes: asPostgresTextArray(row.scopes) as Scope[],
     createdAt: toIso(row.created_at)!,
     revokedAt: toIso(row.revoked_at),
   }
@@ -1218,6 +1219,7 @@ function toIso(value: Date | string | null | undefined): string | null {
   return new Date(value).toISOString()
 }
 
+/** Parses a PostgreSQL `text[]` array literal (e.g. `"{agent:read,agent:triage}"`) into an array of strings. */
 export function parsePostgresTextArrayLiteral(value: string): string[] | null {
   const trimmed = value.trim()
   if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
@@ -1267,12 +1269,20 @@ export function parsePostgresTextArrayLiteral(value: string): string[] | null {
   return items
 }
 
-function asStringArray(value: unknown): string[] {
+/** Normalizes a PostgreSQL `text[]` column value (decoded array, JSON array, or raw `text[]` literal) to `string[]`. */
+function asPostgresTextArray(value: unknown): string[] {
   if (typeof value === 'string') {
     const pgArray = parsePostgresTextArrayLiteral(value)
     if (pgArray !== null) {
       return pgArray
     }
+  }
+  return asStringArray(value)
+}
+
+/** Normalizes a JSON array column value to `string[]`. */
+function asStringArray(value: unknown): string[] {
+  if (typeof value === 'string') {
     try {
       const parsed = JSON.parse(value)
       if (Array.isArray(parsed)) return parsed.map(String)

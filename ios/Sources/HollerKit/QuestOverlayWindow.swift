@@ -117,9 +117,11 @@ public final class QuestOverlayWindowManager {
     #endif
 }
 
+/// Pure hit-testing policy for the floating quest overlay window.
 enum OverlayHitPolicy {
     static let slop: CGFloat = 12
 
+    /// Returns whether a touch at `point` falls within the measured `interactiveFrame` expanded by `slop`.
     static func capturesTouch(at point: CGPoint, interactiveFrame: CGRect) -> Bool {
         // Before the bar has been measured, pass everything through rather than block the whole screen.
         guard interactiveFrame != .zero, !interactiveFrame.isEmpty, !interactiveFrame.isNull else {

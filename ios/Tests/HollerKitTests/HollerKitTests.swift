@@ -1090,12 +1090,15 @@ final class HollerKitTests: XCTestCase {
 
         let enabledBox = LockedBox(false)
         let manifestSyncCount = LockedBox(0)
+        let manifestSynced = expectation(description: "manifest synced after deferred enablement")
+        manifestSynced.assertForOverFulfill = false
         let session = makeStubSession()
 
         StubURLProtocol.setHandler { request, _ in
             let url = request.url!
             if url.path.hasSuffix("/manifest") {
                 manifestSyncCount.withLock { $0 += 1 }
+                manifestSynced.fulfill()
                 let json = """
                 {
                   "ok": true,
@@ -1163,7 +1166,7 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(HollerKit.quests.pendingCount, 1)
 
         // And the background refresh syncs with the server
-        try await Task.sleep(for: .milliseconds(100))
+        await fulfillment(of: [manifestSynced], timeout: 2.0)
         XCTAssertGreaterThanOrEqual(manifestSyncCount.withLock { $0 }, 1)
     }
 }
