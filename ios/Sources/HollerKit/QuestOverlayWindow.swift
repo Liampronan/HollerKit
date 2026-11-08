@@ -285,6 +285,7 @@ public struct QuestOverlayView: View {
 
                     ElapsedTimerText(startedAt: session.startedAt)
                 }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("HollerKitQuestExpandButton")
@@ -367,9 +368,19 @@ public struct QuestOverlayView: View {
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Steps")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                        let checkedCount = session.stepsChecked.filter { $0 }.count
+                        let totalSteps = session.quest.definition.steps.count
+                        HStack {
+                            Text("Steps (\(checkedCount)/\(totalSteps))")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if totalSteps > 0 {
+                                Text("Tap to check off")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
 
                         ForEach(Array(session.quest.definition.steps.enumerated()), id: \.offset) { index, step in
                             let isChecked = session.stepsChecked.indices.contains(index) && session.stepsChecked[index]
@@ -387,6 +398,8 @@ public struct QuestOverlayView: View {
                                         .multilineTextAlignment(.leading)
                                     Spacer(minLength: 0)
                                 }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("HollerKitQuestStep_\(index)")

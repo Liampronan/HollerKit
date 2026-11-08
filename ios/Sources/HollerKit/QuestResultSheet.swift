@@ -50,9 +50,62 @@ public struct QuestResultSheet: View {
                                             .foregroundStyle(color(for: option))
                                     }
                                 }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .disabled(isSubmitting)
+                            .accessibilityValue(selectedResult == option ? "selected" : "unselected")
                             .accessibilityIdentifier("HollerKitQuestResultOption_\(option.rawValue)")
+                        }
+                    }
+
+                    if !session.quest.definition.steps.isEmpty {
+                        let checkedCount = session.stepsChecked.filter { $0 }.count
+                        let totalSteps = session.quest.definition.steps.count
+                        Section {
+                            ForEach(Array(session.quest.definition.steps.enumerated()), id: \.offset) { index, step in
+                                let isChecked = session.stepsChecked.indices.contains(index) && session.stepsChecked[index]
+                                Button {
+                                    questState.toggleStep(at: index)
+                                } label: {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(isChecked ? .green : .secondary)
+                                        Text(step)
+                                            .font(.subheadline)
+                                            .foregroundStyle(isChecked ? .secondary : .primary)
+                                            .strikethrough(isChecked)
+                                            .multilineTextAlignment(.leading)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isSubmitting)
+                                .accessibilityIdentifier("HollerKitQuestResultStep_\(index)")
+                            }
+                        } header: {
+                            HStack {
+                                Text("Steps (\(checkedCount)/\(totalSteps))")
+                                    .accessibilityIdentifier("HollerKitQuestResultStepsHeader")
+                                Spacer()
+                                if checkedCount < totalSteps {
+                                    Button("Check All") {
+                                        questState.checkAllSteps()
+                                    }
+                                    .font(.caption.weight(.semibold))
+                                    .textCase(nil)
+                                    .disabled(isSubmitting)
+                                    .accessibilityIdentifier("HollerKitQuestResultCheckAllStepsButton")
+                                }
+                            }
+                        } footer: {
+                            if checkedCount == 0 {
+                                Text("Tap completed steps to check them off before submitting.")
+                                    .accessibilityIdentifier("HollerKitQuestUncheckedStepsHint")
+                            }
                         }
                     }
 
@@ -66,7 +119,7 @@ public struct QuestResultSheet: View {
                                     await speechCapture.toggle(configuration: audioConfig)
                                 }
                             }
-                            .disabled(isSubmitting)
+                            .disabled(isSubmitting || speechCapture.isStopping)
 
                             if let transcript = speechCapture.transcript {
                                 Text(transcript.text)
@@ -79,9 +132,23 @@ public struct QuestResultSheet: View {
                             }
 
                             if let errorMessage = speechCapture.errorMessage {
-                                Text(errorMessage)
-                                    .font(.footnote)
-                                    .foregroundStyle(.red)
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(errorMessage)
+                                        .font(.footnote)
+                                        .foregroundStyle(.red)
+                                        .accessibilityIdentifier("HollerKitSpeechErrorText")
+
+                                    Button {
+                                        Task {
+                                            await speechCapture.retry(configuration: audioConfig)
+                                        }
+                                    } label: {
+                                        Label("Retry Dictation", systemImage: "arrow.clockwise")
+                                            .font(.footnote.weight(.semibold))
+                                    }
+                                    .disabled(isSubmitting || speechCapture.isCapturing || speechCapture.isStopping)
+                                    .accessibilityIdentifier("HollerKitSpeechRetryButton")
+                                }
                             }
                         }
                     }
@@ -148,10 +215,13 @@ public struct QuestResultSheet: View {
                             await submit()
                         }
                     }
-                    .disabled(isSubmitting || questState.activeQuest == nil)
+                    .disabled(isSubmitting || speechCapture.isStopping || questState.activeQuest == nil)
                     .accessibilityIdentifier("HollerKitQuestResultSubmitButton")
                 }
             }
+        }
+        .onChange(of: speechCapture.transcript) { _, _ in
+            comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
         }
         .onDisappear {
             speechCapture.cancelCapture()
@@ -174,6 +244,7 @@ public struct QuestResultSheet: View {
         .accessibilityIdentifier("HollerKitQuestResultSheet")
     }
 
+    /// Finalizes any active speech capture and submits the completed quest run.
     @MainActor
     private func submit() async {
         isSubmitting = true
@@ -182,6 +253,7 @@ public struct QuestResultSheet: View {
 
         do {
             await speechCapture.finalizeIfCapturing()
+            comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
             _ = try await questState.submitActiveQuest(
                 result: selectedResult,
                 comment: comment,
@@ -193,6 +265,7 @@ public struct QuestResultSheet: View {
         }
     }
 
+    /// Returns the SF Symbol name for a given quest result option.
     private func iconName(for result: QuestResult) -> String {
         switch result {
         case .pass:
@@ -206,6 +279,7 @@ public struct QuestResultSheet: View {
         }
     }
 
+    /// Returns the tint color for a given quest result option.
     private func color(for result: QuestResult) -> Color {
         switch result {
         case .pass:

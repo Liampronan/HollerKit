@@ -440,6 +440,7 @@ public final class HollerKitQuestState: ObservableObject {
         QuestOverlayWindowManager.shared.show(questState: self)
     }
 
+    /// Toggles the checked state of the active quest's step at `index` and records a breadcrumb.
     public func toggleStep(at index: Int) {
         guard var session = activeQuest,
               session.stepsChecked.indices.contains(index) else {
@@ -452,6 +453,21 @@ public final class HollerKitQuestState: ObservableObject {
             "\(isChecked ? "Checked" : "Unchecked") step \(index + 1)",
             category: "quest_step",
             metadata: ["stepIndex": String(index), "checked": String(isChecked)]
+        )
+    }
+
+    /// Marks every step of the active quest as checked and records a breadcrumb.
+    public func checkAllSteps() {
+        guard var session = activeQuest, !session.stepsChecked.isEmpty else {
+            return
+        }
+        guard session.stepsChecked.contains(false) else { return }
+        session.stepsChecked = Array(repeating: true, count: session.stepsChecked.count)
+        activeQuest = session
+        HollerKit.breadcrumb(
+            "Checked all \(session.stepsChecked.count) steps",
+            category: "quest_step",
+            metadata: ["checkedAll": "true"]
         )
     }
 
