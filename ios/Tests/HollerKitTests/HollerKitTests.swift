@@ -1230,6 +1230,36 @@ final class HollerKitTests: XCTestCase {
         XCTAssertTrue(snapshot.errorDescription?.contains("kAFAssistantErrorDomain code 216") == true)
     }
 
+    #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
+    @MainActor
+    func testStopAsyncWaitsForDelayedTranscriptDelivery() async throws {
+        let capture = SpeechNoteCapture()
+        let state = LiveRecognitionState()
+        capture.startForTesting(
+            state: state,
+            options: SpeechTranscriberOptions(locale: Locale(identifier: "en_US"))
+        )
+        XCTAssertTrue(capture.isCapturing)
+
+        let stopTask = Task { @MainActor in
+            try await capture.stopAsync()
+        }
+
+        // Wait until stopAsync() enters its stopping state before delivering the final transcript
+        while !capture.isStopping {
+            await Task.yield()
+        }
+        state.recordResult(text: "Delayed final transcript after endAudio", confidence: 0.95, isFinal: true)
+
+        let transcript = try await stopTask.value
+        XCTAssertEqual(transcript.text, "Delayed final transcript after endAudio")
+        XCTAssertEqual(transcript.locale, "en_US")
+        XCTAssertEqual(transcript.confidence ?? -1, 0.95, accuracy: 0.001)
+        XCTAssertFalse(capture.isCapturing)
+        XCTAssertFalse(capture.isStopping)
+    }
+    #endif
+
     @MainActor
     func testSpeechCaptureControllerMergeTranscriptFillsAndAppendsWithoutDuplicating() {
         XCTAssertEqual(
@@ -1253,6 +1283,28 @@ final class HollerKitTests: XCTestCase {
             SpeechCaptureController.mergeTranscript("   ", into: "Existing note"),
             "Existing note"
         )
+
+        // Preserves existingComment when combined length exceeds 20,000 characters
+        let longComment = String(repeating: "a", count: 19_995)
+        XCTAssertEqual(
+            SpeechCaptureController.mergeTranscript("123456", into: longComment),
+            longComment
+        )
+
+        // consumeTranscriptForCommentMerge merges each completed transcript once so later user edits are preserved
+        let controller = SpeechCaptureController()
+        controller.transcript = HollerKitTranscript(
+            text: "Original dictated note",
+            locale: "en-US",
+            engine: .appleNetwork
+        )
+        var comment = controller.consumeTranscriptForCommentMerge(into: "")
+        XCTAssertEqual(comment, "Original dictated note")
+
+        // User edits the comment before submitting
+        comment = "Original dictated note (edited by tester)"
+        let commentOnSubmit = controller.consumeTranscriptForCommentMerge(into: comment)
+        XCTAssertEqual(commentOnSubmit, "Original dictated note (edited by tester)")
     }
 
     @MainActor
@@ -1287,6 +1339,12 @@ final class HollerKitTests: XCTestCase {
 
         XCTAssertEqual(HollerKit.quests.activeQuest?.stepsChecked, [false, false, false])
 
+        HollerKit.quests.checkAllSteps()
+        XCTAssertEqual(HollerKit.quests.activeQuest?.stepsChecked, [true, true, true])
+
+        // Uncheck one step and verify checkAllSteps() marks the mixed state back to all-checked
+        HollerKit.quests.toggleStep(at: 1)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.stepsChecked, [true, false, true])
         HollerKit.quests.checkAllSteps()
         XCTAssertEqual(HollerKit.quests.activeQuest?.stepsChecked, [true, true, true])
 

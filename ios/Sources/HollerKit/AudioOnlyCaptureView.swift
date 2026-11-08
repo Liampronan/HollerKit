@@ -19,6 +19,7 @@ public struct AudioOnlyCaptureView: View {
             }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(capture.isStopping)
 
             if let transcript {
                 Text(transcript.text)
@@ -44,17 +45,24 @@ public struct AudioOnlyCaptureView: View {
                         Label("Retry Dictation", systemImage: "arrow.clockwise")
                             .font(.footnote.weight(.semibold))
                     }
-                    .disabled(capture.isCapturing)
+                    .disabled(capture.isCapturing || capture.isStopping)
                 }
             }
             Spacer()
         }
         .padding()
+        .onChange(of: capture.lastError) { _, newError in
+            if let newError {
+                errorMessage = newError
+            }
+        }
         .accessibilityIdentifier("HollerKitAudioOnlyCaptureView")
     }
 
+    /// Toggles between starting and stopping live voice transcription.
     @MainActor
     private func toggleTranscription() async {
+        guard !capture.isStopping else { return }
         errorMessage = nil
 
         do {
@@ -69,8 +77,10 @@ public struct AudioOnlyCaptureView: View {
         }
     }
 
+    /// Retries starting voice transcription after an error.
     @MainActor
     private func retryTranscription() async {
+        guard !capture.isStopping else { return }
         errorMessage = nil
         transcript = nil
         do {

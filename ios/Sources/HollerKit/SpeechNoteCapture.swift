@@ -5,6 +5,7 @@ import AVFoundation
 import Speech
 #endif
 
+/// Errors thrown during live microphone speech note capture.
 public enum SpeechNoteCaptureError: Error, LocalizedError, Sendable, Equatable {
     case unavailable
     case authorizationDenied
@@ -14,6 +15,7 @@ public enum SpeechNoteCaptureError: Error, LocalizedError, Sendable, Equatable {
     case recognitionFailed(String)
     case noTranscript
 
+    /// A human-readable description of the speech note capture error.
     public var errorDescription: String? {
         switch self {
         case .unavailable:
@@ -75,6 +77,7 @@ public enum SpeechNoteCaptureError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
+/// Thread-safe accumulator for live speech recognition callbacks across audio/XPC queues.
 final class LiveRecognitionState: @unchecked Sendable {
     private let lock = NSLock()
     private var text: String = ""
@@ -82,6 +85,7 @@ final class LiveRecognitionState: @unchecked Sendable {
     private var isFinal: Bool = false
     private var errorDescription: String?
 
+    /// Records a partial or final transcription result.
     func recordResult(text: String, confidence: Double?, isFinal: Bool) {
         lock.lock()
         defer { lock.unlock() }
@@ -95,6 +99,7 @@ final class LiveRecognitionState: @unchecked Sendable {
         }
     }
 
+    /// Records the first recognition error encountered during the session.
     func recordError(_ error: Error) {
         lock.lock()
         defer { lock.unlock() }
@@ -103,6 +108,7 @@ final class LiveRecognitionState: @unchecked Sendable {
         }
     }
 
+    /// Returns a point-in-time snapshot of the recognition state.
     func snapshot() -> (text: String, confidence: Double?, isFinal: Bool, errorDescription: String?) {
         lock.lock()
         defer { lock.unlock() }
@@ -110,10 +116,13 @@ final class LiveRecognitionState: @unchecked Sendable {
     }
 }
 
+/// Captures live microphone audio and transcribes it using Apple's Speech framework.
 @MainActor
 public final class SpeechNoteCapture: ObservableObject {
     @Published public private(set) var isCapturing = false
+    @Published public private(set) var isStopping = false
     @Published public private(set) var transcriptText = ""
+    @Published public private(set) var lastError: String?
 
     #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
     private var audioEngine: AVAudioEngine?
@@ -122,15 +131,20 @@ public final class SpeechNoteCapture: ObservableObject {
     #endif
     private var liveState = LiveRecognitionState()
     private var options = SpeechTranscriberOptions()
+    private var resolvedLocaleIdentifier: String = Locale.current.identifier
     private var startedAt: Date?
     private var confidence: Double?
     private var resolvedEngine: HollerKitTranscript.Engine = .appleNetwork
 
+    /// Creates a new live speech note capture coordinator.
     public init() {}
 
+    /// Starts live microphone capture and speech recognition with the provided options.
     public func start(options: SpeechTranscriberOptions = SpeechTranscriberOptions()) async throws {
         #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
-        cleanupCaptureState()
+        let hadActiveSession = isCapturing || isStopping || audioEngine != nil || recognitionTask != nil
+        cleanupCaptureState(deactivateSession: hadActiveSession)
+        lastError = nil
 
         let speechStatus = await SpeechTranscriber.requestAuthorization()
         guard speechStatus == .authorized else { throw SpeechNoteCaptureError.authorizationDenied }
@@ -140,14 +154,10 @@ public final class SpeechNoteCapture: ObservableObject {
         guard microphoneAllowed else { throw SpeechNoteCaptureError.authorizationDenied }
 
         let locale = Locale(identifier: options.localeIdentifier)
-        guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(),
-              recognizer.isAvailable else {
-            throw SpeechNoteCaptureError.recognizerUnavailable
-        }
-
-        if options.requireOnDeviceRecognition, !recognizer.supportsOnDeviceRecognition {
-            throw SpeechNoteCaptureError.onDeviceRecognitionUnavailable
-        }
+        let recognizer = try Self.selectRecognizer(
+            for: locale,
+            requireOnDeviceRecognition: options.requireOnDeviceRecognition
+        )
 
         do {
             try Self.configureAudioSession(audioSession)
@@ -177,6 +187,7 @@ public final class SpeechNoteCapture: ObservableObject {
             }
 
             self.options = options
+            self.resolvedLocaleIdentifier = recognizer.locale.identifier
             self.resolvedEngine = options.requireOnDeviceRecognition ? .appleOnDevice : .appleNetwork
             self.transcriptText = ""
             self.confidence = nil
@@ -192,7 +203,7 @@ public final class SpeechNoteCapture: ObservableObject {
                     state.recordResult(text: text, confidence: confidence, isFinal: result.isFinal)
 
                     Task { @MainActor [weak self] in
-                        guard let self else { return }
+                        guard let self, self.liveState === state, self.isCapturing else { return }
                         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             self.transcriptText = text
                             self.confidence = confidence
@@ -201,6 +212,14 @@ public final class SpeechNoteCapture: ObservableObject {
                 }
                 if let error {
                     state.recordError(error)
+                    Task { @MainActor [weak self] in
+                        guard let self, self.liveState === state, self.isCapturing, !self.isStopping else { return }
+                        let snapshot = state.snapshot()
+                        guard snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              let errorDescription = snapshot.errorDescription else { return }
+                        self.cleanupCaptureState(deactivateSession: true)
+                        self.lastError = SpeechNoteCaptureError.recognitionFailed(errorDescription).errorDescription
+                    }
                 }
             }
 
@@ -208,8 +227,7 @@ public final class SpeechNoteCapture: ObservableObject {
             try engine.start()
             isCapturing = true
         } catch {
-            cleanupCaptureState()
-            try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            cleanupCaptureState(deactivateSession: true)
             throw SpeechNoteCaptureError.recognitionFailed(SpeechNoteCaptureError.describeError(error))
         }
         #else
@@ -217,13 +235,16 @@ public final class SpeechNoteCapture: ObservableObject {
         #endif
     }
 
+    /// Stops audio input, waits briefly for buffered speech recognition results to flush, and returns the transcript.
     public func stopAsync() async throws -> HollerKitTranscript {
         #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
+        let stateAtStop = liveState
         stopAudioInput()
 
         // Allow a brief flush window after endAudio() so SFSpeechRecognizer can deliver final buffers.
         for _ in 0..<16 {
-            let current = liveState.snapshot()
+            guard liveState === stateAtStop else { break }
+            let current = stateAtStop.snapshot()
             let hasTranscript = !current.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if current.isFinal || (hasTranscript && current.errorDescription != nil) {
                 break
@@ -234,31 +255,84 @@ public final class SpeechNoteCapture: ObservableObject {
             try? await Task.sleep(for: .milliseconds(25))
         }
 
-        return try finalizeStop()
+        return try finalizeStop(expectedState: stateAtStop)
         #else
         throw SpeechNoteCaptureError.unavailable
         #endif
     }
 
+    /// Synchronously stops capture and returns any transcript received so far.
     public func stop() throws -> HollerKitTranscript {
         #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
+        let stateAtStop = liveState
         stopAudioInput()
-        return try finalizeStop()
+        return try finalizeStop(expectedState: stateAtStop)
         #else
         throw SpeechNoteCaptureError.unavailable
         #endif
+    }
+
+    /// Internal test hook to prime a simulated recognition session for deterministic `stopAsync()` testing.
+    func startForTesting(
+        state: LiveRecognitionState,
+        options: SpeechTranscriberOptions = SpeechTranscriberOptions()
+    ) {
+        self.liveState = state
+        self.options = options
+        self.resolvedLocaleIdentifier = options.localeIdentifier
+        self.resolvedEngine = options.requireOnDeviceRecognition ? .appleOnDevice : .appleNetwork
+        self.transcriptText = ""
+        self.confidence = nil
+        self.lastError = nil
+        self.startedAt = Date()
+        self.isStopping = false
+        self.isCapturing = true
     }
 
     #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
+    /// Selects an available `SFSpeechRecognizer` for `locale`, falling back to the default recognizer if needed.
+    static func selectRecognizer(
+        for locale: Locale,
+        requireOnDeviceRecognition: Bool
+    ) throws -> SFSpeechRecognizer {
+        var candidates: [SFSpeechRecognizer] = []
+        if let requested = SFSpeechRecognizer(locale: locale) {
+            candidates.append(requested)
+        }
+        if let fallback = SFSpeechRecognizer(),
+           !candidates.contains(where: { $0.locale.identifier == fallback.locale.identifier }) {
+            candidates.append(fallback)
+        }
+
+        let available = candidates.filter(\.isAvailable)
+        guard !available.isEmpty else {
+            throw SpeechNoteCaptureError.recognizerUnavailable
+        }
+
+        if requireOnDeviceRecognition {
+            guard let onDevice = available.first(where: \.supportsOnDeviceRecognition) else {
+                throw SpeechNoteCaptureError.onDeviceRecognitionUnavailable
+            }
+            return onDevice
+        }
+        return available[0]
+    }
+
+    /// Configures and activates the shared `AVAudioSession` for speech capture with safe category fallbacks.
     private static func configureAudioSession(_ audioSession: AVAudioSession) throws {
         do {
             try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
         } catch {
             do {
+                #if compiler(>=6.2)
+                let bluetoothOption: AVAudioSession.CategoryOptions = .allowBluetoothHFP
+                #else
+                let bluetoothOption: AVAudioSession.CategoryOptions = .allowBluetooth
+                #endif
                 try audioSession.setCategory(
                     .playAndRecord,
                     mode: .default,
-                    options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers]
+                    options: [.defaultToSpeaker, bluetoothOption, .duckOthers]
                 )
             } catch {
                 try audioSession.setCategory(.record, mode: .default)
@@ -267,38 +341,49 @@ public final class SpeechNoteCapture: ObservableObject {
         try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
+    /// Stops the audio engine and signals the end of audio buffers while keeping capture in the stopping state.
     private func stopAudioInput() {
+        isStopping = true
         if let engine = audioEngine {
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
         }
         recognitionRequest?.endAudio()
-        isCapturing = false
     }
 
-    private func finalizeStop() throws -> HollerKitTranscript {
-        let snapshot = liveState.snapshot()
-        recognitionTask?.cancel()
-        recognitionRequest = nil
-        recognitionTask = nil
-        audioEngine = nil
-        isCapturing = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    /// Cancels the recognition task, deactivates the audio session, and constructs the final `HollerKitTranscript`.
+    private func finalizeStop(expectedState: LiveRecognitionState) throws -> HollerKitTranscript {
+        let snapshot = expectedState.snapshot()
+        let isCurrentSession = (liveState === expectedState)
+        if isCurrentSession {
+            recognitionTask?.cancel()
+            recognitionRequest = nil
+            recognitionTask = nil
+            audioEngine = nil
+            isStopping = false
+            isCapturing = false
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
 
+        let fallbackText = isCurrentSession ? transcriptText : ""
         let rawText = !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? snapshot.text
-            : transcriptText
+            : fallbackText
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedConfidence = snapshot.confidence ?? confidence
-        let duration = startedAt.map { Date().timeIntervalSince($0) }
-        startedAt = nil
+        let resolvedConfidence = snapshot.confidence ?? (isCurrentSession ? confidence : nil)
+        let duration = isCurrentSession ? startedAt.map { Date().timeIntervalSince($0) } : nil
+        if isCurrentSession {
+            startedAt = nil
+        }
 
         if !text.isEmpty {
-            transcriptText = text
-            confidence = resolvedConfidence
+            if isCurrentSession {
+                transcriptText = text
+                confidence = resolvedConfidence
+            }
             return HollerKitTranscript(
                 text: text,
-                locale: options.localeIdentifier,
+                locale: resolvedLocaleIdentifier,
                 engine: resolvedEngine,
                 confidence: resolvedConfidence,
                 durationSeconds: duration
@@ -311,6 +396,7 @@ public final class SpeechNoteCapture: ObservableObject {
         throw SpeechNoteCaptureError.noTranscript
     }
 
+    /// Requests microphone recording permission from the user.
     private func requestMicrophonePermission(audioSession: AVAudioSession) async -> Bool {
         await withCheckedContinuation { continuation in
             if #available(iOS 17.0, *) {
@@ -325,7 +411,8 @@ public final class SpeechNoteCapture: ObservableObject {
         }
     }
 
-    private func cleanupCaptureState() {
+    /// Stops any active audio engine or recognition task and resets capture state.
+    private func cleanupCaptureState(deactivateSession: Bool) {
         if let engine = audioEngine {
             engine.stop()
             engine.inputNode.removeTap(onBus: 0)
@@ -335,8 +422,14 @@ public final class SpeechNoteCapture: ObservableObject {
         recognitionRequest = nil
         recognitionTask = nil
         audioEngine = nil
+        isStopping = false
         isCapturing = false
+        transcriptText = ""
+        confidence = nil
         startedAt = nil
+        if deactivateSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
     #endif
 }

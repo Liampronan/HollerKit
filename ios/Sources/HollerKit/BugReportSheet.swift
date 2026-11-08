@@ -89,7 +89,7 @@ public struct BugReportSheet: View {
                                 await toggleSpeechCapture()
                             }
                         }
-                        .disabled(isSubmitting)
+                        .disabled(isSubmitting || speechCapture.isStopping)
 
                         if let transcript = speechCapture.transcript {
                             Text(transcript.text)
@@ -116,7 +116,7 @@ public struct BugReportSheet: View {
                                     Label("Retry Dictation", systemImage: "arrow.clockwise")
                                         .font(.footnote.weight(.semibold))
                                 }
-                                .disabled(isSubmitting || speechCapture.isCapturing)
+                                .disabled(isSubmitting || speechCapture.isCapturing || speechCapture.isStopping)
                                 .accessibilityIdentifier("HollerKitSpeechRetryButton")
                             }
                         }
@@ -191,9 +191,9 @@ public struct BugReportSheet: View {
             images = (invocationAttachments + configuredImages).compactMap(BugReportImage.init(attachment:))
             #endif
         }
-        .onChange(of: speechCapture.transcript) { _, newTranscript in
-            guard !isAudioOnly, let newTranscript else { return }
-            comment = SpeechCaptureController.mergeTranscript(newTranscript.text, into: comment)
+        .onChange(of: speechCapture.transcript) { _, _ in
+            guard !isAudioOnly else { return }
+            comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
         }
         .accessibilityIdentifier("HollerKitBugReportSheet")
     }
@@ -233,6 +233,7 @@ public struct BugReportSheet: View {
             || lower.contains("403")
     }
 
+    /// Submits the bug report or queues it in the local outbox.
     @MainActor
     private func submit() async {
         guard let configuration else {
@@ -251,8 +252,8 @@ public struct BugReportSheet: View {
 
         do {
             await speechCapture.finalizeIfCapturing()
-            if !isAudioOnly, let transcript = speechCapture.transcript {
-                comment = SpeechCaptureController.mergeTranscript(transcript.text, into: comment)
+            if !isAudioOnly {
+                comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
             }
             let payload = HollerKitReportPayload(
                 inputMode: configuration.inputMode,
@@ -294,12 +295,14 @@ public struct BugReportSheet: View {
         #endif
     }
 
+    /// Toggles voice dictation for the bug report.
     @MainActor
     private func toggleSpeechCapture() async {
         guard let configuration else { return }
         await speechCapture.toggle(configuration: configuration.audio)
     }
 
+    /// Retries voice dictation after an error.
     @MainActor
     private func retrySpeechCapture() async {
         guard let configuration else { return }
@@ -341,28 +344,51 @@ struct BugReportImage: Identifiable, Hashable {
     }
 }
 
+/// Coordinates live voice dictation for bug report and quest result sheets.
 @MainActor
 final class SpeechCaptureController: ObservableObject {
+    static let maxCommentCharacters = 20_000
+
     @Published var isCapturing = false
+    @Published var isStopping = false
     @Published var transcript: HollerKitTranscript?
     @Published var errorMessage: String?
     @Published var partialTranscript = ""
 
     private let capture = SpeechNoteCapture()
     private var autoStopTask: Task<Void, Never>?
+    private var consumedTranscriptForCommentMerge: HollerKitTranscript?
 
+    /// Merges `transcriptText` into `existingComment` while respecting the 20,000-character server limit.
     static func mergeTranscript(_ transcriptText: String, into existingComment: String) -> String {
         let trimmedTranscript = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTranscript.isEmpty else { return existingComment }
         let trimmedExisting = existingComment.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedExisting.isEmpty else { return trimmedTranscript }
+        guard !trimmedExisting.isEmpty else {
+            return trimmedTranscript.count <= maxCommentCharacters ? trimmedTranscript : existingComment
+        }
         if trimmedExisting.hasSuffix(trimmedTranscript) {
             return existingComment
         }
-        return "\(trimmedExisting)\n\(trimmedTranscript)"
+        let combined = "\(trimmedExisting)\n\(trimmedTranscript)"
+        guard combined.count <= maxCommentCharacters else {
+            return existingComment
+        }
+        return combined
     }
 
+    /// Merges the latest completed transcript into `existingComment` at most once so subsequent user edits are preserved.
+    func consumeTranscriptForCommentMerge(into existingComment: String) -> String {
+        guard let current = transcript, current != consumedTranscriptForCommentMerge else {
+            return existingComment
+        }
+        consumedTranscriptForCommentMerge = current
+        return Self.mergeTranscript(current.text, into: existingComment)
+    }
+
+    /// Toggles between starting and stopping live dictation.
     func toggle(configuration: HollerKitAudioConfiguration) async {
+        guard !isStopping else { return }
         errorMessage = nil
 
         if isCapturing {
@@ -372,67 +398,83 @@ final class SpeechCaptureController: ObservableObject {
         }
     }
 
+    /// Cancels any active session and starts a fresh dictation attempt.
     func retry(configuration: HollerKitAudioConfiguration) async {
+        guard !isStopping else { return }
         cancelCapture()
         errorMessage = nil
         await start(configuration: configuration)
     }
 
+    /// Finalizes an in-progress dictation session prior to form submission.
     func finalizeIfCapturing() async {
-        guard isCapturing else { return }
+        guard isCapturing, !isStopping else { return }
         autoStopTask?.cancel()
         autoStopTask = nil
+        isStopping = true
         do {
             transcript = try await capture.stopAsync()
             partialTranscript = ""
+            isStopping = false
             isCapturing = false
         } catch {
             partialTranscript = ""
+            isStopping = false
             isCapturing = false
             recordError(error)
         }
     }
 
+    /// Cancels any active dictation session immediately.
     func cancelCapture() {
         autoStopTask?.cancel()
         autoStopTask = nil
-        if isCapturing || capture.isCapturing {
+        if isCapturing || isStopping || capture.isCapturing || capture.isStopping {
             _ = try? capture.stop()
         }
         partialTranscript = ""
+        isStopping = false
         isCapturing = false
     }
 
+    /// Starts a new dictation session with the given audio configuration.
     private func start(configuration: HollerKitAudioConfiguration) async {
         do {
             transcript = nil
+            consumedTranscriptForCommentMerge = nil
             partialTranscript = ""
             try await capture.start(options: SpeechTranscriberOptions(
                 requireOnDeviceRecognition: configuration.requiresOnDeviceTranscription
             ))
+            isStopping = false
             isCapturing = true
             bindPartialTranscript()
             scheduleAutoStop(after: configuration.maxDuration)
         } catch {
+            isStopping = false
+            isCapturing = false
             recordError(error)
         }
     }
 
+    /// Stops the active dictation session and stores the resulting transcript.
     private func stop(configuration: HollerKitAudioConfiguration) async {
+        autoStopTask?.cancel()
+        autoStopTask = nil
+        isStopping = true
         do {
-            autoStopTask?.cancel()
-            autoStopTask = nil
             transcript = try await capture.stopAsync()
             partialTranscript = ""
+            isStopping = false
             isCapturing = false
         } catch {
-            autoStopTask?.cancel()
-            autoStopTask = nil
+            isStopping = false
             isCapturing = false
             recordError(error)
         }
     }
 
+    /// Schedules an automatic stop after `maxDuration` seconds.
     private func scheduleAutoStop(after maxDuration: TimeInterval) {
         autoStopTask?.cancel()
         guard maxDuration > 0 else { return }
@@ -440,30 +482,48 @@ final class SpeechCaptureController: ObservableObject {
         autoStopTask = Task { @MainActor [weak self] in
             let nanoseconds = UInt64(maxDuration * 1_000_000_000)
             try? await Task.sleep(nanoseconds: nanoseconds)
-            guard !Task.isCancelled, let self, self.isCapturing else { return }
+            guard !Task.isCancelled, let self, self.isCapturing, !self.isStopping else { return }
 
+            self.isStopping = true
             do {
                 self.transcript = try await self.capture.stopAsync()
                 self.partialTranscript = ""
+                self.isStopping = false
                 self.isCapturing = false
             } catch {
+                self.isStopping = false
                 self.isCapturing = false
                 self.recordError(error)
             }
         }
     }
 
+    /// Polls partial transcription updates and mid-capture errors while recording is active.
     private func bindPartialTranscript() {
-        Task { @MainActor in
-            while capture.isCapturing {
-                partialTranscript = capture.transcriptText
+        Task { @MainActor [weak self] in
+            while let self, self.capture.isCapturing || self.capture.lastError != nil {
+                if let failure = self.capture.lastError, !self.capture.isCapturing {
+                    self.autoStopTask?.cancel()
+                    self.autoStopTask = nil
+                    self.partialTranscript = ""
+                    self.isStopping = false
+                    self.isCapturing = false
+                    self.recordErrorMessage(failure)
+                    break
+                }
+                self.partialTranscript = self.capture.transcriptText
                 try? await Task.sleep(for: .milliseconds(250))
             }
         }
     }
 
+    /// Formats `error`, assigns `errorMessage`, and records a diagnostic breadcrumb.
     private func recordError(_ error: Error) {
-        let described = SpeechNoteCaptureError.describeError(error)
+        recordErrorMessage(SpeechNoteCaptureError.describeError(error))
+    }
+
+    /// Assigns `described` to `errorMessage` and records a diagnostic breadcrumb.
+    private func recordErrorMessage(_ described: String) {
         errorMessage = described
         HollerKit.breadcrumb(
             "Speech capture failed: \(described)",

@@ -375,9 +375,11 @@ public struct QuestOverlayView: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Text("Tap to check off")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                            if totalSteps > 0 {
+                                Text("Tap to check off")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
 
                         ForEach(Array(session.quest.definition.steps.enumerated()), id: \.offset) { index, step in

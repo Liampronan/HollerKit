@@ -54,6 +54,8 @@ public struct QuestResultSheet: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .disabled(isSubmitting)
+                            .accessibilityValue(selectedResult == option ? "selected" : "unselected")
                             .accessibilityIdentifier("HollerKitQuestResultOption_\(option.rawValue)")
                         }
                     }
@@ -81,11 +83,13 @@ public struct QuestResultSheet: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(isSubmitting)
                                 .accessibilityIdentifier("HollerKitQuestResultStep_\(index)")
                             }
                         } header: {
                             HStack {
                                 Text("Steps (\(checkedCount)/\(totalSteps))")
+                                    .accessibilityIdentifier("HollerKitQuestResultStepsHeader")
                                 Spacer()
                                 if checkedCount < totalSteps {
                                     Button("Check All") {
@@ -93,6 +97,7 @@ public struct QuestResultSheet: View {
                                     }
                                     .font(.caption.weight(.semibold))
                                     .textCase(nil)
+                                    .disabled(isSubmitting)
                                     .accessibilityIdentifier("HollerKitQuestResultCheckAllStepsButton")
                                 }
                             }
@@ -114,7 +119,7 @@ public struct QuestResultSheet: View {
                                     await speechCapture.toggle(configuration: audioConfig)
                                 }
                             }
-                            .disabled(isSubmitting)
+                            .disabled(isSubmitting || speechCapture.isStopping)
 
                             if let transcript = speechCapture.transcript {
                                 Text(transcript.text)
@@ -141,7 +146,7 @@ public struct QuestResultSheet: View {
                                         Label("Retry Dictation", systemImage: "arrow.clockwise")
                                             .font(.footnote.weight(.semibold))
                                     }
-                                    .disabled(isSubmitting || speechCapture.isCapturing)
+                                    .disabled(isSubmitting || speechCapture.isCapturing || speechCapture.isStopping)
                                     .accessibilityIdentifier("HollerKitSpeechRetryButton")
                                 }
                             }
@@ -215,9 +220,8 @@ public struct QuestResultSheet: View {
                 }
             }
         }
-        .onChange(of: speechCapture.transcript) { _, newTranscript in
-            guard let newTranscript else { return }
-            comment = SpeechCaptureController.mergeTranscript(newTranscript.text, into: comment)
+        .onChange(of: speechCapture.transcript) { _, _ in
+            comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
         }
         .onDisappear {
             speechCapture.cancelCapture()
@@ -240,6 +244,7 @@ public struct QuestResultSheet: View {
         .accessibilityIdentifier("HollerKitQuestResultSheet")
     }
 
+    /// Finalizes any active speech capture and submits the completed quest run.
     @MainActor
     private func submit() async {
         isSubmitting = true
@@ -248,9 +253,7 @@ public struct QuestResultSheet: View {
 
         do {
             await speechCapture.finalizeIfCapturing()
-            if let transcript = speechCapture.transcript {
-                comment = SpeechCaptureController.mergeTranscript(transcript.text, into: comment)
-            }
+            comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
             _ = try await questState.submitActiveQuest(
                 result: selectedResult,
                 comment: comment,
@@ -262,6 +265,7 @@ public struct QuestResultSheet: View {
         }
     }
 
+    /// Returns the SF Symbol name for a given quest result option.
     private func iconName(for result: QuestResult) -> String {
         switch result {
         case .pass:
@@ -275,6 +279,7 @@ public struct QuestResultSheet: View {
         }
     }
 
+    /// Returns the tint color for a given quest result option.
     private func color(for result: QuestResult) -> Color {
         switch result {
         case .pass:

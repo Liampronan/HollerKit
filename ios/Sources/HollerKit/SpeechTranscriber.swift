@@ -78,19 +78,34 @@ public actor SpeechTranscriber {
         }
 
         let locale = Locale(identifier: options.localeIdentifier)
-        guard let recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer(),
-              recognizer.isAvailable else {
+        var candidates: [SFSpeechRecognizer] = []
+        if let requested = SFSpeechRecognizer(locale: locale) {
+            candidates.append(requested)
+        }
+        if let fallback = SFSpeechRecognizer(),
+           !candidates.contains(where: { $0.locale.identifier == fallback.locale.identifier }) {
+            candidates.append(fallback)
+        }
+        let available = candidates.filter(\.isAvailable)
+        guard !available.isEmpty else {
             throw SpeechTranscriberError.recognizerUnavailable
         }
 
-        if options.requireOnDeviceRecognition, !recognizer.supportsOnDeviceRecognition {
-            throw SpeechTranscriberError.onDeviceRecognitionUnavailable
+        let recognizer: SFSpeechRecognizer
+        if options.requireOnDeviceRecognition {
+            guard let onDevice = available.first(where: \.supportsOnDeviceRecognition) else {
+                throw SpeechTranscriberError.onDeviceRecognitionUnavailable
+            }
+            recognizer = onDevice
+        } else {
+            recognizer = available[0]
         }
 
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.shouldReportPartialResults = options.reportPartialResults
         request.requiresOnDeviceRecognition = options.requireOnDeviceRecognition
         let options = self.options
+        let resolvedLocaleIdentifier = recognizer.locale.identifier
 
         return try await withCheckedThrowingContinuation { continuation in
             let state = RecognitionState()
@@ -108,7 +123,7 @@ public actor SpeechTranscriber {
                 state.resumeOnce {
                     continuation.resume(returning: Self.transcript(
                         from: result,
-                        localeIdentifier: options.localeIdentifier,
+                        localeIdentifier: resolvedLocaleIdentifier,
                         requireOnDeviceRecognition: options.requireOnDeviceRecognition
                     ))
                 }
