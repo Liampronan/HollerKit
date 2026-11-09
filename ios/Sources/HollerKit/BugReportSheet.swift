@@ -246,10 +246,12 @@ final class BugReportDraft: ObservableObject {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per report."
             return false
         }
+        let generation = photoLoadGeneration
         let maxDimension = Self.maxPixelDimension
         let cgImage = await Task.detached(priority: .userInitiated) {
             BugReportImage.downsampledCGImage(from: data, maxPixelDimension: maxDimension)
         }.value
+        guard photoLoadGeneration == generation else { return false }
         if let cgImage {
             return addImage(UIImage(cgImage: cgImage, scale: 1.0, orientation: .up), title: title)
         }
@@ -991,11 +993,13 @@ struct BugReportImage: Identifiable, Hashable {
     #if canImport(UIKit)
     var image: UIImage
 
+    /// Creates a normalized bug report image attachment with the given display title and `UIImage`.
     init(title: String, image: UIImage) {
         self.title = title
         self.image = Self.normalizedImage(image)
     }
 
+    /// Creates a bug report image attachment by downsampling the encoded image data in `attachment`.
     init?(attachment: HollerKitAttachment) {
         guard let image = Self.downsampledImage(from: attachment.data) else { return nil }
         self.title = attachment.filename
@@ -1127,6 +1131,7 @@ struct BugReportImage: Identifiable, Hashable {
         hasher.combine(id)
     }
 
+    /// Builds a sanitized attachment filename using `title` (or `image-<index + 1>`) and `fileExtension`.
     func submissionFilename(index: Int, fileExtension: String = "png") -> String {
         let base = (title as NSString).deletingPathExtension
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1407,6 +1412,7 @@ struct ImageAttachmentThumbnail: View {
     }
 
     #if canImport(UIKit)
+    /// Renders the thumbnail preview image and title caption for an attached photo.
     private var thumbnailContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             Image(uiImage: image.image)

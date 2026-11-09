@@ -173,15 +173,18 @@ private actor OutboxDirectoryCoordinator {
 actor OutboxDirectoryEngine {
     let rootDirectoryURL: URL
     private var activeFlushTask: Task<OutboxFlushResult, Never>?
+    private var latestFlushClient: APIClient?
     private var needsFollowUpFlush = false
     private var inFlightFeedbackIds: Set<UUID> = []
     private var inFlightWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     private var progressCallbacks: [UUID: @Sendable (SubmissionProgressStage) async -> Void] = [:]
 
+    /// Creates a directory-backed outbox engine rooted at `rootDirectoryURL`.
     init(rootDirectoryURL: URL) {
         self.rootDirectoryURL = rootDirectoryURL
     }
 
+    /// Registers or clears the per-item submission progress callback for `feedbackId`.
     func setProgressCallback(
         _ callback: (@Sendable (SubmissionProgressStage) async -> Void)?,
         for feedbackId: UUID
@@ -259,34 +262,37 @@ actor OutboxDirectoryEngine {
         return (feedbackId, revision)
     }
 
+    /// Flushes all pending outbox items to `client`, coalescing concurrent flush requests so every caller
+    /// awaits both the active pass and any follow-up passes triggered while the flush was running.
     func flush(using client: APIClient) async -> OutboxFlushResult {
+        latestFlushClient = client
         if let existingTask = activeFlushTask {
             needsFollowUpFlush = true
-            let existingResult = await existingTask.value
-            if needsFollowUpFlush {
-                let followUpResult = await flush(using: client)
-                return Self.mergeFlushResults(existingResult, followUpResult)
-            }
-            return existingResult
+            return await existingTask.value
         }
 
         let task = Task<OutboxFlushResult, Never> {
-            await runFlushLoop(using: client)
+            await drainFlushLoop(initialClient: client)
         }
         activeFlushTask = task
-        var result = await task.value
-        while needsFollowUpFlush {
-            let followUpTask = Task<OutboxFlushResult, Never> {
-                await runFlushLoop(using: client)
-            }
-            activeFlushTask = followUpTask
-            let followUpResult = await followUpTask.value
-            result = Self.mergeFlushResults(result, followUpResult)
-        }
-        activeFlushTask = nil
-        return result
+        return await task.value
     }
 
+    /// Runs `runFlushLoop` repeatedly until `needsFollowUpFlush` remains `false` at pass completion,
+    /// merging results across passes before clearing `activeFlushTask`.
+    private func drainFlushLoop(initialClient: APIClient) async -> OutboxFlushResult {
+        var combinedResult = OutboxFlushResult()
+        repeat {
+            let currentClient = latestFlushClient ?? initialClient
+            let passResult = await runFlushLoop(using: currentClient)
+            combinedResult = Self.mergeFlushResults(combinedResult, passResult)
+        } while needsFollowUpFlush
+        activeFlushTask = nil
+        latestFlushClient = nil
+        return combinedResult
+    }
+
+    /// Merges two consecutive `OutboxFlushResult` values from coalesced flush passes.
     private static func mergeFlushResults(
         _ first: OutboxFlushResult,
         _ second: OutboxFlushResult
@@ -569,6 +575,7 @@ actor OutboxDirectoryEngine {
 
         var uploadedAttachments: [FeedbackAttachmentInput] = []
         uploadedAttachments.reserveCapacity(envelope.attachmentManifests.count)
+        var reusedManifestIndices: [Int] = []
         let progressCallback = progressCallbacks[envelope.feedbackId]
 
         if !envelope.attachmentManifests.isEmpty {
@@ -582,6 +589,7 @@ actor OutboxDirectoryEngine {
 
             if let cachedKey = manifest.uploadedKey,
                Self.isUploadGrantStillReusable(expiresAt: manifest.uploadedExpiresAt) {
+                reusedManifestIndices.append(idx)
                 uploadedAttachments.append(FeedbackAttachmentInput(
                     key: cachedKey,
                     kind: manifest.kind,
@@ -648,21 +656,31 @@ actor OutboxDirectoryEngine {
             try? writeEnvelope(envelope, to: item.directoryURL)
             return response
         } catch let apiError as HollerKitAPIError where apiError.isExpiredOrConsumedGrantError {
-            for index in envelope.attachmentManifests.indices {
+            let indicesToRefresh: [Int]
+            if !reusedManifestIndices.isEmpty {
+                indicesToRefresh = reusedManifestIndices
+            } else if envelope.request.attachments.isEmpty {
+                indicesToRefresh = Array(envelope.attachmentManifests.indices)
+            } else {
+                indicesToRefresh = []
+            }
+
+            guard allowGrantRefreshRetry, !indicesToRefresh.isEmpty else {
+                throw apiError
+            }
+
+            for index in indicesToRefresh {
                 envelope.attachmentManifests[index].uploadedKey = nil
                 envelope.attachmentManifests[index].uploadedExpiresAt = nil
             }
             try? writeEnvelope(envelope, to: item.directoryURL)
-            if allowGrantRefreshRetry && !envelope.attachmentManifests.isEmpty {
-                let refreshedItem = StoredOutboxItem(directoryURL: item.directoryURL, envelope: envelope)
-                return try await flushSingleItem(
-                    refreshedItem,
-                    token: token,
-                    using: client,
-                    allowGrantRefreshRetry: false
-                )
-            }
-            throw apiError
+            let refreshedItem = StoredOutboxItem(directoryURL: item.directoryURL, envelope: envelope)
+            return try await flushSingleItem(
+                refreshedItem,
+                token: token,
+                using: client,
+                allowGrantRefreshRetry: false
+            )
         }
     }
 

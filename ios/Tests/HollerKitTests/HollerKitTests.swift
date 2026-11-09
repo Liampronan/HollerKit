@@ -1712,6 +1712,8 @@ final class HollerKitTests: XCTestCase {
 
     #if canImport(UIKit)
     @MainActor
+    /// Verifies attaching photos, pasting from the clipboard, removing attachments, downsampling/JPEG compression,
+    /// and automatic upload-grant refresh when submitting an image-only report.
     func testBugReportDraftAttachPasteRemoveAndCompressImages() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("HollerKitTests-PhotoAttach-\(UUID().uuidString)", isDirectory: true)
@@ -1720,6 +1722,7 @@ final class HollerKitTests: XCTestCase {
 
         let uploadedMimeTypesBox = LockedBox<[String]>([])
         let uploadedPutSizesBox = LockedBox<[Int]>([])
+        let issuedGrantKeysBox = LockedBox<[String]>([])
         let submittedAttachmentsBox = LockedBox<[[String: Any]]>([])
         let simulateExpiredGrantOnceBox = LockedBox<Bool>(true)
 
@@ -1732,10 +1735,12 @@ final class HollerKitTests: XCTestCase {
                 if let mimeType = json["mimeType"] as? String {
                     uploadedMimeTypesBox.withLock { $0.append(mimeType) }
                 }
+                let grantKey = "uploads/image-\(UUID().uuidString)"
+                issuedGrantKeysBox.withLock { $0.append(grantKey) }
                 let grantJSON: [String: Any] = [
                     "ok": true,
                     "url": "https://upload.hollerkit.test/put/\(UUID().uuidString)",
-                    "key": "uploads/image-\(UUID().uuidString)",
+                    "key": grantKey,
                     "expiresAt": "2099-01-01T00:00:00Z"
                 ]
                 let data = try JSONSerialization.data(withJSONObject: grantJSON)
@@ -1906,8 +1911,13 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(uploadedSizes.count, 4)
         XCTAssertTrue(uploadedSizes.allSatisfy { $0 > 0 })
         XCTAssertNotEqual(uploadedSizes[0], uploadedSizes[1], "Distinct images should produce distinct upload payloads")
+        let issuedGrantKeys = issuedGrantKeysBox.withLock { $0 }
+        XCTAssertEqual(issuedGrantKeys.count, 4)
         let submittedAttachments = submittedAttachmentsBox.withLock { $0 }
         XCTAssertEqual(submittedAttachments.count, 2)
+        let submittedKeys = submittedAttachments.compactMap { $0["key"] as? String }
+        XCTAssertEqual(submittedKeys, Array(issuedGrantKeys.suffix(2)))
+        XCTAssertNotEqual(submittedKeys, Array(issuedGrantKeys.prefix(2)))
         XCTAssertNotEqual(submittedAttachments[0]["key"] as? String, submittedAttachments[1]["key"] as? String)
     }
     #endif
