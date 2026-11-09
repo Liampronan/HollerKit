@@ -1709,4 +1709,216 @@ final class HollerKitTests: XCTestCase {
         XCTAssertNil(failedSpeechDraft.submissionOutcome)
         XCTAssertEqual(receivedRequestsBox.withLock { $0.count }, 4)
     }
+
+    #if canImport(UIKit)
+    @MainActor
+    /// Verifies attaching photos, pasting from the clipboard, removing attachments, downsampling/JPEG compression,
+    /// and automatic upload-grant refresh when submitting an image-only report.
+    func testBugReportDraftAttachPasteRemoveAndCompressImages() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitTests-PhotoAttach-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let uploadedMimeTypesBox = LockedBox<[String]>([])
+        let uploadedPutSizesBox = LockedBox<[Int]>([])
+        let issuedGrantKeysBox = LockedBox<[String]>([])
+        let submittedAttachmentsBox = LockedBox<[[String: Any]]>([])
+        let simulateExpiredGrantOnceBox = LockedBox<Bool>(true)
+
+        StubURLProtocol.setHandler { request, bodyData in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            if url.path == "/v1/uploads" {
+                let json = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                if let mimeType = json["mimeType"] as? String {
+                    uploadedMimeTypesBox.withLock { $0.append(mimeType) }
+                }
+                let grantKey = "uploads/image-\(UUID().uuidString)"
+                issuedGrantKeysBox.withLock { $0.append(grantKey) }
+                let grantJSON: [String: Any] = [
+                    "ok": true,
+                    "url": "https://upload.hollerkit.test/put/\(UUID().uuidString)",
+                    "key": grantKey,
+                    "expiresAt": "2099-01-01T00:00:00Z"
+                ]
+                let data = try JSONSerialization.data(withJSONObject: grantJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            if url.host == "upload.hollerkit.test" {
+                uploadedPutSizesBox.withLock { $0.append(bodyData?.count ?? 0) }
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data())
+            }
+            if url.path == "/v1/feedback" {
+                let shouldRejectWithExpiredGrant = simulateExpiredGrantOnceBox.withLock { value -> Bool in
+                    if value {
+                        value = false
+                        return true
+                    }
+                    return false
+                }
+                if shouldRejectWithExpiredGrant {
+                    let errorJSON: [String: Any] = [
+                        "ok": false,
+                        "error": [
+                            "code": "expired_or_consumed_grant",
+                            "message": "Attachment grant has expired."
+                        ]
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: errorJSON)
+                    let response = HTTPURLResponse(url: url, statusCode: 400, httpVersion: nil, headerFields: nil)!
+                    return (response, data)
+                }
+
+                let json = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                let feedbackId = (json["id"] as? String) ?? UUID().uuidString.lowercased()
+                let build = (json["build"] as? String) ?? "1"
+                let attachments = (json["attachments"] as? [[String: Any]]) ?? []
+                submittedAttachmentsBox.withLock { $0 = attachments }
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": feedbackId,
+                        "kind": "report",
+                        "build": build,
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-08T20:00:00Z",
+                        "updatedAt": "2026-11-08T20:00:00Z"
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let session = makeStubSession()
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        )
+
+        let draft = BugReportDraft(configuration: config)
+        draft.autoDismissDelaySeconds = 0
+        XCTAssertTrue(draft.images.isEmpty)
+        XCTAssertTrue(draft.canAddMoreImages)
+        XCTAssertEqual(draft.remainingImageSlots, 12)
+        XCTAssertFalse(draft.canSubmit(configuration: config))
+
+        // 1. Add Photo via Data enables submission even with an empty comment
+        let smallImage = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { ctx in
+            UIColor.systemBlue.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+        }
+        let smallPNGData = try XCTUnwrap(smallImage.pngData())
+        XCTAssertTrue(draft.addImageData(smallPNGData))
+        XCTAssertEqual(draft.images.count, 1)
+        XCTAssertEqual(draft.images[0].title, "Photo 1")
+        XCTAssertTrue(draft.canSubmit(configuration: config))
+
+        // 2. Paste images from clipboard joins the list and can be annotated or removed
+        let pastedImage = UIGraphicsImageRenderer(size: CGSize(width: 60, height: 60)).image { ctx in
+            UIColor.systemGreen.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 60, height: 60))
+        }
+        let pastedCount = draft.pasteImagesFromClipboard(images: [pastedImage])
+        XCTAssertEqual(pastedCount, 1)
+        XCTAssertEqual(draft.images.count, 2)
+        XCTAssertEqual(draft.images[1].title, "Pasted Image 2")
+
+        // Annotating replaces the image in-place
+        let annotatedImage = UIGraphicsImageRenderer(size: CGSize(width: 80, height: 80)).image { ctx in
+            UIColor.systemRed.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 80, height: 80))
+        }
+        draft.replaceImage(id: draft.images[1].id, with: annotatedImage)
+        XCTAssertEqual(draft.images[1].image.size.width, 80)
+
+        // Removing the first image leaves only the pasted/annotated image
+        let firstId = draft.images[0].id
+        draft.selectedImage = draft.images[0]
+        draft.removeImage(id: firstId)
+        XCTAssertNil(draft.selectedImage)
+        XCTAssertEqual(draft.images.count, 1)
+        XCTAssertEqual(draft.images[0].title, "Pasted Image 2")
+
+        // 3. Oversized images are downscaled to maxPixelDimension and compressed to JPEG when PNG exceeds threshold
+        let oversizedFormat = UIGraphicsImageRendererFormat.default()
+        oversizedFormat.scale = 1.0
+        let oversizedImage = UIGraphicsImageRenderer(
+            size: CGSize(width: 3600, height: 2700),
+            format: oversizedFormat
+        ).image { ctx in
+            UIColor.systemOrange.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 3600, height: 2700))
+        }
+        let normalized = BugReportImage.normalizedImage(oversizedImage)
+        XCTAssertEqual(normalized.size.width * normalized.scale, 2400, accuracy: 1.0)
+        XCTAssertEqual(normalized.size.height * normalized.scale, 1800, accuracy: 1.0)
+
+        let bugImage = BugReportImage(title: "Camera Photo", image: oversizedImage)
+        let jpegAttachment = try XCTUnwrap(bugImage.encodedAttachment(
+            index: 0,
+            maxBytes: 250_000,
+            preferredPNGMaxBytes: 100
+        ))
+        XCTAssertEqual(jpegAttachment.mimeType, "image/jpeg")
+        XCTAssertEqual(jpegAttachment.filename, "Camera Photo.jpg")
+        XCTAssertLessThanOrEqual(jpegAttachment.data.count, 250_000)
+
+        // 4. Cap at 12 images per report
+        let extraImages = (0..<15).map { _ in smallImage }
+        let addedFromBatch = draft.pasteImagesFromClipboard(images: extraImages)
+        XCTAssertEqual(addedFromBatch, 11)
+        XCTAssertEqual(draft.images.count, BugReportDraft.maxAttachments)
+        XCTAssertFalse(draft.canAddMoreImages)
+        XCTAssertEqual(draft.remainingImageSlots, 0)
+        XCTAssertNotNil(draft.attachmentStatusMessage)
+        XCTAssertFalse(draft.addImage(smallImage))
+
+        // Remove 10 images so we submit 2 distinct attached images (annotated 80x80 + small 40x40)
+        while draft.images.count > 2 {
+            draft.removeImage(id: draft.images.last!.id)
+        }
+        XCTAssertEqual(draft.images.count, 2)
+        XCTAssertTrue(draft.canAddMoreImages)
+        XCTAssertNil(draft.attachmentStatusMessage)
+
+        // 5. Submit image-only report through OutboxStore (including automatic retry when an upload grant expires)
+        let outbox = OutboxStore(rootDirectoryURL: tempDir)
+        await draft.submit(
+            configuration: config,
+            breadcrumbs: BreadcrumbStore(),
+            outboxStore: outbox
+        )
+        guard case .sent = draft.submissionOutcome else {
+            XCTFail("Expected image-only report submission to succeed, got \(String(describing: draft.submissionOutcome))")
+            return
+        }
+        XCTAssertTrue(draft.images.isEmpty)
+        // 2 initial uploads + 2 refreshed-grant uploads after expired_or_consumed_grant = 4 uploads
+        XCTAssertEqual(uploadedMimeTypesBox.withLock { $0 }, ["image/png", "image/png", "image/png", "image/png"])
+        let uploadedSizes = uploadedPutSizesBox.withLock { $0 }
+        XCTAssertEqual(uploadedSizes.count, 4)
+        XCTAssertTrue(uploadedSizes.allSatisfy { $0 > 0 })
+        XCTAssertNotEqual(uploadedSizes[0], uploadedSizes[1], "Distinct images should produce distinct upload payloads")
+        let issuedGrantKeys = issuedGrantKeysBox.withLock { $0 }
+        XCTAssertEqual(issuedGrantKeys.count, 4)
+        let submittedAttachments = submittedAttachmentsBox.withLock { $0 }
+        XCTAssertEqual(submittedAttachments.count, 2)
+        let submittedKeys = submittedAttachments.compactMap { $0["key"] as? String }
+        XCTAssertEqual(submittedKeys, Array(issuedGrantKeys.suffix(2)))
+        XCTAssertNotEqual(submittedKeys, Array(issuedGrantKeys.prefix(2)))
+        XCTAssertNotEqual(submittedAttachments[0]["key"] as? String, submittedAttachments[1]["key"] as? String)
+    }
+    #endif
 }

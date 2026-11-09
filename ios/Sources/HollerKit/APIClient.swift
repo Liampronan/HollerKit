@@ -42,6 +42,15 @@ public enum HollerKitAPIError: Error, LocalizedError, Sendable, Equatable {
         }
     }
 
+    /// Returns `true` when the server rejected an attachment key because its upload grant expired or was already consumed.
+    public var isExpiredOrConsumedGrantError: Bool {
+        if case .serverError(_, let code, _) = self {
+            return code == "expired_or_consumed_grant"
+        }
+        return false
+    }
+
+    /// Returns `true` when the HTTP status code indicates a permanent client validation error.
     public var isPermanentValidationError: Bool {
         guard let statusCode else { return false }
         return statusCode == 400 || statusCode == 413 || statusCode == 415 || statusCode == 422
