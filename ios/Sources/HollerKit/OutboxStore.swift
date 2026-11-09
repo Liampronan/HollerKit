@@ -151,7 +151,7 @@ public struct OutboxFlushResult: Sendable, Equatable {
 
 public enum OutboxSubmissionOutcome: Sendable, Equatable {
     case sent(FeedbackSubmissionResponse)
-    case queued(feedbackId: UUID, reason: String?)
+    case queued(feedbackId: UUID, reason: String?, isAuthenticationError: Bool = false)
 }
 
 private actor OutboxDirectoryCoordinator {
@@ -176,9 +176,17 @@ actor OutboxDirectoryEngine {
     private var needsFollowUpFlush = false
     private var inFlightFeedbackIds: Set<UUID> = []
     private var inFlightWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var progressCallbacks: [UUID: @Sendable (SubmissionProgressStage) async -> Void] = [:]
 
     init(rootDirectoryURL: URL) {
         self.rootDirectoryURL = rootDirectoryURL
+    }
+
+    func setProgressCallback(
+        _ callback: (@Sendable (SubmissionProgressStage) async -> Void)?,
+        for feedbackId: UUID
+    ) {
+        progressCallbacks[feedbackId] = callback
     }
 
     func enqueue(
@@ -516,6 +524,11 @@ actor OutboxDirectoryEngine {
 
         var uploadedAttachments: [FeedbackAttachmentInput] = []
         uploadedAttachments.reserveCapacity(envelope.attachmentManifests.count)
+        let progressCallback = progressCallbacks[envelope.feedbackId]
+
+        if !envelope.attachmentManifests.isEmpty {
+            await progressCallback?(.uploadingAttachments(count: envelope.attachmentManifests.count))
+        }
 
         for idx in envelope.attachmentManifests.indices {
             let manifest = envelope.attachmentManifests[idx]
@@ -562,6 +575,8 @@ actor OutboxDirectoryEngine {
                 videoStartOffsetSeconds: manifest.videoStartOffsetSeconds
             ))
         }
+
+        await progressCallback?(.sending)
 
         var finalRequest = envelope.request
         finalRequest.id = envelope.feedbackId.uuidString.lowercased()
@@ -668,7 +683,8 @@ public actor OutboxStore {
         request: FeedbackSubmissionRequest,
         attachments: [OutboxAttachmentPayload] = [],
         questManifestEntry: QuestManifestEntry? = nil,
-        using client: APIClient
+        using client: APIClient,
+        onProgress: (@Sendable (SubmissionProgressStage) async -> Void)? = nil
     ) async throws -> OutboxSubmissionOutcome {
         let engine = await OutboxDirectoryCoordinator.shared.engine(for: rootDirectoryURL)
         let (feedbackId, revision) = try await engine.enqueue(
@@ -678,7 +694,9 @@ public actor OutboxStore {
             serverURL: client.server.absoluteString,
             createdAt: Date()
         )
+        await engine.setProgressCallback(onProgress, for: feedbackId)
         let flushResult = await engine.flush(using: client)
+        await engine.setProgressCallback(nil, for: feedbackId)
         if let rejectedError = flushResult.rejectedErrors[feedbackId] {
             throw rejectedError
         }
@@ -686,7 +704,11 @@ public actor OutboxStore {
            let response = flushResult.responses[feedbackId] {
             return .sent(response)
         }
-        return .queued(feedbackId: feedbackId, reason: flushResult.lastError)
+        return .queued(
+            feedbackId: feedbackId,
+            reason: flushResult.lastError,
+            isAuthenticationError: flushResult.isAuthenticationError
+        )
     }
 
     @discardableResult

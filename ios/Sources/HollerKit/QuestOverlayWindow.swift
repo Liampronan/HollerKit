@@ -513,6 +513,7 @@ private struct QuestOverlayRootView: View {
             )
         ) {
             QuestResultSheet(questState: questState)
+                .id(questState.activeQuest?.id)
         }
     }
 }

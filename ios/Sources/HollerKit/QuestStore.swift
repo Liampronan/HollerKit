@@ -542,7 +542,9 @@ public final class HollerKitQuestState: ObservableObject {
         result: QuestResult,
         comment: String?,
         transcript: HollerKitTranscript?,
-        endedAt: Date = Date()
+        endedAt: Date = Date(),
+        clearActiveSessionImmediately: Bool = true,
+        onProgress: (@Sendable (SubmissionProgressStage) async -> Void)? = nil
     ) async throws -> OutboxSubmissionOutcome {
         guard HollerKit.reconcileEnablement(),
               let session = activeQuest,
@@ -607,7 +609,8 @@ public final class HollerKitQuestState: ObservableObject {
             request: request,
             attachments: attachments,
             questManifestEntry: unconfirmedManifestEntry,
-            using: client
+            using: client,
+            onProgress: onProgress
         )
 
         recordLocalResult(
@@ -616,13 +619,23 @@ public final class HollerKitQuestState: ObservableObject {
             contentHash: session.quest.contentHash,
             build: build
         )
-        if activeQuest?.id == session.id {
+        HollerKit.endQuestBreadcrumbs()
+        if clearActiveSessionImmediately {
+            completeSubmittedSession(id: session.id)
+        }
+
+        return outcome
+    }
+
+    /// Completes teardown of an active quest session after its result confirmation has been shown.
+    public func completeSubmittedSession(id: UUID) {
+        if activeQuest?.id == id {
             activeQuest = nil
         }
         HollerKit.endQuestBreadcrumbs()
-        QuestOverlayWindowManager.shared.hide()
-
-        return outcome
+        if activeQuest == nil {
+            QuestOverlayWindowManager.shared.hide()
+        }
     }
 
     public func recordLocalResult(
