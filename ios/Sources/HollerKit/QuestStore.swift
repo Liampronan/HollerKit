@@ -543,7 +543,8 @@ public final class HollerKitQuestState: ObservableObject {
         comment: String?,
         transcript: HollerKitTranscript?,
         endedAt: Date = Date(),
-        clearActiveSessionImmediately: Bool = true
+        clearActiveSessionImmediately: Bool = true,
+        onProgress: (@Sendable (SubmissionProgressStage) async -> Void)? = nil
     ) async throws -> OutboxSubmissionOutcome {
         guard HollerKit.reconcileEnablement(),
               let session = activeQuest,
@@ -608,7 +609,8 @@ public final class HollerKitQuestState: ObservableObject {
             request: request,
             attachments: attachments,
             questManifestEntry: unconfirmedManifestEntry,
-            using: client
+            using: client,
+            onProgress: onProgress
         )
 
         recordLocalResult(

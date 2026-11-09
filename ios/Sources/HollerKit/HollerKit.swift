@@ -303,8 +303,9 @@ final class HollerKitPresenterState: ObservableObject {
         activeDraft.cancelCapture()
         pendingAttachments = []
         presentationId = UUID()
+        let enabledConfiguration = (configuration?.isEnabled() == true) ? configuration : nil
         activeDraft = BugReportDraft(
-            configuration: configuration,
+            configuration: enabledConfiguration,
             invocationAttachments: []
         )
     }

@@ -849,10 +849,11 @@ final class HollerKitTests: XCTestCase {
             using: client
         )
 
-        guard case .queued(let queuedId, _) = initialOutcome else {
+        guard case .queued(let queuedId, _, let isAuthError) = initialOutcome else {
             XCTFail("Expected submission to remain queued in outbox when auth() returns nil")
             return
         }
+        XCTAssertTrue(isAuthError)
 
         let pendingCountWhileSignedOut = await outbox.pendingCount()
         XCTAssertEqual(pendingCountWhileSignedOut, 1)
@@ -1599,7 +1600,10 @@ final class HollerKitTests: XCTestCase {
 
         // Inputs are cleared immediately after submit so stale text never remains in the comment box
         XCTAssertEqual(firstDraft.comment, "")
-        XCTAssertNotNil(firstDraft.submissionOutcome)
+        guard case .sent = firstDraft.submissionOutcome else {
+            XCTFail("Expected first submission outcome to be .sent, got \(String(describing: firstDraft.submissionOutcome))")
+            return
+        }
         XCTAssertFalse(firstDraft.canSubmit(configuration: config))
 
         // 2. Second shake presentation creates a fresh empty draft and new presentationId
@@ -1619,7 +1623,10 @@ final class HollerKitTests: XCTestCase {
             outboxStore: HollerKit.currentOutboxStore
         )
         XCTAssertEqual(secondDraft.comment, "")
-        XCTAssertNotNil(secondDraft.submissionOutcome)
+        guard case .sent = secondDraft.submissionOutcome else {
+            XCTFail("Expected second submission outcome to be .sent, got \(String(describing: secondDraft.submissionOutcome))")
+            return
+        }
 
         // 3. "Send Another" within the same sheet resets the draft and sends a third distinct report
         secondDraft.resetForAnotherReport(configuration: config)
@@ -1632,10 +1639,20 @@ final class HollerKitTests: XCTestCase {
             outboxStore: HollerKit.currentOutboxStore
         )
         XCTAssertEqual(secondDraft.comment, "")
-        XCTAssertNotNil(secondDraft.submissionOutcome)
+        guard case .sent = secondDraft.submissionOutcome else {
+            XCTFail("Expected third submission outcome to be .sent, got \(String(describing: secondDraft.submissionOutcome))")
+            return
+        }
 
-        // 4. Swipe-to-dismiss followed by presenting again starts empty and sends a fourth distinct report
+        // 4. Swipe-to-dismiss on a populated unsent draft clears the draft before presenting again
+        secondDraft.resetForAnotherReport(configuration: config)
+        secondDraft.comment = "Unsent text before swipe dismiss"
+        XCTAssertEqual(HollerKit.currentBugReportDraft.comment, "Unsent text before swipe dismiss")
+        HollerKit.presenterState.isPresented = false
         HollerKit.clearPresentationAttachments()
+        XCTAssertFalse(HollerKit.presenterState.isPresented)
+        XCTAssertEqual(HollerKit.currentBugReportDraft.comment, "")
+
         HollerKit.presentBugReport()
         let fourthDraft = HollerKit.currentBugReportDraft
         fourthDraft.autoDismissDelaySeconds = 0
@@ -1647,6 +1664,11 @@ final class HollerKitTests: XCTestCase {
             breadcrumbs: HollerKit.currentBreadcrumbs,
             outboxStore: HollerKit.currentOutboxStore
         )
+        XCTAssertEqual(fourthDraft.comment, "")
+        guard case .sent = fourthDraft.submissionOutcome else {
+            XCTFail("Expected fourth submission outcome to be .sent, got \(String(describing: fourthDraft.submissionOutcome))")
+            return
+        }
 
         let submittedRequests = receivedRequestsBox.withLock { $0 }
         XCTAssertEqual(submittedRequests.count, 4)
@@ -1659,5 +1681,32 @@ final class HollerKitTests: XCTestCase {
         ])
         let ids = Set(submittedRequests.compactMap { $0["id"] as? String })
         XCTAssertEqual(ids.count, 4, "Each submitted report must have a distinct feedback UUID")
+
+        // 5. Speech finalization failure during submit preserves partialTranscript and comment without sending
+        let failedSpeechDraft = BugReportDraft(configuration: config)
+        failedSpeechDraft.comment = "Typed note before dictation failed"
+        let speechState = LiveRecognitionState()
+        failedSpeechDraft.speechCapture.capture.startForTesting(
+            state: speechState,
+            options: SpeechTranscriberOptions(locale: Locale(identifier: "en_US"))
+        )
+        failedSpeechDraft.speechCapture.isCapturing = true
+        speechState.recordResult(text: "Partial dictated words", confidence: 0.85, isFinal: false)
+        speechState.recordError(NSError(
+            domain: "kAFAssistantErrorDomain",
+            code: 1101,
+            userInfo: [NSLocalizedDescriptionKey: "Speech recognition failed on stop"]
+        ))
+
+        await failedSpeechDraft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore
+        )
+        XCTAssertEqual(failedSpeechDraft.comment, "Typed note before dictation failed")
+        XCTAssertEqual(failedSpeechDraft.speechCapture.partialTranscript, "Partial dictated words")
+        XCTAssertNotNil(failedSpeechDraft.speechCapture.errorMessage)
+        XCTAssertNil(failedSpeechDraft.submissionOutcome)
+        XCTAssertEqual(receivedRequestsBox.withLock { $0.count }, 4)
     }
 }

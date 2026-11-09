@@ -5,13 +5,13 @@ import UIKit
 #endif
 
 /// Progress stages displayed while a bug report or quest run is being submitted.
-enum SubmissionProgressStage: Equatable, Sendable {
+public enum SubmissionProgressStage: Equatable, Sendable {
     case preparing
     case uploadingAttachments(count: Int)
     case sending
 
     /// Human-readable headline for the current submission stage.
-    var title: String {
+    public var title: String {
         switch self {
         case .preparing:
             return "Preparing feedback..."
@@ -85,6 +85,7 @@ final class BugReportDraft: ObservableObject {
     ) {
         guard !didLoadInitialImages else { return }
         didLoadInitialImages = true
+        guard configuration?.isEnabled() != false else { return }
         guard !Self.isAudioOnly(configuration: configuration) else { return }
         #if canImport(UIKit)
         let configuredImages = configuration?.initialImages() ?? []
@@ -186,7 +187,16 @@ final class BugReportDraft: ObservableObject {
         }
 
         do {
+            let wasCapturing = speechCapture.isCapturing
+                || speechCapture.isStopping
+                || speechCapture.capture.isCapturing
+                || speechCapture.capture.isStopping
             await speechCapture.finalizeIfCapturing()
+            if wasCapturing && speechCapture.errorMessage != nil {
+                SubmissionHaptics.notifyError()
+                return
+            }
+
             let audioOnly = Self.isAudioOnly(configuration: configuration)
             if !audioOnly {
                 comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
@@ -197,11 +207,12 @@ final class BugReportDraft: ObservableObject {
             let attachmentsToUpload = audioOnly ? [] : imageAttachments()
             let transcriptToSubmit = speechCapture.transcript
 
-            if !attachmentsToUpload.isEmpty {
-                submissionStage = .uploadingAttachments(count: attachmentsToUpload.count)
-                await Task.yield()
+            if audioOnly {
+                guard transcriptToSubmit != nil else { return }
             } else {
-                submissionStage = .sending
+                guard normalizedComment != nil || !attachmentsToUpload.isEmpty || transcriptToSubmit != nil else {
+                    return
+                }
             }
 
             let payload = HollerKitReportPayload(
@@ -213,12 +224,19 @@ final class BugReportDraft: ObservableObject {
                 images: attachmentsToUpload
             )
             let (request, attachments) = payload.toFeedbackSubmission()
-            submissionStage = .sending
+            submissionStage = attachments.isEmpty
+                ? .sending
+                : .uploadingAttachments(count: attachments.count)
             let client = APIClient(configuration: configuration)
             let outcome = try await outboxStore.submit(
                 request: request,
                 attachments: attachments,
-                using: client
+                using: client,
+                onProgress: { [weak self] stage in
+                    await MainActor.run {
+                        self?.submissionStage = stage
+                    }
+                }
             )
 
             clearInputsAfterSubmission()
@@ -423,7 +441,7 @@ public struct BugReportSheet: View {
                                     Label("Retry Submission", systemImage: "arrow.clockwise")
                                         .font(.footnote.weight(.semibold))
                                 }
-                                .disabled(draft.isSubmitting || speechCapture.isStopping)
+                                .disabled(!canSubmit)
                                 .accessibilityIdentifier("HollerKitRetrySubmitButton")
                             }
                         }
@@ -613,8 +631,8 @@ struct SubmissionFeedbackOverlayView: View {
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("HollerKitSubmissionReceiptText")
 
-                    case .queued(_, let reason):
-                        let isAuthFailure = Self.isAuthenticationFailureReason(reason)
+                    case .queued(_, let reason, let isAuthenticationError):
+                        let isAuthFailure = isAuthenticationError || Self.isAuthenticationFailureReason(reason)
                         Image(systemName: isAuthFailure ? "person.badge.key.fill" : "tray.and.arrow.up.fill")
                             .font(.system(size: 50))
                             .foregroundStyle(.orange)
@@ -632,7 +650,7 @@ struct SubmissionFeedbackOverlayView: View {
 
                         Text(
                             isAuthFailure
-                                ? "Your feedback is stored on this device and will send automatically once you sign in."
+                                ? "Your feedback is stored on this device. Sign in, then reopen the app or submit again to finish sending."
                                 : "Your feedback is stored on this device and will send automatically when your connection returns."
                         )
                         .font(.subheadline)
@@ -867,6 +885,7 @@ final class SpeechCaptureController: ObservableObject {
 
         autoStopTask?.cancel()
         autoStopTask = nil
+        errorMessage = nil
         isStopping = true
 
         let task = Task { @MainActor [weak self] in

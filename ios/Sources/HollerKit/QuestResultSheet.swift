@@ -333,23 +333,33 @@ public struct QuestResultSheet: View {
         }
 
         do {
+            let wasCapturing = speechCapture.isCapturing
+                || speechCapture.isStopping
+                || speechCapture.capture.isCapturing
+                || speechCapture.capture.isStopping
             await speechCapture.finalizeIfCapturing()
+            if wasCapturing && speechCapture.errorMessage != nil {
+                SubmissionHaptics.notifyError()
+                return
+            }
+
             comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
             let markCount = session.marks.filter { !$0.imageData.isEmpty }.count
-            if markCount > 0 {
-                submissionStage = .uploadingAttachments(count: markCount)
-                await Task.yield()
-            } else {
-                submissionStage = .sending
-            }
+            submissionStage = markCount > 0
+                ? .uploadingAttachments(count: markCount)
+                : .sending
             let commentToSubmit = comment
             let transcriptToSubmit = speechCapture.transcript
-            submissionStage = .sending
             let outcome = try await questState.submitActiveQuest(
                 result: selectedResult,
                 comment: commentToSubmit,
                 transcript: transcriptToSubmit,
-                clearActiveSessionImmediately: false
+                clearActiveSessionImmediately: false,
+                onProgress: { stage in
+                    await MainActor.run {
+                        submissionStage = stage
+                    }
+                }
             )
             submittedSessionId = session.id
             speechCapture.reset()
