@@ -1012,7 +1012,9 @@ struct BugReportImage: Identifiable, Hashable {
         let sourceOptions: [CFString: Any] = [
             kCGImageSourceShouldCache: false
         ]
-        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary),
+              CGImageSourceGetStatus(source) == .statusComplete,
+              CGImageSourceGetCount(source) > 0 else {
             return nil
         }
         let maxPixelSize = max(1, Int(maxPixelDimension.rounded()))

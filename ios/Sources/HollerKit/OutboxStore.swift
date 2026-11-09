@@ -262,16 +262,60 @@ actor OutboxDirectoryEngine {
     func flush(using client: APIClient) async -> OutboxFlushResult {
         if let existingTask = activeFlushTask {
             needsFollowUpFlush = true
-            return await existingTask.value
+            let existingResult = await existingTask.value
+            if needsFollowUpFlush {
+                let followUpResult = await flush(using: client)
+                return Self.mergeFlushResults(existingResult, followUpResult)
+            }
+            return existingResult
         }
 
         let task = Task<OutboxFlushResult, Never> {
             await runFlushLoop(using: client)
         }
         activeFlushTask = task
-        let result = await task.value
+        var result = await task.value
+        while needsFollowUpFlush {
+            let followUpTask = Task<OutboxFlushResult, Never> {
+                await runFlushLoop(using: client)
+            }
+            activeFlushTask = followUpTask
+            let followUpResult = await followUpTask.value
+            result = Self.mergeFlushResults(result, followUpResult)
+        }
         activeFlushTask = nil
         return result
+    }
+
+    private static func mergeFlushResults(
+        _ first: OutboxFlushResult,
+        _ second: OutboxFlushResult
+    ) -> OutboxFlushResult {
+        var flushedIds = first.flushedIds
+        for id in second.flushedIds where !flushedIds.contains(id) {
+            flushedIds.append(id)
+        }
+        var responses = first.responses
+        for (id, response) in second.responses {
+            responses[id] = response
+        }
+        var flushedRevisions = first.flushedRevisions
+        for (id, rev) in second.flushedRevisions {
+            flushedRevisions[id] = rev
+        }
+        var rejectedErrors = first.rejectedErrors
+        for (id, err) in second.rejectedErrors {
+            rejectedErrors[id] = err
+        }
+        return OutboxFlushResult(
+            flushedIds: flushedIds,
+            responses: responses,
+            flushedRevisions: flushedRevisions,
+            rejectedErrors: rejectedErrors,
+            remainingCount: second.remainingCount,
+            lastError: second.lastError ?? first.lastError,
+            isAuthenticationError: first.isAuthenticationError || second.isAuthenticationError
+        )
     }
 
     func pendingEnvelopes() -> [OutboxEnvelope] {
