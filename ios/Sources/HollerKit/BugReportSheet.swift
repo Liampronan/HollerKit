@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if canImport(PhotosUI)
+import PhotosUI
+#endif
+
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -50,10 +54,17 @@ enum SubmissionHaptics {
 /// Holds the mutable form state and submission lifecycle for a bug report presentation.
 @MainActor
 final class BugReportDraft: ObservableObject {
+    nonisolated static let maxAttachments = 12
+    nonisolated static let maxAttachmentBytes = 10 * 1024 * 1024
+    nonisolated static let preferredPNGMaxBytes = 2 * 1024 * 1024
+    nonisolated static let maxPixelDimension: CGFloat = 2400
+
     let id = UUID()
     @Published var comment = ""
     @Published var images: [BugReportImage] = []
     @Published var selectedImage: BugReportImage?
+    @Published var isLoadingAttachments = false
+    @Published var attachmentStatusMessage: String?
     @Published var isSubmitting = false
     @Published var submissionStage: SubmissionProgressStage?
     @Published var submissionError: String?
@@ -61,9 +72,21 @@ final class BugReportDraft: ObservableObject {
 
     let speechCapture = SpeechCaptureController()
     var autoDismissDelaySeconds: TimeInterval = 1.2
+    private(set) var photoLoadGeneration: UInt64 = 0
 
     private var didLoadInitialImages = false
+    private var nextAddedImageNumber = 1
     private var autoDismissTask: Task<Void, Never>?
+
+    /// Returns `true` when additional image attachments can be added to the draft.
+    var canAddMoreImages: Bool {
+        images.count < Self.maxAttachments
+    }
+
+    /// Returns the number of remaining attachment slots before hitting `maxAttachments`.
+    var remainingImageSlots: Int {
+        max(0, Self.maxAttachments - images.count)
+    }
 
     /// Creates a new bug report draft optionally preloaded with initial images.
     init(
@@ -89,7 +112,13 @@ final class BugReportDraft: ObservableObject {
         guard !Self.isAudioOnly(configuration: configuration) else { return }
         #if canImport(UIKit)
         let configuredImages = configuration?.initialImages() ?? []
-        images = (invocationAttachments + configuredImages).compactMap(BugReportImage.init(attachment:))
+        let loaded = Array(
+            (invocationAttachments + configuredImages)
+                .compactMap(BugReportImage.init(attachment:))
+                .prefix(Self.maxAttachments)
+        )
+        images = loaded
+        nextAddedImageNumber = loaded.count + 1
         #endif
     }
 
@@ -98,6 +127,7 @@ final class BugReportDraft: ObservableObject {
         guard let configuration,
               configuration.isEnabled(),
               !isSubmitting,
+              !isLoadingAttachments,
               !speechCapture.isStopping,
               submissionOutcome == nil else {
             return false
@@ -113,10 +143,14 @@ final class BugReportDraft: ObservableObject {
 
     /// Clears all draft inputs after a report has been submitted or queued so stale text never remains in the editor.
     func clearInputsAfterSubmission() {
+        photoLoadGeneration &+= 1
+        isLoadingAttachments = false
+        attachmentStatusMessage = nil
         speechCapture.reset()
         comment = ""
         images = []
         selectedImage = nil
+        nextAddedImageNumber = 1
     }
 
     /// Resets the draft to a clean state so the tester can file another report immediately.
@@ -126,10 +160,14 @@ final class BugReportDraft: ObservableObject {
     ) {
         autoDismissTask?.cancel()
         autoDismissTask = nil
+        photoLoadGeneration &+= 1
+        isLoadingAttachments = false
+        attachmentStatusMessage = nil
         speechCapture.reset()
         comment = ""
         images = []
         selectedImage = nil
+        nextAddedImageNumber = 1
         isSubmitting = false
         submissionStage = nil
         submissionError = nil
@@ -145,14 +183,93 @@ final class BugReportDraft: ObservableObject {
     func cancelCapture() {
         autoDismissTask?.cancel()
         autoDismissTask = nil
+        photoLoadGeneration &+= 1
+        isLoadingAttachments = false
         speechCapture.cancelCapture()
+    }
+
+    /// Removes the attached image with `id` from the draft.
+    func removeImage(id: UUID) {
+        images.removeAll { $0.id == id }
+        if selectedImage?.id == id {
+            selectedImage = nil
+        }
+        if images.count < Self.maxAttachments {
+            attachmentStatusMessage = nil
+        }
     }
 
     #if canImport(UIKit)
     /// Replaces an annotated attachment image in the draft.
     func replaceImage(id: UUID, with renderedImage: UIImage) {
         guard let index = images.firstIndex(where: { $0.id == id }) else { return }
-        images[index].image = renderedImage
+        images[index].image = BugReportImage.normalizedImage(renderedImage)
+    }
+
+    /// Normalizes and appends `image` to the draft if the attachment cap has not been reached.
+    @discardableResult
+    func addImage(_ image: UIImage, title: String? = nil) -> Bool {
+        guard canAddMoreImages else {
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per report."
+            return false
+        }
+        let resolvedTitle: String
+        if let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
+            resolvedTitle = trimmed
+        } else {
+            resolvedTitle = "Photo \(nextAddedImageNumber)"
+        }
+        nextAddedImageNumber += 1
+        images.append(BugReportImage(title: resolvedTitle, image: image))
+        attachmentStatusMessage = nil
+        return true
+    }
+
+    /// Decodes `data` into a `UIImage` and appends it to the draft.
+    @discardableResult
+    func addImageData(_ data: Data, title: String? = nil) -> Bool {
+        guard let decoded = UIImage(data: data) else {
+            attachmentStatusMessage = "Could not load the selected image."
+            return false
+        }
+        return addImage(decoded, title: title)
+    }
+
+    /// Pastes one or more images from the system clipboard (or the supplied `pasteboardImages` in tests) into the draft.
+    @discardableResult
+    func pasteImagesFromClipboard(images pasteboardImages: [UIImage]? = nil) -> Int {
+        let sourceImages: [UIImage]
+        if let pasteboardImages {
+            sourceImages = pasteboardImages
+        } else if let allImages = UIPasteboard.general.images, !allImages.isEmpty {
+            sourceImages = allImages
+        } else if let singleImage = UIPasteboard.general.image {
+            sourceImages = [singleImage]
+        } else {
+            sourceImages = []
+        }
+
+        guard !sourceImages.isEmpty else {
+            attachmentStatusMessage = "No image found on the clipboard."
+            return 0
+        }
+        guard canAddMoreImages else {
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per report."
+            return 0
+        }
+
+        var addedCount = 0
+        for image in sourceImages {
+            guard canAddMoreImages else {
+                attachmentStatusMessage = "Attached \(addedCount) photo\(addedCount == 1 ? "" : "s") (maximum \(Self.maxAttachments) per report)."
+                return addedCount
+            }
+            let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
+            if addImage(image, title: pastedTitle) {
+                addedCount += 1
+            }
+        }
+        return addedCount
     }
     #endif
 
@@ -264,16 +381,11 @@ final class BugReportDraft: ObservableObject {
         return false
     }
 
-    /// Converts draft `BugReportImage` items into PNG `HollerKitAttachment` payloads.
-    private func imageAttachments() -> [HollerKitAttachment] {
+    /// Converts draft `BugReportImage` items into size-bounded `HollerKitAttachment` payloads.
+    func imageAttachments() -> [HollerKitAttachment] {
         #if canImport(UIKit)
-        return images.enumerated().compactMap { index, image in
-            guard let data = image.image.pngData() else { return nil }
-            return HollerKitAttachment(
-                filename: image.submissionFilename(index: index),
-                mimeType: "image/png",
-                data: data
-            )
+        return Array(images.prefix(Self.maxAttachments)).enumerated().compactMap { index, image in
+            image.encodedAttachment(index: index)
         }
         #else
         return []
@@ -291,6 +403,10 @@ public struct BugReportSheet: View {
     @ObservedObject private var draft: BugReportDraft
     @ObservedObject private var speechCapture: SpeechCaptureController
     @Environment(\.dismiss) private var dismiss
+    #if canImport(PhotosUI)
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    #endif
+    @State private var hasClipboardImage = false
 
     init(
         configuration: HollerKitConfiguration?,
@@ -360,21 +476,68 @@ public struct BugReportSheet: View {
                         }
                     }
 
-                    if !isAudioOnly && !draft.images.isEmpty {
+                    if !isAudioOnly {
                         Section("Attachments (\(draft.images.count))") {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 12) {
-                                    ForEach(draft.images) { image in
-                                        Button {
-                                            draft.selectedImage = image
-                                        } label: {
-                                            ImageAttachmentThumbnail(image: image)
+                            if !draft.images.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 12) {
+                                        ForEach(draft.images) { image in
+                                            ImageAttachmentThumbnail(
+                                                image: image,
+                                                isDisabled: draft.isSubmitting,
+                                                onTap: {
+                                                    draft.selectedImage = image
+                                                },
+                                                onRemove: {
+                                                    draft.removeImage(id: image.id)
+                                                }
+                                            )
                                         }
-                                        .buttonStyle(.plain)
-                                        .disabled(draft.isSubmitting)
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                            }
+
+                            #if canImport(PhotosUI) && canImport(UIKit)
+                            PhotosPicker(
+                                selection: $selectedPhotoItems,
+                                maxSelectionCount: max(1, draft.remainingImageSlots),
+                                matching: .images
+                            ) {
+                                HStack(spacing: 8) {
+                                    Label(
+                                        draft.isLoadingAttachments ? "Adding Photo..." : "Add Photo",
+                                        systemImage: "photo.badge.plus"
+                                    )
+                                    if draft.isLoadingAttachments {
+                                        Spacer()
+                                        ProgressView()
+                                            .controlSize(.small)
                                     }
                                 }
-                                .padding(.vertical, 4)
+                            }
+                            .disabled(draft.isSubmitting || draft.isLoadingAttachments || !draft.canAddMoreImages)
+                            .accessibilityIdentifier("HollerKitAddPhotoButton")
+                            #endif
+
+                            #if canImport(UIKit)
+                            if hasClipboardImage {
+                                Button {
+                                    _ = draft.pasteImagesFromClipboard()
+                                    refreshClipboardImageAvailability()
+                                } label: {
+                                    Label("Paste Image", systemImage: "doc.on.clipboard")
+                                }
+                                .disabled(draft.isSubmitting || draft.isLoadingAttachments || !draft.canAddMoreImages)
+                                .accessibilityIdentifier("HollerKitPasteImageButton")
+                            }
+                            #endif
+
+                            if let statusMessage = draft.attachmentStatusMessage {
+                                Text(statusMessage)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("HollerKitAttachmentStatusText")
                             }
                         }
                     }
@@ -499,6 +662,7 @@ public struct BugReportSheet: View {
             #endif
         }
         .onAppear {
+            refreshClipboardImageAvailability()
             if draft.submissionOutcome != nil {
                 draft.resetForAnotherReport(
                     configuration: configuration,
@@ -512,11 +676,29 @@ public struct BugReportSheet: View {
             }
         }
         .onChange(of: presentationId) { _, _ in
+            refreshClipboardImageAvailability()
             draft.resetForAnotherReport(
                 configuration: configuration,
                 invocationAttachments: invocationAttachments
             )
         }
+        #if canImport(PhotosUI) && canImport(UIKit)
+        .onChange(of: selectedPhotoItems) { _, newItems in
+            guard !newItems.isEmpty else { return }
+            selectedPhotoItems = []
+            Task { @MainActor in
+                await loadSelectedPhotoItems(newItems)
+            }
+        }
+        #endif
+        #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            refreshClipboardImageAvailability()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in
+            refreshClipboardImageAvailability()
+        }
+        #endif
         .onChange(of: speechCapture.transcript) { _, _ in
             guard !isAudioOnly else { return }
             draft.comment = speechCapture.consumeTranscriptForCommentMerge(into: draft.comment)
@@ -580,6 +762,65 @@ public struct BugReportSheet: View {
         guard let configuration else { return }
         await speechCapture.retry(configuration: configuration.audio)
     }
+
+    /// Updates `hasClipboardImage` from the system pasteboard without reading image data until tapped.
+    @MainActor
+    private func refreshClipboardImageAvailability() {
+        #if canImport(UIKit)
+        hasClipboardImage = UIPasteboard.general.hasImages
+        #else
+        hasClipboardImage = false
+        #endif
+    }
+
+    #if canImport(PhotosUI) && canImport(UIKit)
+    /// Loads and attaches photos selected from the system `PhotosPicker`.
+    @MainActor
+    private func loadSelectedPhotoItems(_ items: [PhotosPickerItem]) async {
+        let generation = draft.photoLoadGeneration
+        draft.isLoadingAttachments = true
+        defer {
+            if draft.photoLoadGeneration == generation {
+                draft.isLoadingAttachments = false
+            }
+        }
+
+        var failedCount = 0
+        for item in items {
+            guard draft.photoLoadGeneration == generation,
+                  !draft.isSubmitting,
+                  draft.submissionOutcome == nil else {
+                return
+            }
+            guard draft.canAddMoreImages else {
+                draft.attachmentStatusMessage = "You can attach up to \(BugReportDraft.maxAttachments) photos per report."
+                break
+            }
+            do {
+                if let data = try await item.loadTransferable(type: Data.self) {
+                    guard draft.photoLoadGeneration == generation,
+                          !draft.isSubmitting,
+                          draft.submissionOutcome == nil else {
+                        return
+                    }
+                    if !draft.addImageData(data) {
+                        failedCount += 1
+                    }
+                } else {
+                    failedCount += 1
+                }
+            } catch {
+                failedCount += 1
+            }
+        }
+
+        if failedCount > 0 && draft.attachmentStatusMessage == nil {
+            draft.attachmentStatusMessage = failedCount == 1
+                ? "Could not load the selected photo."
+                : "Could not load \(failedCount) selected photos."
+        }
+    }
+    #endif
 }
 
 /// Full-sheet progress and post-submission confirmation overlay shared by bug reports and quest runs.
@@ -725,13 +966,92 @@ struct BugReportImage: Identifiable, Hashable {
 
     init(title: String, image: UIImage) {
         self.title = title
-        self.image = image
+        self.image = Self.normalizedImage(image)
     }
 
     init?(attachment: HollerKitAttachment) {
         guard let image = UIImage(data: attachment.data) else { return nil }
         self.title = attachment.filename
-        self.image = image
+        self.image = Self.normalizedImage(image)
+    }
+
+    /// Downscales `image` proportionally when its pixel width or height exceeds `maxPixelDimension`
+    /// and normalizes image orientation to `.up`.
+    static func normalizedImage(
+        _ image: UIImage,
+        maxPixelDimension: CGFloat = BugReportDraft.maxPixelDimension
+    ) -> UIImage {
+        let pixelWidth = image.size.width * image.scale
+        let pixelHeight = image.size.height * image.scale
+        let maxSide = max(pixelWidth, pixelHeight)
+        guard maxSide > 0 else { return image }
+
+        let scaleFactor = maxSide > maxPixelDimension ? (maxPixelDimension / maxSide) : 1.0
+        if scaleFactor == 1.0 && image.imageOrientation == .up {
+            return image
+        }
+
+        let targetSize = CGSize(
+            width: max(1, (pixelWidth * scaleFactor).rounded()),
+            height: max(1, (pixelHeight * scaleFactor).rounded())
+        )
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+    }
+
+    /// Encodes the image into a `HollerKitAttachment` within `maxBytes`, keeping compact screenshots as PNG
+    /// and compressing larger camera-roll photos as JPEG.
+    func encodedAttachment(
+        index: Int,
+        maxBytes: Int = BugReportDraft.maxAttachmentBytes,
+        preferredPNGMaxBytes: Int = BugReportDraft.preferredPNGMaxBytes,
+        maxPixelDimension: CGFloat = BugReportDraft.maxPixelDimension
+    ) -> HollerKitAttachment? {
+        var candidate = Self.normalizedImage(image, maxPixelDimension: maxPixelDimension)
+        let pngThreshold = min(maxBytes, preferredPNGMaxBytes)
+        if let pngData = candidate.pngData(), pngData.count <= pngThreshold {
+            return HollerKitAttachment(
+                filename: submissionFilename(index: index, fileExtension: "png"),
+                mimeType: "image/png",
+                data: pngData
+            )
+        }
+
+        let qualities: [CGFloat] = [0.82, 0.7, 0.55, 0.4, 0.25]
+        var currentDimension = max(
+            candidate.size.width * candidate.scale,
+            candidate.size.height * candidate.scale
+        )
+
+        for pass in 0..<4 {
+            if pass > 0 {
+                currentDimension = max(320, (currentDimension * 0.7).rounded())
+                candidate = Self.normalizedImage(candidate, maxPixelDimension: currentDimension)
+            }
+            for quality in qualities {
+                if let jpegData = candidate.jpegData(compressionQuality: quality),
+                   jpegData.count <= maxBytes {
+                    return HollerKitAttachment(
+                        filename: submissionFilename(index: index, fileExtension: "jpg"),
+                        mimeType: "image/jpeg",
+                        data: jpegData
+                    )
+                }
+            }
+        }
+
+        if let pngData = candidate.pngData(), pngData.count <= maxBytes {
+            return HollerKitAttachment(
+                filename: submissionFilename(index: index, fileExtension: "png"),
+                mimeType: "image/png",
+                data: pngData
+            )
+        }
+        return nil
     }
     #endif
 
@@ -743,10 +1063,11 @@ struct BugReportImage: Identifiable, Hashable {
         hasher.combine(id)
     }
 
-    func submissionFilename(index: Int) -> String {
+    func submissionFilename(index: Int, fileExtension: String = "png") -> String {
         let base = (title as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let safeBase = base.isEmpty ? "image-\(index + 1)" : base
-        return "\(safeBase).png"
+        return "\(safeBase).\(fileExtension)"
     }
 }
 
@@ -970,9 +1291,59 @@ final class SpeechCaptureController: ObservableObject {
 
 struct ImageAttachmentThumbnail: View {
     var image: BugReportImage
+    var isDisabled: Bool = false
+    var onTap: (() -> Void)? = nil
+    var onRemove: (() -> Void)? = nil
 
     var body: some View {
         #if canImport(UIKit)
+        ZStack(alignment: .topTrailing) {
+            if let onTap {
+                Button(action: onTap) {
+                    thumbnailContent
+                }
+                .buttonStyle(.plain)
+                .disabled(isDisabled)
+                .contextMenu {
+                    Button {
+                        onTap()
+                    } label: {
+                        Label("Annotate", systemImage: "pencil.tip.crop.circle")
+                    }
+
+                    if let onRemove {
+                        Button(role: .destructive) {
+                            onRemove()
+                        } label: {
+                            Label("Remove Attachment", systemImage: "trash")
+                        }
+                    }
+                }
+            } else {
+                thumbnailContent
+            }
+
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, Color.black.opacity(0.68))
+                        .padding(6)
+                }
+                .buttonStyle(.plain)
+                .disabled(isDisabled)
+                .accessibilityLabel("Remove \(image.title)")
+                .accessibilityIdentifier("HollerKitRemoveAttachmentButton_\(image.title)")
+            }
+        }
+        #else
+        EmptyView()
+        #endif
+    }
+
+    #if canImport(UIKit)
+    private var thumbnailContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             Image(uiImage: image.image)
                 .resizable()
@@ -992,8 +1363,6 @@ struct ImageAttachmentThumbnail: View {
                 .frame(width: 136, alignment: .leading)
         }
         .accessibilityLabel("Attached image \(image.title)")
-        #else
-        EmptyView()
-        #endif
     }
+    #endif
 }
