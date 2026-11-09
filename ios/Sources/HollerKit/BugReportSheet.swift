@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 
 #if canImport(PhotosUI)
@@ -112,11 +113,14 @@ final class BugReportDraft: ObservableObject {
         guard !Self.isAudioOnly(configuration: configuration) else { return }
         #if canImport(UIKit)
         let configuredImages = configuration?.initialImages() ?? []
-        let loaded = Array(
-            (invocationAttachments + configuredImages)
-                .compactMap(BugReportImage.init(attachment:))
-                .prefix(Self.maxAttachments)
-        )
+        var loaded: [BugReportImage] = []
+        loaded.reserveCapacity(min(invocationAttachments.count + configuredImages.count, Self.maxAttachments))
+        for attachment in invocationAttachments + configuredImages {
+            guard loaded.count < Self.maxAttachments else { break }
+            if let image = BugReportImage(attachment: attachment) {
+                loaded.append(image)
+            }
+        }
         images = loaded
         nextAddedImageNumber = loaded.count + 1
         #endif
@@ -225,14 +229,31 @@ final class BugReportDraft: ObservableObject {
         return true
     }
 
-    /// Decodes `data` into a `UIImage` and appends it to the draft.
+    /// Downsamples `data` into a `UIImage` within `maxPixelDimension` and appends it to the draft.
     @discardableResult
     func addImageData(_ data: Data, title: String? = nil) -> Bool {
-        guard let decoded = UIImage(data: data) else {
+        guard let decoded = BugReportImage.downsampledImage(from: data) else {
             attachmentStatusMessage = "Could not load the selected image."
             return false
         }
         return addImage(decoded, title: title)
+    }
+
+    /// Downsamples `data` off the main actor before appending the resulting image to the draft.
+    @discardableResult
+    func addImageDataOffMainActor(_ data: Data, title: String? = nil) async -> Bool {
+        guard canAddMoreImages else {
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per report."
+            return false
+        }
+        let maxDimension = Self.maxPixelDimension
+        let cgImage = await Task.detached(priority: .userInitiated) {
+            BugReportImage.downsampledCGImage(from: data, maxPixelDimension: maxDimension)
+        }.value
+        if let cgImage {
+            return addImage(UIImage(cgImage: cgImage, scale: 1.0, orientation: .up), title: title)
+        }
+        return addImageData(data, title: title)
     }
 
     /// Pastes one or more images from the system clipboard (or the supplied `pasteboardImages` in tests) into the draft.
@@ -803,7 +824,13 @@ public struct BugReportSheet: View {
                           draft.submissionOutcome == nil else {
                         return
                     }
-                    if !draft.addImageData(data) {
+                    let added = await draft.addImageDataOffMainActor(data)
+                    guard draft.photoLoadGeneration == generation,
+                          !draft.isSubmitting,
+                          draft.submissionOutcome == nil else {
+                        return
+                    }
+                    if !added {
                         failedCount += 1
                     }
                 } else {
@@ -814,7 +841,7 @@ public struct BugReportSheet: View {
             }
         }
 
-        if failedCount > 0 && draft.attachmentStatusMessage == nil {
+        if draft.photoLoadGeneration == generation && failedCount > 0 && draft.attachmentStatusMessage == nil {
             draft.attachmentStatusMessage = failedCount == 1
                 ? "Could not load the selected photo."
                 : "Could not load \(failedCount) selected photos."
@@ -970,9 +997,44 @@ struct BugReportImage: Identifiable, Hashable {
     }
 
     init?(attachment: HollerKitAttachment) {
-        guard let image = UIImage(data: attachment.data) else { return nil }
+        guard let image = Self.downsampledImage(from: attachment.data) else { return nil }
         self.title = attachment.filename
-        self.image = Self.normalizedImage(image)
+        self.image = image
+    }
+
+    /// Downsamples encoded image `data` using `ImageIO` without decoding the full-resolution bitmap into memory,
+    /// preserving EXIF orientation and capping the longest side at `maxPixelDimension`.
+    nonisolated static func downsampledCGImage(
+        from data: Data,
+        maxPixelDimension: CGFloat = BugReportDraft.maxPixelDimension
+    ) -> CGImage? {
+        guard !data.isEmpty else { return nil }
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+            return nil
+        }
+        let maxPixelSize = max(1, Int(maxPixelDimension.rounded()))
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary)
+    }
+
+    /// Downsamples encoded image `data` into a normalized `UIImage` capped at `maxPixelDimension`.
+    nonisolated static func downsampledImage(
+        from data: Data,
+        maxPixelDimension: CGFloat = BugReportDraft.maxPixelDimension
+    ) -> UIImage? {
+        if let cgImage = downsampledCGImage(from: data, maxPixelDimension: maxPixelDimension) {
+            return UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
+        }
+        guard let fallback = UIImage(data: data) else { return nil }
+        return normalizedImage(fallback, maxPixelDimension: maxPixelDimension)
     }
 
     /// Downscales `image` proportionally when its pixel width or height exceeds `maxPixelDimension`

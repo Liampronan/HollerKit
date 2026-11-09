@@ -42,7 +42,17 @@ public enum HollerKitAPIError: Error, LocalizedError, Sendable, Equatable {
         }
     }
 
+    public var isExpiredOrConsumedGrantError: Bool {
+        if case .serverError(_, let code, _) = self {
+            return code == "expired_or_consumed_grant"
+        }
+        return false
+    }
+
     public var isPermanentValidationError: Bool {
+        if isExpiredOrConsumedGrantError {
+            return false
+        }
         guard let statusCode else { return false }
         return statusCode == 400 || statusCode == 413 || statusCode == 415 || statusCode == 422
     }

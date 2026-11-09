@@ -1719,7 +1719,9 @@ final class HollerKitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let uploadedMimeTypesBox = LockedBox<[String]>([])
+        let uploadedPutSizesBox = LockedBox<[Int]>([])
         let submittedAttachmentsBox = LockedBox<[[String: Any]]>([])
+        let simulateExpiredGrantOnceBox = LockedBox<Bool>(true)
 
         StubURLProtocol.setHandler { request, bodyData in
             guard let url = request.url else {
@@ -1741,10 +1743,31 @@ final class HollerKitTests: XCTestCase {
                 return (response, data)
             }
             if url.host == "upload.hollerkit.test" {
+                uploadedPutSizesBox.withLock { $0.append(bodyData?.count ?? 0) }
                 let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
                 return (response, Data())
             }
             if url.path == "/v1/feedback" {
+                let shouldRejectWithExpiredGrant = simulateExpiredGrantOnceBox.withLock { value -> Bool in
+                    if value {
+                        value = false
+                        return true
+                    }
+                    return false
+                }
+                if shouldRejectWithExpiredGrant {
+                    let errorJSON: [String: Any] = [
+                        "ok": false,
+                        "error": [
+                            "code": "expired_or_consumed_grant",
+                            "message": "Attachment grant has expired."
+                        ]
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: errorJSON)
+                    let response = HTTPURLResponse(url: url, statusCode: 400, httpVersion: nil, headerFields: nil)!
+                    return (response, data)
+                }
+
                 let json = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
                 let feedbackId = (json["id"] as? String) ?? UUID().uuidString.lowercased()
                 let build = (json["build"] as? String) ?? "1"
@@ -1857,14 +1880,15 @@ final class HollerKitTests: XCTestCase {
         XCTAssertNotNil(draft.attachmentStatusMessage)
         XCTAssertFalse(draft.addImage(smallImage))
 
-        // Remove 11 images so we submit a single attached image report
-        while draft.images.count > 1 {
+        // Remove 10 images so we submit 2 distinct attached images (annotated 80x80 + small 40x40)
+        while draft.images.count > 2 {
             draft.removeImage(id: draft.images.last!.id)
         }
+        XCTAssertEqual(draft.images.count, 2)
         XCTAssertTrue(draft.canAddMoreImages)
         XCTAssertNil(draft.attachmentStatusMessage)
 
-        // 5. Submit image-only report through OutboxStore
+        // 5. Submit image-only report through OutboxStore (including automatic retry when an upload grant expires)
         let outbox = OutboxStore(rootDirectoryURL: tempDir)
         await draft.submit(
             configuration: config,
@@ -1876,8 +1900,15 @@ final class HollerKitTests: XCTestCase {
             return
         }
         XCTAssertTrue(draft.images.isEmpty)
-        XCTAssertEqual(uploadedMimeTypesBox.withLock { $0 }, ["image/png"])
-        XCTAssertEqual(submittedAttachmentsBox.withLock { $0.count }, 1)
+        // 2 initial uploads + 2 refreshed-grant uploads after expired_or_consumed_grant = 4 uploads
+        XCTAssertEqual(uploadedMimeTypesBox.withLock { $0 }, ["image/png", "image/png", "image/png", "image/png"])
+        let uploadedSizes = uploadedPutSizesBox.withLock { $0 }
+        XCTAssertEqual(uploadedSizes.count, 4)
+        XCTAssertTrue(uploadedSizes.allSatisfy { $0 > 0 })
+        XCTAssertNotEqual(uploadedSizes[0], uploadedSizes[1], "Distinct images should produce distinct upload payloads")
+        let submittedAttachments = submittedAttachmentsBox.withLock { $0 }
+        XCTAssertEqual(submittedAttachments.count, 2)
+        XCTAssertNotEqual(submittedAttachments[0]["key"] as? String, submittedAttachments[1]["key"] as? String)
     }
     #endif
 }

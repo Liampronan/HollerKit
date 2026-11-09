@@ -498,7 +498,8 @@ actor OutboxDirectoryEngine {
     private func flushSingleItem(
         _ item: StoredOutboxItem,
         token: String,
-        using client: APIClient
+        using client: APIClient,
+        allowGrantRefreshRetry: Bool = true
     ) async throws -> FeedbackSubmissionResponse {
         var envelope = item.envelope
         if let alreadySubmitted = envelope.submittedResponse {
@@ -597,10 +598,28 @@ actor OutboxDirectoryEngine {
             try? writeEnvelope(envelope, to: item.directoryURL)
         }
 
-        let response = try await client.submitFeedback(finalRequest, token: token)
-        envelope.submittedResponse = response
-        try? writeEnvelope(envelope, to: item.directoryURL)
-        return response
+        do {
+            let response = try await client.submitFeedback(finalRequest, token: token)
+            envelope.submittedResponse = response
+            try? writeEnvelope(envelope, to: item.directoryURL)
+            return response
+        } catch let apiError as HollerKitAPIError where apiError.isExpiredOrConsumedGrantError {
+            for index in envelope.attachmentManifests.indices {
+                envelope.attachmentManifests[index].uploadedKey = nil
+                envelope.attachmentManifests[index].uploadedExpiresAt = nil
+            }
+            try? writeEnvelope(envelope, to: item.directoryURL)
+            if allowGrantRefreshRetry && !envelope.attachmentManifests.isEmpty {
+                let refreshedItem = StoredOutboxItem(directoryURL: item.directoryURL, envelope: envelope)
+                return try await flushSingleItem(
+                    refreshedItem,
+                    token: token,
+                    using: client,
+                    allowGrantRefreshRetry: false
+                )
+            }
+            throw apiError
+        }
     }
 
     private static func isUploadGrantStillReusable(expiresAt: String?) -> Bool {
