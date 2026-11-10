@@ -2336,15 +2336,55 @@ final class HollerKitTests: XCTestCase {
         flagBox.withLock { $0 = "shake" }
         HollerKit.reconcileEnablement()
         XCTAssertEqual(HollerKit.currentInvocation.action(for: .shake), .bugReport)
+
+        // setInvocation override does not overwrite active invocationProvider
+        HollerKit.setInvocation([.screenshot: .bugReport])
+        XCTAssertEqual(HollerKit.currentInvocation.action(for: .shake), .bugReport)
+        XCTAssertEqual(HollerKit.presenterState.currentInvocation.action(for: .shake), .bugReport)
+
+        // Resetting provider restores the override
+        HollerKit.setInvocationProvider(nil)
+        XCTAssertEqual(HollerKit.currentInvocation.action(for: .screenshot), .bugReport)
+        XCTAssertEqual(HollerKit.presenterState.currentInvocation.action(for: .screenshot), .bugReport)
     }
 
     @MainActor
-    func testReportDraftRecordsInvokingTriggerMetadata() {
+    func testReportDraftRecordsInvokingTriggerMetadata() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("hollerkit-invocation-metadata-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        HollerKit.configure(HollerKitConfiguration(
+        let receivedRequestsBox = LockedBox<[[String: Any]]>([])
+        StubURLProtocol.setHandler { request, bodyData in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            if url.path == "/v1/feedback", request.httpMethod == "POST" {
+                let body = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                receivedRequestsBox.withLock { $0.append(body) }
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": (body["id"] as? String) ?? UUID().uuidString.lowercased(),
+                        "kind": "report",
+                        "build": "1",
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-08T20:00:00Z",
+                        "updatedAt": "2026-11-08T20:00:00Z",
+                        "comment": body["comment"] as Any
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let session = makeStubSession()
+        let config = HollerKitConfiguration(
             server: URL(string: "https://api.hollerkit.test")!,
             auth: { "token" },
             isEnabled: { true },
@@ -2352,12 +2392,28 @@ final class HollerKitTests: XCTestCase {
                 .shake: .bugReport,
                 .stroke(.leftToCenter): .bugReport
             ],
+            urlSession: session,
             outboxDirectoryURL: tempDir
-        ))
+        )
+        HollerKit.configure(config)
 
         // Invoked via leftToCenter stroke
         HollerKit.presentBugReport(trigger: .stroke(.leftToCenter))
-        XCTAssertEqual(HollerKit.currentBugReportDraft.invokingTrigger, "stroke.leftToCenter")
+        let strokeDraft = HollerKit.currentBugReportDraft
+        XCTAssertEqual(strokeDraft.invokingTrigger, "stroke.leftToCenter")
+
+        strokeDraft.autoDismissDelaySeconds = 0
+        strokeDraft.comment = "Stroke triggered report"
+        await strokeDraft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore
+        )
+
+        let requests = receivedRequestsBox.withLock { $0 }
+        XCTAssertEqual(requests.count, 1)
+        let metadata = requests.first?["metadata"] as? [String: Any]
+        XCTAssertEqual(metadata?["invocation"] as? String, "stroke.leftToCenter")
 
         // Invoked via shake
         HollerKit.presentBugReport(trigger: .shake)

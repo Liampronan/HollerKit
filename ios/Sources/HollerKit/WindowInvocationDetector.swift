@@ -261,9 +261,5 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
             onTrigger(trigger, action)
         }
     }
-
-    deinit {
-        detachFromWindow()
-    }
 }
 #endif

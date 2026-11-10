@@ -180,9 +180,19 @@ final class HollerKitStrokeGestureRecognizer: UIGestureRecognizer, UIGestureReco
         true
     }
 
+    private weak var activeTouch: UITouch?
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesBegan(touches, with: event)
-        guard touches.count == 1, let touch = touches.first, let view else { return }
+        if activeTouch != nil {
+            resetRecognizer()
+            return
+        }
+        guard touches.count == 1, let touch = touches.first, let view else {
+            resetRecognizer()
+            return
+        }
+        activeTouch = touch
         let location = touch.location(in: view)
         trackedPoints = [location]
         drawingView?.beginStroke(at: location)
@@ -190,19 +200,19 @@ final class HollerKitStrokeGestureRecognizer: UIGestureRecognizer, UIGestureReco
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesMoved(touches, with: event)
-        guard let touch = touches.first, let view else { return }
-        let location = touch.location(in: view)
+        guard let activeTouch, touches.contains(activeTouch), let view else { return }
+        let location = activeTouch.location(in: view)
         trackedPoints.append(location)
         drawingView?.addPoint(location)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesEnded(touches, with: event)
-        guard let touch = touches.first, let view else {
+        guard let activeTouch, touches.contains(activeTouch), let view else {
             resetRecognizer()
             return
         }
-        let location = touch.location(in: view)
+        let location = activeTouch.location(in: view)
         trackedPoints.append(location)
 
         let classified = StrokeGestureClassifier.classify(
@@ -221,6 +231,7 @@ final class HollerKitStrokeGestureRecognizer: UIGestureRecognizer, UIGestureReco
             drawingView?.finishStroke(recognized: false)
         }
         trackedPoints = []
+        self.activeTouch = nil
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -228,17 +239,20 @@ final class HollerKitStrokeGestureRecognizer: UIGestureRecognizer, UIGestureReco
         state = .cancelled
         drawingView?.cancelStroke()
         trackedPoints = []
+        activeTouch = nil
     }
 
     override func reset() {
         super.reset()
         trackedPoints = []
+        activeTouch = nil
     }
 
     private func resetRecognizer() {
         state = .failed
         drawingView?.cancelStroke()
         trackedPoints = []
+        activeTouch = nil
     }
 
     private func triggerHapticFeedback() {

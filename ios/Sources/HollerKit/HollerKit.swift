@@ -73,10 +73,13 @@ public enum HollerKit {
     }
 
     /// Sets the active invocation trigger configuration at runtime without restarting HollerKit or rebuilding views.
+    ///
+    /// If an `invocationProvider` has been configured, that dynamic provider takes precedence over this override
+    /// whenever enablement or active triggers are evaluated.
     public static func setInvocation(_ invocation: HollerKitInvocation) {
         state.invocationOverride = invocation
         state.configuration?.invocation = invocation
-        presenterState.currentInvocation = invocation
+        reconcileEnablement()
         breadcrumb("Updated invocation triggers at runtime", category: "invocation")
     }
 

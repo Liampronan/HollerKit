@@ -18,6 +18,14 @@ private struct HollerKitPresenterModifier: ViewModifier {
                     InvocationObserver(
                         invocation: presenter.currentInvocation,
                         onTrigger: { trigger, action, attachments in
+                            if presenter.isPresented || presenter.isQuestsPresented {
+                                switch trigger.kind {
+                                case .shake, .screenshot:
+                                    break
+                                default:
+                                    return
+                                }
+                            }
                             switch action {
                             case .bugReport:
                                 HollerKit.presentBugReport(attachments: attachments, trigger: trigger)

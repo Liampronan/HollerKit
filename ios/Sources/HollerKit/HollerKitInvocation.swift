@@ -67,11 +67,17 @@ public struct HollerKitTrigger: Hashable, Sendable, CustomStringConvertible {
 /// Backwards-compatible with the OptionSet `[.shake, .screenshot]` syntax while supporting
 /// dictionary literal syntax `[.stroke(.leftToCenter): .bugReport, .stroke(.rightToCenter): .quests]`.
 public struct HollerKitInvocation: OptionSet, Sendable, ExpressibleByDictionaryLiteral, Equatable {
-    public var rawValue: Int
     public var actions: [HollerKitTrigger: HollerKitInvocationAction]
 
+    public var rawValue: Int {
+        var bits = 0
+        for trigger in actions.keys {
+            bits |= Self.bit(for: trigger)
+        }
+        return bits
+    }
+
     public init(rawValue: Int) {
-        self.rawValue = rawValue
         var map: [HollerKitTrigger: HollerKitInvocationAction] = [:]
         if rawValue & (1 << 0) != 0 {
             map[.shake] = .bugReport
@@ -102,20 +108,6 @@ public struct HollerKitInvocation: OptionSet, Sendable, ExpressibleByDictionaryL
 
     public init(_ actions: [HollerKitTrigger: HollerKitInvocationAction]) {
         self.actions = actions
-        var bits = 0
-        for (trigger, _) in actions {
-            switch trigger.kind {
-            case .shake: bits |= 1 << 0
-            case .screenshot: bits |= 1 << 1
-            case .stroke(.leftToCenter): bits |= 1 << 2
-            case .stroke(.rightToCenter): bits |= 1 << 3
-            case .twoFingerLongPress: bits |= 1 << 4
-            case .threeFingerLongPress: bits |= 1 << 5
-            case .threeFingerDoubleTap: bits |= 1 << 6
-            case .floatingButton: bits |= 1 << 7
-            }
-        }
-        self.rawValue = bits
     }
 
     public init(dictionaryLiteral elements: (HollerKitTrigger, HollerKitInvocationAction)...) {
@@ -124,6 +116,19 @@ public struct HollerKitInvocation: OptionSet, Sendable, ExpressibleByDictionaryL
             map[trigger] = action
         }
         self.init(map)
+    }
+
+    private static func bit(for trigger: HollerKitTrigger) -> Int {
+        switch trigger.kind {
+        case .shake: return 1 << 0
+        case .screenshot: return 1 << 1
+        case .stroke(.leftToCenter): return 1 << 2
+        case .stroke(.rightToCenter): return 1 << 3
+        case .twoFingerLongPress: return 1 << 4
+        case .threeFingerLongPress: return 1 << 5
+        case .threeFingerDoubleTap: return 1 << 6
+        case .floatingButton: return 1 << 7
+        }
     }
 
     // Static OptionSet members for backwards compatibility
@@ -164,14 +169,12 @@ public struct HollerKitInvocation: OptionSet, Sendable, ExpressibleByDictionaryL
 
     // SetAlgebra conformance
     public mutating func formUnion(_ other: HollerKitInvocation) {
-        self.rawValue |= other.rawValue
         for (trigger, action) in other.actions {
             self.actions[trigger] = action
         }
     }
 
     public mutating func formIntersection(_ other: HollerKitInvocation) {
-        self.rawValue &= other.rawValue
         for key in Array(self.actions.keys) {
             if other.actions[key] == nil {
                 self.actions.removeValue(forKey: key)
@@ -180,7 +183,6 @@ public struct HollerKitInvocation: OptionSet, Sendable, ExpressibleByDictionaryL
     }
 
     public mutating func formSymmetricDifference(_ other: HollerKitInvocation) {
-        self.rawValue ^= other.rawValue
         for (trigger, action) in other.actions {
             if self.actions[trigger] != nil {
                 self.actions.removeValue(forKey: trigger)
@@ -206,20 +208,6 @@ public struct HollerKitInvocation: OptionSet, Sendable, ExpressibleByDictionaryL
             } else {
                 actions.removeValue(forKey: trigger)
             }
-            var bits = 0
-            for (t, _) in actions {
-                switch t.kind {
-                case .shake: bits |= 1 << 0
-                case .screenshot: bits |= 1 << 1
-                case .stroke(.leftToCenter): bits |= 1 << 2
-                case .stroke(.rightToCenter): bits |= 1 << 3
-                case .twoFingerLongPress: bits |= 1 << 4
-                case .threeFingerLongPress: bits |= 1 << 5
-                case .threeFingerDoubleTap: bits |= 1 << 6
-                case .floatingButton: bits |= 1 << 7
-                }
-            }
-            self.rawValue = bits
         }
     }
 }
