@@ -126,6 +126,11 @@ public struct QuestCardView: View {
                 }
             }
 
+            if let latestRun = item.latestRun {
+                LatestRunSummaryView(latestRun: latestRun)
+                    .accessibilityIdentifier("HollerKitQuestLatestRun_\(item.id)")
+            }
+
             HStack(spacing: 8) {
                 if let route = item.definition.start, !route.isEmpty {
                     HStack(spacing: 4) {
@@ -161,6 +166,61 @@ public struct QuestCardView: View {
     }
 }
 
+private struct LatestRunSummaryView: View {
+    var latestRun: QuestLatestRun
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Image(systemName: iconName)
+                    .foregroundStyle(tintColor)
+                Text("Last run: \(latestRun.formattedSummary())")
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption2)
+
+            if let commentLine = latestRun.firstCommentLine {
+                Text("\u{201C}\(commentLine)\u{201D}")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(tintColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var iconName: String {
+        switch latestRun.result {
+        case .pass:
+            return "checkmark.circle.fill"
+        case .fail:
+            return "exclamationmark.circle.fill"
+        case .unsure:
+            return "questionmark.circle.fill"
+        case .abandoned:
+            return "xmark.circle"
+        }
+    }
+
+    private var tintColor: Color {
+        switch latestRun.result {
+        case .pass:
+            return .green
+        case .fail:
+            return .red
+        case .unsure:
+            return .orange
+        case .abandoned:
+            return .secondary
+        }
+    }
+}
+
 private struct StatusBadge: View {
     var status: QuestStatus
 
@@ -180,11 +240,13 @@ private struct StatusBadge: View {
     private var label: String {
         switch status {
         case .pending:
-            return "Pending"
+            return "Untried"
         case .passed:
             return "Passed"
         case .failed:
             return "Failed"
+        case .unsure:
+            return "Unsure"
         }
     }
 
@@ -196,6 +258,8 @@ private struct StatusBadge: View {
             return "checkmark.circle.fill"
         case .failed:
             return "exclamationmark.circle.fill"
+        case .unsure:
+            return "questionmark.circle.fill"
         }
     }
 
@@ -207,6 +271,8 @@ private struct StatusBadge: View {
             return .green
         case .failed:
             return .red
+        case .unsure:
+            return .orange
         }
     }
 }
