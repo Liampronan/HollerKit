@@ -23,7 +23,7 @@ import type {
 
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05'
 const DEFAULT_MAX_PENDING_REQUESTS = 64
-export const HOLLERKIT_MCP_VERSION = '1.0.0-beta.3'
+export const HOLLERKIT_MCP_VERSION = '1.0.0-beta.4'
 const SUPPORTED_MCP_PROTOCOL_VERSIONS = new Set([
   '2024-11-05',
   '2025-03-26',

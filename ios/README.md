@@ -6,7 +6,7 @@ The HollerKit Swift package provides in-app bug reporting and guided QA test que
 
 ## 1. Add the Package to Xcode
 
-1. In Xcode, open **File > Add Package Dependencies...**, enter `https://github.com/Liampronan/HollerKit`, and set **Dependency Rule** to **Branch: `main`** (or **Exact Version: `1.0.0-beta.3`** once tagged; note that `1.0.0-beta.1` predates the root `Package.swift`). Alternatively, click **Add Local...** and select the `HollerKit` repository root.
+1. In Xcode, open **File > Add Package Dependencies...**, enter `https://github.com/Liampronan/HollerKit`, and set **Dependency Rule** to **Branch: `main`** (or **Exact Version: `1.0.0-beta.4`** once tagged; note that `1.0.0-beta.1` predates the root `Package.swift`). Alternatively, click **Add Local...** and select the `HollerKit` repository root.
 2. Add the `HollerKit` library product to your app target.
 3. If you use QA Quests, add your `hollerkit-quests.json` file to your app target's **Copy Bundle Resources** build phase so quests are available immediately at launch (and synced with your server when online).
 
