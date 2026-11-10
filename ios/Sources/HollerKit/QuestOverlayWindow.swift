@@ -165,13 +165,15 @@ final class PassthroughOverlayWindow: UIWindow {
 }
 #endif
 
+/// Explicit UIKit-backed semantic colors for `QuestOverlayView` so material vibrancy inside
+/// `PassthroughOverlayWindow` never washes out secondary labels or checklist icons.
 private enum OverlayPalette {
     #if canImport(UIKit)
     static let primaryText = Color(uiColor: .label)
     static let secondaryText = Color(uiColor: .secondaryLabel)
     static let tertiaryText = Color(uiColor: .tertiaryLabel)
     static let uncheckedIcon = Color(uiColor: .secondaryLabel)
-    static let checkedIcon = Color(uiColor: .systemGreen)
+    static let checkedIcon = Color(red: 0.08, green: 0.50, blue: 0.24)
     static let accentTeal = Color(uiColor: .systemTeal)
     static let surfaceFill = Color(uiColor: .secondarySystemBackground)
     static let strokeBorder = Color(uiColor: .separator)
@@ -180,13 +182,14 @@ private enum OverlayPalette {
     static let secondaryText = Color.secondary
     static let tertiaryText = Color.secondary.opacity(0.75)
     static let uncheckedIcon = Color.secondary
-    static let checkedIcon = Color.green
+    static let checkedIcon = Color(red: 0.08, green: 0.50, blue: 0.24)
     static let accentTeal = Color.teal
     static let surfaceFill = Color.gray.opacity(0.18)
     static let strokeBorder = Color.primary.opacity(0.14)
     #endif
 }
 
+/// Floating quest overlay card and collapsed pill displayed while a quest is active.
 public struct QuestOverlayView: View {
     @ObservedObject private var questState: HollerKitQuestState
     @State private var dragOffset: CGSize = .zero
@@ -271,6 +274,7 @@ public struct QuestOverlayView: View {
         }
     }
 
+    /// Clamps the proposed drag offset so the floating overlay stays within safe viewport margins.
     private func clampOffset(_ proposed: CGSize, viewportSize: CGSize, cardSize: CGSize) -> CGSize {
         guard viewportSize.width > 0, viewportSize.height > 0, cardSize.width > 0, cardSize.height > 0 else {
             return proposed
@@ -288,6 +292,7 @@ public struct QuestOverlayView: View {
         )
     }
 
+    /// Renders the compact floating pill for the active quest session.
     private func collapsedPill(session: ActiveQuestSession) -> some View {
         HStack(spacing: 10) {
             Button {
@@ -358,6 +363,7 @@ public struct QuestOverlayView: View {
         .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
     }
 
+    /// Renders the expanded floating quest card with setup, interactive step checklist, and expectations.
     private func expandedCard(session: ActiveQuestSession) -> some View {
         let maxInstructionsHeight: CGFloat = viewportSize.height > 0
             ? min(240, max(110, viewportSize.height * 0.36))

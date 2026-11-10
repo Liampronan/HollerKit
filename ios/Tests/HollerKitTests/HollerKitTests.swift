@@ -2448,8 +2448,14 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(afterNewerLocal?.latestRun?.firstCommentLine, "New regression after fix")
     }
 
+    /// Verifies that `QuestOverlayView` renders visible green checkmarks, teal `sparkles` guidance icons,
+    /// and dark neutral unchecked circles/setup icons when hosted in a transparent overlay window.
     @MainActor
     func testQuestOverlayCheckmarksAndGuidanceIconsMaintainContrastInTransparentWindow() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitTests-OverlayContrast-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
         let definition = QuestDefinition(
             id: "checkout-promo-math",
             title: "Apply promo RUN2026 and verify total",
@@ -2475,20 +2481,32 @@ final class HollerKitTests: XCTestCase {
                 server: URL(string: "https://api.hollerkit.test")!,
                 auth: { "tester-jwt" },
                 isEnabled: { true },
-                inputMode: .textAndAudio
+                inputMode: .textAndAudio,
+                outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
             )
         )
         let state = HollerKitQuestState()
         state.startQuest(item, startedAt: Date().addingTimeInterval(-8))
+        defer {
+            state.reset()
+            QuestOverlayWindowManager.shared.hide()
+        }
         state.setOverlayExpanded(true)
         state.toggleStep(at: 0)
 
         let size = CGSize(width: 393, height: 600)
+        var measuredCardFrame: CGRect = .zero
         let rootView = ZStack(alignment: .bottom) {
             Color.clear.ignoresSafeArea()
-            QuestOverlayView(questState: state, viewportSize: size)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 28)
+            QuestOverlayView(
+                questState: state,
+                viewportSize: size,
+                onFrameChange: { frame in
+                    measuredCardFrame = frame
+                }
+            )
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
         }
         .environment(\.colorScheme, .light)
 
@@ -2530,25 +2548,30 @@ final class HollerKitTests: XCTestCase {
         controller.view.layer.render(in: context)
         window.isHidden = true
 
+        XCTAssertFalse(measuredCardFrame.isEmpty, "QuestOverlayView must report a non-empty card frame")
+        let minX = max(0, Int((measuredCardFrame.minX + 12) * scale))
+        let maxX = min(pixelWidth, Int((measuredCardFrame.minX + 32) * scale))
+        let minY = max(0, Int((measuredCardFrame.minY + 54) * scale))
+        let maxY = min(pixelHeight, Int((measuredCardFrame.maxY - 42) * scale))
+
         var greenCheckmarkPixels = 0
         var tealSparklesPixels = 0
         var darkLeadingIconPixels = 0
 
-        // Leading icon column inside the 340pt card centered in 393pt viewport:
-        // Card leading x ≈ 26.5pt, inner padding 14pt -> icon column x ≈ 40..58pt (80..116px at 2x)
-        // Scrollable instructions region y ≈ 270..520pt (540..1040px at 2x)
-        for y in 540..<1040 {
-            for x in 80..<116 {
+        for y in minY..<maxY {
+            for x in minX..<maxX {
                 let offset = y * bpr + x * bpp
                 let r = Int(rawBytes[offset])
                 let g = Int(rawBytes[offset + 1])
                 let b = Int(rawBytes[offset + 2])
+                let maxChannel = max(r, max(g, b))
+                let minChannel = min(r, min(g, b))
 
                 if g > r + 40 && g > b + 20 {
                     greenCheckmarkPixels += 1
                 } else if b > r + 40 && g > r + 25 {
                     tealSparklesPixels += 1
-                } else if r < 180 && g < 180 && b < 180 {
+                } else if maxChannel < 180 && (maxChannel - minChannel) <= 20 {
                     darkLeadingIconPixels += 1
                 }
             }

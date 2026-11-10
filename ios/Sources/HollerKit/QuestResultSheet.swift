@@ -19,6 +19,8 @@ public struct QuestResultSheet: View {
     @State private var autoDismissTask: Task<Void, Never>?
 
     private static let selectableResults: [QuestResult] = [.pass, .fail, .unsure]
+    /// High-contrast green fill used for checked icons so white checkmarks maintain >= 4.5:1 contrast in light and dark modes.
+    private static let checkedStepColor = Color(red: 0.08, green: 0.50, blue: 0.24)
 
     public init(questState: HollerKitQuestState = HollerKit.quests) {
         self.questState = questState
@@ -82,7 +84,7 @@ public struct QuestResultSheet: View {
                                             if isChecked {
                                                 Image(systemName: "checkmark.circle.fill")
                                                     .symbolRenderingMode(.palette)
-                                                    .foregroundStyle(Color.white, Color.green)
+                                                    .foregroundStyle(Color.white, Self.checkedStepColor)
                                             } else {
                                                 Image(systemName: "circle")
                                                     .symbolRenderingMode(.monochrome)
@@ -425,15 +427,15 @@ public struct QuestResultSheet: View {
         }
     }
 
-    /// Returns the tint color for a given quest result option.
+    /// Returns the high-contrast tint color for a given quest result option in both light and dark appearances.
     private func color(for result: QuestResult) -> Color {
         switch result {
         case .pass:
-            return .green
+            return Self.checkedStepColor
         case .fail:
-            return .red
+            return Color(red: 0.78, green: 0.12, blue: 0.16)
         case .unsure:
-            return .orange
+            return Color(red: 0.70, green: 0.34, blue: 0.00)
         case .abandoned:
             return .secondary
         }
