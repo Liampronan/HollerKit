@@ -3,6 +3,7 @@ import {
   apiKeys,
   createHollerKitServer,
   defaultV1Limits,
+  githubIssuesSink,
   postgresStore,
   s3Storage,
   supabaseJwt,
@@ -36,9 +37,20 @@ const storage = s3Storage({
   secretAccessKey: s3SecretAccessKey,
 })
 
+const githubRepo = process.env.HOLLERKIT_GITHUB_REPO?.trim()
+const githubToken = process.env.HOLLERKIT_GITHUB_TOKEN?.trim()
+const githubWebhookSecret = process.env.HOLLERKIT_GITHUB_WEBHOOK_SECRET?.trim()
+const sinks =
+  githubRepo && githubToken
+    ? [githubIssuesSink({ repo: githubRepo, token: githubToken })]
+    : undefined
+
 const handler = createHollerKitServer({
   store,
   storage,
+  sinks,
+  autoFlushOutbox: sinks ? 'sync' : undefined,
+  githubWebhook: githubWebhookSecret ? { secret: githubWebhookSecret } : undefined,
   authenticate: [
     supabaseJwt({
       jwksUrl: process.env.SUPABASE_JWKS_URL,

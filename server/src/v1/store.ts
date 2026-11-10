@@ -336,6 +336,7 @@ export interface EnqueueOutboxInput {
 }
 
 export interface ClaimPendingOutboxInput {
+  feedbackId?: string | undefined
   limit?: number | undefined
   leaseMs?: number | undefined
   now?: Date | undefined
