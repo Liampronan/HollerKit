@@ -18,6 +18,17 @@ public struct QuestCardView: View {
         self.onStart = onStart
     }
 
+    public var buttonTitle: String {
+        if isActive {
+            return "Running..."
+        }
+        return item.status == .passed ? "Re-run Quest" : "Start Quest"
+    }
+
+    public var buttonSystemImage: String {
+        isActive ? "play.circle.fill" : "play.fill"
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 8) {
@@ -46,13 +57,16 @@ public struct QuestCardView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(item.needWarnings, id: \.self) { warning in
-                            Label(warning, systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption2.weight(.medium))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.orange.opacity(0.15))
-                                .foregroundStyle(.orange)
-                                .clipShape(Capsule())
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                Text(warning)
+                            }
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.orange.opacity(0.15))
+                            .foregroundStyle(.orange)
+                            .clipShape(Capsule())
                         }
                     }
                 }
@@ -110,21 +124,26 @@ public struct QuestCardView: View {
                 }
             }
 
-            HStack {
+            HStack(spacing: 8) {
                 if let route = item.definition.start, !route.isEmpty {
-                    Label(route, systemImage: "link")
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Image(systemName: "link")
+                        Text(route)
+                            .lineLimit(1)
+                    }
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("HollerKitQuestStartRoute_\(item.id)")
                 }
 
-                Spacer()
+                Spacer(minLength: 8)
 
                 Button(action: onStart) {
-                    Label(
-                        isActive ? "Running..." : (item.status == .passed ? "Re-run Quest" : "Start Quest"),
-                        systemImage: isActive ? "play.circle.fill" : "play.fill"
-                    )
+                    HStack(spacing: 6) {
+                        Image(systemName: buttonSystemImage)
+                        Text(buttonTitle)
+                    }
                     .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(.borderedProminent)

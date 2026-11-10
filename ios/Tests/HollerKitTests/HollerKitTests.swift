@@ -1920,5 +1920,235 @@ final class HollerKitTests: XCTestCase {
         XCTAssertNotEqual(submittedKeys, Array(issuedGrantKeys.prefix(2)))
         XCTAssertNotEqual(submittedAttachments[0]["key"] as? String, submittedAttachments[1]["key"] as? String)
     }
+
+    @MainActor
+    func testQuestCardViewButtonAndRouteLayoutInsideList() throws {
+        let definition = QuestDefinition(
+            id: "map-route-quest",
+            title: "Verify map pin clustering",
+            area: "map",
+            setup: ["Enable location permissions"],
+            steps: ["Open the map tab", "Zoom out to city level"],
+            expect: ["Pins cluster smoothly"],
+            needs: ["logged_in"],
+            start: "trashapp://map"
+        )
+
+        let pendingItem = QuestBoardItem(
+            id: definition.id,
+            version: 1,
+            definition: definition,
+            status: .pending,
+            needWarnings: ["Needs condition 'logged_in' (not registered)"]
+        )
+        let passedItem = QuestBoardItem(
+            id: definition.id,
+            version: 1,
+            definition: definition,
+            status: .passed
+        )
+        let failedItem = QuestBoardItem(
+            id: definition.id,
+            version: 1,
+            definition: definition,
+            status: .failed
+        )
+
+        let pendingCard = QuestCardView(item: pendingItem, isActive: false, onStart: {})
+        XCTAssertEqual(pendingCard.buttonTitle, "Start Quest")
+        XCTAssertEqual(pendingCard.buttonSystemImage, "play.fill")
+
+        let passedCard = QuestCardView(item: passedItem, isActive: false, onStart: {})
+        XCTAssertEqual(passedCard.buttonTitle, "Re-run Quest")
+        XCTAssertEqual(passedCard.buttonSystemImage, "play.fill")
+
+        let failedCard = QuestCardView(item: failedItem, isActive: false, onStart: {})
+        XCTAssertEqual(failedCard.buttonTitle, "Start Quest")
+        XCTAssertEqual(failedCard.buttonSystemImage, "play.fill")
+
+        let activeCard = QuestCardView(item: pendingItem, isActive: true, onStart: {})
+        XCTAssertEqual(activeCard.buttonTitle, "Running...")
+        XCTAssertEqual(activeCard.buttonSystemImage, "play.circle.fill")
+
+        // Render QuestCardView inside a List (as QuestBoardView does) and inspect the rendered pixels
+        // to ensure List row Label icon-column alignment does not distort the Start Quest button or route row.
+        let listHostedView = List {
+            QuestCardView(item: pendingItem, isActive: false, onStart: {})
+        }
+        .listStyle(.insetGrouped)
+        .tint(.blue)
+        .environment(\.colorScheme, .light)
+
+        let controller = UIHostingController(rootView: listHostedView)
+        let viewportSize = CGSize(width: 390, height: 500)
+        let window = UIWindow(frame: CGRect(origin: .zero, size: viewportSize))
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.view.frame = window.bounds
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        controller.view.layoutIfNeeded()
+
+        let rendererFormat = UIGraphicsImageRendererFormat()
+        rendererFormat.scale = 2.0
+        let snapshot = UIGraphicsImageRenderer(size: viewportSize, format: rendererFormat).image { rendererContext in
+            controller.view.layer.render(in: rendererContext.cgContext)
+        }
+        window.isHidden = true
+
+        let cgImage = try XCTUnwrap(snapshot.cgImage)
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else {
+            XCTFail("Failed to create bitmap context")
+            return
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        // Locate the prominent blue Start Quest button capsule in the right half of the card.
+        var minBlueX = width
+        var maxBlueX = 0
+        var minBlueY = height
+        var maxBlueY = 0
+        for y in 0..<height {
+            for x in (width / 2)..<width {
+                let offset = y * bytesPerRow + x * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                // System blue capsule fill has strong blue dominance over red.
+                if b > 180 && r < 80 && (b - r) > 120 {
+                    if x < minBlueX { minBlueX = x }
+                    if x > maxBlueX { maxBlueX = x }
+                    if y < minBlueY { minBlueY = y }
+                    if y > maxBlueY { maxBlueY = y }
+                }
+            }
+        }
+
+        XCTAssertLessThan(minBlueX, maxBlueX, "Expected to find blue Start Quest button capsule in List snapshot")
+        XCTAssertLessThan(minBlueY, maxBlueY, "Expected non-empty vertical bounds for Start Quest button capsule")
+        guard minBlueX < maxBlueX, minBlueY < maxBlueY else {
+            return
+        }
+
+        // Within the vertical band of the button capsule, find white foreground pixels (icon + title)
+        // that lie strictly inside each scanline's blue capsule span [rowMinBlueX, rowMaxBlueX].
+        let midBandMinY = minBlueY + (maxBlueY - minBlueY) / 4
+        let midBandMaxY = maxBlueY - (maxBlueY - minBlueY) / 4
+        var minWhiteX = maxBlueX
+        var maxWhiteX = minBlueX
+        for y in midBandMinY...midBandMaxY {
+            var rowMinBlueX = maxBlueX
+            var rowMaxBlueX = minBlueX
+            for x in minBlueX...maxBlueX {
+                let offset = y * bytesPerRow + x * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                if b > 180 && r < 80 && (b - r) > 120 {
+                    if x < rowMinBlueX { rowMinBlueX = x }
+                    if x > rowMaxBlueX { rowMaxBlueX = x }
+                }
+            }
+            guard rowMinBlueX < rowMaxBlueX else { continue }
+            for x in rowMinBlueX...rowMaxBlueX {
+                let offset = y * bytesPerRow + x * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                if r > 220 && g > 220 && b > 220 {
+                    if x < minWhiteX { minWhiteX = x }
+                    if x > maxWhiteX { maxWhiteX = x }
+                }
+            }
+        }
+
+        XCTAssertLessThan(minWhiteX, maxWhiteX, "Expected white icon and label pixels inside the Start Quest button")
+        guard minWhiteX < maxWhiteX else {
+            return
+        }
+        let scale = rendererFormat.scale
+        let leadingPaddingPt = CGFloat(minWhiteX - minBlueX) / scale
+        let trailingPaddingPt = CGFloat(maxBlueX - maxWhiteX) / scale
+
+        // Regression assertions for #26:
+        // 1. The play.fill icon must appear near the leading edge (no huge empty slot on the left).
+        XCTAssertLessThan(
+            leadingPaddingPt,
+            20,
+            "Start Quest button has an unexpectedly wide leading empty area (\(leadingPaddingPt)pt); play icon may be missing"
+        )
+        // 2. The title must not sit flush against the trailing edge of the capsule.
+        XCTAssertGreaterThan(
+            trailingPaddingPt,
+            6,
+            "Start Quest button label is too close to the right edge (\(trailingPaddingPt)pt)"
+        )
+        // 3. Leading and trailing padding should be reasonably balanced.
+        XCTAssertLessThan(
+            abs(leadingPaddingPt - trailingPaddingPt),
+            8,
+            "Expected balanced horizontal padding in Start Quest button, got leading=\(leadingPaddingPt)pt trailing=\(trailingPaddingPt)pt"
+        )
+
+        // 4. Verify the start route ("trashapp://map") on the left side of the bottom row renders
+        // its link icon and route text compactly without a wide List icon-column gap.
+        var routeForegroundColumns = [Bool](repeating: false, count: minBlueX)
+        for x in 0..<minBlueX {
+            for y in minBlueY...maxBlueY {
+                let offset = y * bytesPerRow + x * 4
+                let r = Int(pixels[offset])
+                let g = Int(pixels[offset + 1])
+                let b = Int(pixels[offset + 2])
+                // Secondary text/icon on white card row background (255, 255, 255)
+                if r < 210 && g < 210 && b < 210 {
+                    routeForegroundColumns[x] = true
+                    break
+                }
+            }
+        }
+        var clusters: [(start: Int, end: Int)] = []
+        var currentStart: Int?
+        for x in 0..<minBlueX {
+            if routeForegroundColumns[x] {
+                if currentStart == nil {
+                    currentStart = x
+                }
+            } else if let start = currentStart {
+                clusters.append((start: start, end: x - 1))
+                currentStart = nil
+            }
+        }
+        if let start = currentStart {
+            clusters.append((start: start, end: minBlueX - 1))
+        }
+        XCTAssertGreaterThanOrEqual(
+            clusters.count,
+            2,
+            "Expected link icon and route text clusters on the left side of the bottom row"
+        )
+        if clusters.count >= 2 {
+            let iconToRouteGapPt = CGFloat(clusters[1].start - clusters[0].end) / scale
+            XCTAssertLessThan(
+                iconToRouteGapPt,
+                12,
+                "Expected compact spacing between link icon and start route text, got \(iconToRouteGapPt)pt"
+            )
+        }
+    }
     #endif
 }
