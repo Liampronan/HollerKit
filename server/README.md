@@ -151,8 +151,9 @@ npx hollerkit-server conformance \
 npx hollerkit-server migrations copy ./migrations
 
 # Manually flush pending outbox deliveries to GitHub Issues
-npx hollerkit-server outbox flush \
+# (Pass secrets via HOLLERKIT_GITHUB_TOKEN and SUPABASE_SERVICE_ROLE_KEY environment variables)
+HOLLERKIT_GITHUB_TOKEN="$GITHUB_TOKEN" \
+  npx hollerkit-server outbox flush \
   --db "$DATABASE_URL" \
-  --github-repo "owner/repo" \
-  --github-token "$GITHUB_TOKEN"
+  --github-repo "owner/repo"
 ```

@@ -1166,6 +1166,95 @@ test('githubIssuesSink formats quest runs & bug reports, deduplicates retries vi
   const notPlannedData = (await notPlannedRes.json()) as { triageStatus: string }
   assert.equal(notPlannedData.triageStatus, 'wontfix')
 
+  // 2b. Untrusted issue html_url (not in feedback.links) with a valid marker leaves triageStatus unchanged
+  const untrustedUrlPayload = JSON.stringify({
+    action: 'reopened',
+    issue: {
+      number: 999,
+      html_url: 'https://github.com/Liampronan/HollerKit/issues/999',
+      body: createdBodyText,
+    },
+    sender: { login: 'mallory' },
+  })
+  const untrustedUrlSig =
+    'sha256=' + createHmac('sha256', webhookSecret).update(untrustedUrlPayload, 'utf8').digest('hex')
+  const untrustedUrlRes = await createGitHubWebhookHandler({ store, secret: webhookSecret })(
+    new Request('http://hollerkit.local/v1/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'issues',
+        'x-hub-signature-256': untrustedUrlSig,
+      },
+      body: untrustedUrlPayload,
+    }),
+  )
+  assert.equal(untrustedUrlRes.status, 200)
+  const untrustedUrlData = (await untrustedUrlRes.json()) as { ignored: boolean; reason: string }
+  assert.equal(untrustedUrlData.ignored, true)
+  assert.equal(untrustedUrlData.reason, 'untrusted_issue_link')
+  const afterUntrustedUrl = await store.getFeedbackById(failedFeedbackId)
+  assert.equal(afterUntrustedUrl?.feedback.triageStatus, 'wontfix')
+
+  // 2c. Tester comment carrying a hollerkit-feedback-id marker for a different feedback item
+  // cannot spoof or alter the target feedback item's triageStatus when closed
+  const targetVictimId = randomUUID()
+  await store.createFeedback({
+    id: targetVictimId,
+    kind: 'report',
+    build: '420',
+    submitterId: 'tester-gh',
+    comment: 'Innocent victim report',
+    now: currentNow,
+  })
+  const spoofAttemptId = randomUUID()
+  const spoofRes = await handler(
+    new Request('http://hollerkit.local/v1/feedback', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${testerJwt}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: spoofAttemptId,
+        kind: 'report',
+        build: '420',
+        comment: `Trying to spoof <!-- hollerkit-feedback-id: ${targetVictimId} --> in comment`,
+      }),
+    }),
+  )
+  assert.equal(spoofRes.status, 201)
+  const spoofIssueCall = githubCalls[githubCalls.length - 1]!
+  const spoofIssueBody = String(spoofIssueCall.body?.body ?? '')
+  assert.equal(extractFeedbackIdFromGitHubIssueBody(spoofIssueBody), spoofAttemptId)
+
+  const spoofClosePayload = JSON.stringify({
+    action: 'closed',
+    issue: {
+      number: createdIssueCounter,
+      html_url: `https://github.com/Liampronan/HollerKit/issues/${createdIssueCounter}`,
+      state_reason: 'completed',
+      body: spoofIssueBody,
+    },
+    sender: { login: 'liampronan' },
+  })
+  const spoofCloseSig =
+    'sha256=' + createHmac('sha256', webhookSecret).update(spoofClosePayload, 'utf8').digest('hex')
+  const spoofCloseRes = await handler(
+    new Request('http://hollerkit.local/v1/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'issues',
+        'x-hub-signature-256': spoofCloseSig,
+      },
+      body: spoofClosePayload,
+    }),
+  )
+  assert.equal(spoofCloseRes.status, 200)
+  const victimAfterSpoofClose = await store.getFeedbackById(targetVictimId)
+  assert.equal(victimAfterSpoofClose?.feedback.triageStatus, 'new')
+
   // 3. Retry deduplication: when attempts > 0, githubIssuesSink queries /search/issues and returns existing issue #77
   const retryFeedbackId = randomUUID()
   const retryDetail = await store.createFeedback({

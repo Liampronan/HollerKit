@@ -746,7 +746,12 @@ export function memoryStore(): HollerKitStore {
       const leaseUntilIso = new Date(nowMs + leaseMs).toISOString()
       const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
       const pending = Array.from(outbox.values())
-        .filter((row) => row.deliveredAt === null && new Date(row.nextAttemptAt).getTime() <= nowMs)
+        .filter(
+          (row) =>
+            row.deliveredAt === null &&
+            new Date(row.nextAttemptAt).getTime() <= nowMs &&
+            (input.feedbackId === undefined || row.feedbackId === input.feedbackId),
+        )
         .sort((a, b) => {
           const diff = new Date(a.nextAttemptAt).getTime() - new Date(b.nextAttemptAt).getTime()
           if (diff !== 0) return diff

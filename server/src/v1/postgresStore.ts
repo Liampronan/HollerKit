@@ -1012,6 +1012,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           FROM hollerkit.outbox
           WHERE delivered_at IS NULL
             AND next_attempt_at <= ${nowIso}::timestamptz
+            AND (${input.feedbackId ?? null}::uuid IS NULL OR feedback_id = ${input.feedbackId ?? null}::uuid)
           ORDER BY next_attempt_at ASC, id ASC
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED

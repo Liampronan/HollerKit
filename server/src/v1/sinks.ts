@@ -52,6 +52,7 @@ export interface FlushOutboxOptions {
   store: HollerKitStore
   storage?: HollerKitStorageAdapter | undefined
   sinks: HollerKitSink[]
+  feedbackId?: string | undefined
   limit?: number | undefined
   leaseMs?: number | undefined
   deliveryTimeoutMs?: number | undefined
@@ -133,6 +134,7 @@ export async function flushOutbox(options: FlushOutboxOptions): Promise<FlushOut
   const deliveryTimeoutMs = options.deliveryTimeoutMs ?? 30_000
 
   const pendingRows = await options.store.claimPendingOutbox({
+    feedbackId: options.feedbackId,
     limit: options.limit,
     leaseMs: options.leaseMs,
     now,

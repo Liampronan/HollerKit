@@ -161,8 +161,35 @@ export function createHollerKitServer(
     }
   }
   const sinkReadUrlTtlSeconds = options.sinkReadUrlTtlSeconds ?? 604_800
+  const scheduleBackgroundWork = (promise: Promise<unknown>): void => {
+    const globalEdgeRuntime = (
+      globalThis as unknown as {
+        EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void }
+      }
+    ).EdgeRuntime
+    if (options.waitUntil) {
+      options.waitUntil(promise)
+    } else if (typeof globalEdgeRuntime?.waitUntil === 'function') {
+      globalEdgeRuntime.waitUntil(promise)
+    }
+  }
   const gitHubWebhookHandler = options.githubWebhook
     ? createGitHubWebhookHandler({
+        reconcileFeedbackOutbox:
+          executableSinks.length > 0
+            ? async (targetFeedbackId: string) => {
+                await flushOutbox({
+                  store: options.store,
+                  storage: options.storage,
+                  sinks: executableSinks,
+                  feedbackId: targetFeedbackId,
+                  limit: executableSinks.length,
+                  deliveryTimeoutMs: 10_000,
+                  now: nowFn,
+                  readUrlTtlSeconds: sinkReadUrlTtlSeconds,
+                })
+              }
+            : undefined,
         ...options.githubWebhook,
         store: options.store,
         now: nowFn,
@@ -309,33 +336,50 @@ export function createHollerKitServer(
 
           let feedbackResponse = created.feedback
           if (!created.idempotent && options.autoFlushOutbox && executableSinks.length > 0) {
-            const flushPromise = flushOutbox({
-              store: options.store,
-              storage: options.storage,
-              sinks: executableSinks,
-              now: nowFn,
-              readUrlTtlSeconds: sinkReadUrlTtlSeconds,
-            }).catch((err) => {
-              console.error('[hollerkit] autoFlushOutbox failed', err)
-            })
-
             if (options.autoFlushOutbox === 'background') {
-              const globalEdgeRuntime = (
-                globalThis as unknown as {
-                  EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void }
-                }
-              ).EdgeRuntime
-              if (options.waitUntil) {
-                options.waitUntil(flushPromise)
-              } else if (typeof globalEdgeRuntime?.waitUntil === 'function') {
-                globalEdgeRuntime.waitUntil(flushPromise)
-              }
+              const backgroundFlush = flushOutbox({
+                store: options.store,
+                storage: options.storage,
+                sinks: executableSinks,
+                now: nowFn,
+                readUrlTtlSeconds: sinkReadUrlTtlSeconds,
+              }).catch((err) => {
+                console.error('[hollerkit] autoFlushOutbox failed', err)
+              })
+              scheduleBackgroundWork(backgroundFlush)
             } else {
-              await flushPromise
+              // Scope synchronous request-bound flush strictly to the newly created feedback item
+              // with a bounded timeout, then drain any remaining pending backlog asynchronously.
+              await flushOutbox({
+                store: options.store,
+                storage: options.storage,
+                sinks: executableSinks,
+                feedbackId: created.feedback.id,
+                limit: executableSinks.length,
+                deliveryTimeoutMs: 10_000,
+                now: nowFn,
+                readUrlTtlSeconds: sinkReadUrlTtlSeconds,
+              }).catch((err) => {
+                console.error('[hollerkit] autoFlushOutbox sync failed', err)
+              })
+
               const refreshed = await options.store.getFeedbackById(created.feedback.id)
               if (refreshed) {
                 feedbackResponse = refreshed.feedback
               }
+
+              const backlogDrain = flushOutbox({
+                store: options.store,
+                storage: options.storage,
+                sinks: executableSinks,
+                limit: 5,
+                deliveryTimeoutMs: 10_000,
+                now: nowFn,
+                readUrlTtlSeconds: sinkReadUrlTtlSeconds,
+              }).catch((err) => {
+                console.error('[hollerkit] autoFlushOutbox backlog drain failed', err)
+              })
+              scheduleBackgroundWork(backlogDrain)
             }
           }
 
@@ -528,6 +572,9 @@ export function createHollerKitServer(
   }
 }
 
+/**
+ * Strips any configured `basePath` prefix and normalizes `/v1/*` route paths.
+ */
 function normalizeV1Path(pathname: string, basePath?: string): string | null {
   let cleaned = pathname.replace(/\/+$/, '') || '/'
   if (basePath) {
@@ -550,6 +597,9 @@ function normalizeV1Path(pathname: string, basePath?: string): string | null {
   return null
 }
 
+/**
+ * URL-decodes a single path segment or throws `400 invalid_path`.
+ */
 function decodePathSegment(segment: string): string {
   try {
     return decodeURIComponent(segment)
@@ -558,6 +608,9 @@ function decodePathSegment(segment: string): string {
   }
 }
 
+/**
+ * Authenticates the incoming request and verifies it holds at least one required scope.
+ */
 async function requireAuth(
   request: Request,
   authenticators: Authenticator[],
@@ -592,6 +645,9 @@ async function requireAuth(
   return principal
 }
 
+/**
+ * Reads and parses a bounded JSON object body from the request.
+ */
 async function readJsonObject(request: Request, limits: V1LimitConfig): Promise<Record<string, unknown>> {
   const contentLengthHeader = request.headers.get('content-length')
   if (contentLengthHeader !== null) {
@@ -620,6 +676,9 @@ async function readJsonObject(request: Request, limits: V1LimitConfig): Promise<
   return parsed
 }
 
+/**
+ * Streams a request body up to `maxBytes`, throwing `413 body_too_large` if exceeded.
+ */
 async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array> {
   if (!request.body) {
     return new Uint8Array(0)
@@ -654,6 +713,9 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
   return merged
 }
 
+/**
+ * Validates an upload grant's MIME type and byte size against configured server limits.
+ */
 function validateUploadAttachmentLimits(
   kind: AttachmentKind,
   mimeType: string,
@@ -691,6 +753,9 @@ function validateUploadAttachmentLimits(
   }
 }
 
+/**
+ * Parses and validates the JSON body of `POST /v1/feedback`.
+ */
 function parseFeedbackCreateBody(body: Record<string, unknown>, limits: V1LimitConfig) {
   const id = parseRequiredUuid(body.id, 'id')
   const kindRaw = body.kind
@@ -863,6 +928,9 @@ function parseFeedbackCreateBody(body: Record<string, unknown>, limits: V1LimitC
   }
 }
 
+/**
+ * Parses and validates query parameters for `GET /v1/feedback`.
+ */
 function parseListFeedbackQuery(params: URLSearchParams) {
   const kindParam = params.get('kind')
   let kind: FeedbackKind | undefined
@@ -928,6 +996,9 @@ function parseListFeedbackQuery(params: URLSearchParams) {
   }
 }
 
+/**
+ * Parses and validates a top-level `hollerkit-quests.json` manifest object.
+ */
 export function parseQuestManifest(raw: unknown): { version: 1; quests: QuestDefinitionInput[] } {
   if (!isPlainObject(raw)) {
     throw new HollerKitError(400, 'invalid_manifest', 'Quest manifest must be a JSON object.')
@@ -939,6 +1010,9 @@ export function parseQuestManifest(raw: unknown): { version: 1; quests: QuestDef
   return { version: 1, quests }
 }
 
+/**
+ * Parses and validates an array of quest definition objects.
+ */
 export function parseQuestDefinitionArray(value: unknown, field: string): QuestDefinitionInput[] {
   if (!Array.isArray(value)) {
     throw new HollerKitError(400, 'invalid_quests', `${field} must be an array of quest definitions.`)
@@ -1005,6 +1079,9 @@ export function parseQuestDefinitionArray(value: unknown, field: string): QuestD
   })
 }
 
+/**
+ * Validates and normalizes a required UUID string field.
+ */
 function parseRequiredUuid(value: unknown, field: string): string {
   if (typeof value !== 'string' || !UUID_REGEX.test(value.trim())) {
     throw new HollerKitError(400, 'invalid_uuid', `${field} must be a valid UUID.`)
@@ -1012,6 +1089,9 @@ function parseRequiredUuid(value: unknown, field: string): string {
   return value.trim().toLowerCase()
 }
 
+/**
+ * Validates and trims a required non-empty string field.
+ */
 function parseRequiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new HollerKitError(400, 'invalid_field', `${field} must be a non-empty string.`)
@@ -1019,6 +1099,9 @@ function parseRequiredString(value: unknown, field: string): string {
   return value.trim()
 }
 
+/**
+ * Validates an optional string field, returning `null` when omitted or empty.
+ */
 function parseOptionalNullableString(value: unknown, field: string): string | null {
   if (value === undefined || value === null || value === '') return null
   if (typeof value !== 'string') {
@@ -1027,6 +1110,9 @@ function parseOptionalNullableString(value: unknown, field: string): string | nu
   return value
 }
 
+/**
+ * Validates an optional ISO-8601 timestamp string field.
+ */
 function parseOptionalIsoTimestamp(value: unknown, field: string): string | null {
   const str = parseOptionalNullableString(value, field)
   if (str === null) return null
@@ -1037,6 +1123,9 @@ function parseOptionalIsoTimestamp(value: unknown, field: string): string | null
   return new Date(ms).toISOString()
 }
 
+/**
+ * Validates an optional integer field, returning `null` when omitted.
+ */
 function parseOptionalNullableInteger(value: unknown, field: string): number | null {
   if (value === undefined || value === null) return null
   if (typeof value !== 'number' || !Number.isInteger(value)) {
@@ -1045,6 +1134,9 @@ function parseOptionalNullableInteger(value: unknown, field: string): number | n
   return value
 }
 
+/**
+ * Validates a required positive integer field.
+ */
 function parsePositiveInteger(value: unknown, field: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new HollerKitError(400, 'invalid_field', `${field} must be a positive integer.`)
@@ -1052,6 +1144,9 @@ function parsePositiveInteger(value: unknown, field: string): number {
   return value
 }
 
+/**
+ * Validates a required finite number field.
+ */
 function parseFiniteNumber(value: unknown, field: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new HollerKitError(400, 'invalid_field', `${field} must be a finite number.`)
@@ -1059,6 +1154,9 @@ function parseFiniteNumber(value: unknown, field: string): number {
   return value
 }
 
+/**
+ * Validates a required non-empty array of non-empty strings.
+ */
 function parseRequiredNonEmptyStringArray(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new HollerKitError(400, 'invalid_field', `${field} must be a non-empty array of strings.`)
@@ -1066,6 +1164,9 @@ function parseRequiredNonEmptyStringArray(value: unknown, field: string): string
   return value.map((item, idx) => parseRequiredString(item, `${field}[${idx}]`))
 }
 
+/**
+ * Validates an optional array of non-empty strings.
+ */
 function parseOptionalStringArray(value: unknown, field: string): string[] | undefined {
   if (value === undefined || value === null) return undefined
   if (!Array.isArray(value)) {
@@ -1074,6 +1175,9 @@ function parseOptionalStringArray(value: unknown, field: string): string[] | und
   return value.map((item, idx) => parseRequiredString(item, `${field}[${idx}]`))
 }
 
+/**
+ * Validates an `AttachmentKind` value.
+ */
 function parseAttachmentKind(value: unknown, field: string): AttachmentKind {
   if (typeof value !== 'string' || !VALID_ATTACHMENT_KINDS.has(value as AttachmentKind)) {
     throw new HollerKitError(
@@ -1085,6 +1189,9 @@ function parseAttachmentKind(value: unknown, field: string): AttachmentKind {
   return value as AttachmentKind
 }
 
+/**
+ * Validates a `TriageStatus` value.
+ */
 function parseTriageStatus(value: unknown, field: string): TriageStatus {
   if (typeof value !== 'string' || !VALID_TRIAGE_STATUSES.has(value as TriageStatus)) {
     throw new HollerKitError(
@@ -1096,6 +1203,9 @@ function parseTriageStatus(value: unknown, field: string): TriageStatus {
   return value as TriageStatus
 }
 
+/**
+ * Maps a MIME type and attachment kind to a canonical file extension.
+ */
 function extensionForMimeType(mimeType: string, kind: AttachmentKind): string {
   const lower = mimeType.toLowerCase()
   if (lower.includes('png')) return 'png'
@@ -1109,10 +1219,16 @@ function extensionForMimeType(mimeType: string, kind: AttachmentKind): string {
   return 'bin'
 }
 
+/**
+ * Checks whether a value is a non-null, non-array plain object.
+ */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Builds a JSON `Response` with the `hollerkit-protocol: 1` header.
+ */
 function protocolJsonResponse(data: unknown, status = 200): Response {
   return Response.json(data, {
     status,
@@ -1122,6 +1238,9 @@ function protocolJsonResponse(data: unknown, status = 200): Response {
   })
 }
 
+/**
+ * Converts an error into a standard `/v1` JSON error response.
+ */
 function protocolErrorResponse(error: unknown): Response {
   if (error instanceof HollerKitError) {
     return Response.json(

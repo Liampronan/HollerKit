@@ -302,7 +302,7 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
 
         if (!dbUrl || !githubRepo || !githubToken) {
           stderr(
-            'Error: Usage: hollerkit outbox flush --db <url> --github-repo <owner/repo> --github-token <token> [--supabase-url <url> --supabase-service-role-key <key>] [--limit <n>]',
+            'Error: Usage: hollerkit outbox flush [--db <url>] [--github-repo <owner/repo>] [--github-token <token>] [--supabase-url <url> --supabase-service-role-key <key> [--bucket <bucket>]] [--limit <n>] (or set DATABASE_URL/HOLLERKIT_DB_POOLER_URL, HOLLERKIT_GITHUB_REPO, HOLLERKIT_GITHUB_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, HOLLERKIT_BUCKET)',
           )
           return 1
         }
@@ -415,7 +415,7 @@ Usage:
   hollerkit keys create --db <url> --scopes <comma-separated-scopes> [--label <label>]
   hollerkit keys revoke --db <url> <key-prefix-or-hash-or-label>
   hollerkit conformance --server <url> [--tester-token <tok>] [--quests-key <key>] [--agent-key <key>]
-  hollerkit outbox flush --db <url> --github-repo <owner/repo> --github-token <token> [--limit <n>]
+  hollerkit outbox flush [--db <url>] [--github-repo <owner/repo>] [--github-token <token>] [--supabase-url <url> --supabase-service-role-key <key> [--bucket <bucket>]] [--limit <n>] (or set DATABASE_URL/HOLLERKIT_DB_POOLER_URL, HOLLERKIT_GITHUB_REPO, HOLLERKIT_GITHUB_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, HOLLERKIT_BUCKET)
   hollerkit migrations copy <dir>`)
 }
 

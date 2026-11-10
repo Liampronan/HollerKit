@@ -11,8 +11,8 @@ import type {
 } from '../../v1/store.js'
 
 const REPO_SEGMENT_REGEX = /^[A-Za-z0-9_.-]+$/
-const FEEDBACK_ID_MARKER_REGEX =
-  /<!--\s*hollerkit-feedback-id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*-->/i
+const FEEDBACK_ID_MARKER_GLOBAL_REGEX =
+  /<!--\s*hollerkit-feedback-id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*-->/gi
 const SHA256_SIGNATURE_REGEX = /^sha256=([0-9a-f]{64})$/i
 const DEFAULT_WEBHOOK_MAX_BYTES = 1_048_576
 
@@ -87,6 +87,11 @@ export interface GitHubWebhookOptions {
    */
   maxBodyBytes?: number | undefined
   /**
+   * Optional reconciliation callback invoked when a webhook arrives for a feedback item that does not
+   * yet have its GitHub issue link recorded in `feedback.links` (e.g. outbox delivery still pending).
+   */
+  reconcileFeedbackOutbox?: ((feedbackId: string) => Promise<void>) | undefined
+  /**
    * Clock source for deterministic testing.
    */
   now?: (() => Date) | undefined
@@ -126,14 +131,19 @@ export function parseGitHubRepo(repo: string): { owner: string; repo: string } {
 }
 
 /**
- * Extracts the embedded HollerKit `feedbackId` UUID from a GitHub issue body, if present.
+ * Extracts the embedded HollerKit `feedbackId` UUID from the footer of a GitHub issue body, if present.
  */
 export function extractFeedbackIdFromGitHubIssueBody(
   body: string | null | undefined,
 ): string | null {
   if (typeof body !== 'string' || body.length === 0) return null
-  const match = body.match(FEEDBACK_ID_MARKER_REGEX)
-  return match?.[1] ? match[1].toLowerCase() : null
+  let lastId: string | null = null
+  for (const match of body.matchAll(FEEDBACK_ID_MARKER_GLOBAL_REGEX)) {
+    if (match[1]) {
+      lastId = match[1].toLowerCase()
+    }
+  }
+  return lastId
 }
 
 /**
@@ -173,9 +183,9 @@ export function formatGitHubIssue(
 
   const lines: string[] = []
 
-  // 1. Tester Comment / Voice Transcript
+  // 1. Tester Comment / Voice Transcript (HTML comments escaped so user text cannot spoof footer markers)
   if (feedback.comment && feedback.comment.trim().length > 0) {
-    lines.push('### Tester Notes', '', feedback.comment.trim(), '')
+    lines.push('### Tester Notes', '', escapeUserMarkdown(feedback.comment.trim()), '')
   }
 
   if (
@@ -186,8 +196,7 @@ export function formatGitHubIssue(
     lines.push(
       '### Voice Transcript',
       '',
-      ...feedback.transcript
-        .trim()
+      ...escapeUserMarkdown(feedback.transcript.trim())
         .split(/\r?\n/)
         .map((line) => `> ${line}`),
       '',
@@ -196,7 +205,7 @@ export function formatGitHubIssue(
 
   // 2. Quest Checklist & Expectations (for quest_run or linked quest)
   if (quest || feedback.questId) {
-    const questTitle = quest?.title ?? feedback.questId ?? 'Quest'
+    const questTitle = escapeUserMarkdown(quest?.title ?? feedback.questId ?? 'Quest')
     const versionBadge =
       feedback.questVersion !== null ? ` (v${feedback.questVersion})` : ''
     lines.push(`### QA Quest: ${questTitle}${versionBadge}`, '')
@@ -204,7 +213,7 @@ export function formatGitHubIssue(
     if (quest && quest.setup.length > 0) {
       lines.push('**Setup:**')
       for (const item of quest.setup) {
-        lines.push(`- ${item}`)
+        lines.push(`- ${escapeUserMarkdown(item)}`)
       }
       lines.push('')
     }
@@ -213,7 +222,7 @@ export function formatGitHubIssue(
       lines.push('**Steps:**')
       quest.steps.forEach((step, idx) => {
         const checked = feedback.stepsChecked[idx] === true
-        lines.push(`- [${checked ? 'x' : ' '}] ${step}`)
+        lines.push(`- [${checked ? 'x' : ' '}] ${escapeUserMarkdown(step)}`)
       })
       lines.push('')
     }
@@ -221,7 +230,7 @@ export function formatGitHubIssue(
     if (quest && quest.expect.length > 0) {
       lines.push('**Expected:**')
       for (const exp of quest.expect) {
-        lines.push(`- ${exp}`)
+        lines.push(`- ${escapeUserMarkdown(exp)}`)
       }
       lines.push('')
     }
@@ -257,7 +266,7 @@ export function formatGitHubIssue(
       const payloadKeys = Object.keys(ev.payload ?? {})
       const payloadSummary =
         payloadKeys.length > 0 ? ` — \`${escapeInlineCode(JSON.stringify(ev.payload))}\`` : ''
-      lines.push(`- \`${offset}\` **${ev.kind}**${payloadSummary}`)
+      lines.push(`- \`${offset}\` **${escapeUserMarkdown(ev.kind)}**${payloadSummary}`)
     }
     lines.push('')
   }
@@ -554,7 +563,7 @@ export function createGitHubWebhookHandler(
         })
       }
 
-      const existing = await options.store.getFeedbackById(feedbackId)
+      let existing = await options.store.getFeedbackById(feedbackId)
       if (!existing) {
         return webhookJsonResponse({
           ok: true,
@@ -571,6 +580,56 @@ export function createGitHubWebhookHandler(
         typeof issue?.html_url === 'string' && issue.html_url.trim().length > 0
           ? issue.html_url.trim()
           : null
+
+      if (!issueUrl) {
+        return webhookJsonResponse({
+          ok: true,
+          event: 'issues',
+          action,
+          feedbackId,
+          ignored: true,
+          reason: 'missing_issue_url',
+        })
+      }
+
+      // Verify that the webhook's issue `html_url` matches a trusted issue link recorded on `feedback.links`.
+      // If `feedback.links` does not yet have a GitHub issue link (e.g. outbox delivery still pending),
+      // invoke `reconcileFeedbackOutbox` first so legitimate early events are reconciled rather than lost.
+      if (!hasMatchingIssueLink(existing.feedback.links, issueUrl)) {
+        if (!hasAnyGitHubIssueLink(existing.feedback.links) && options.reconcileFeedbackOutbox) {
+          await options.reconcileFeedbackOutbox(feedbackId)
+          existing = await options.store.getFeedbackById(feedbackId)
+          if (!existing) {
+            return webhookJsonResponse({
+              ok: true,
+              event: 'issues',
+              action,
+              feedbackId,
+              ignored: true,
+              reason: 'feedback_not_found',
+            })
+          }
+        }
+
+        if (!hasMatchingIssueLink(existing.feedback.links, issueUrl)) {
+          if (!hasAnyGitHubIssueLink(existing.feedback.links)) {
+            throw new HollerKitError(
+              409,
+              'issue_link_pending',
+              'Feedback item does not yet have a recorded GitHub issue link; retry after outbox delivery.',
+            )
+          }
+          return webhookJsonResponse({
+            ok: true,
+            event: 'issues',
+            action,
+            feedbackId,
+            ignored: true,
+            reason: 'untrusted_issue_link',
+          })
+        }
+      }
+
       const stateReason =
         typeof issue?.state_reason === 'string' ? issue.state_reason.toLowerCase() : null
       const sender =
@@ -598,7 +657,7 @@ export function createGitHubWebhookHandler(
           : `Closed (${stateReason ?? 'completed'}) via ${issueRef}.`
 
       const mergedLinks = [...existing.feedback.links]
-      if (issueUrl && !mergedLinks.includes(issueUrl)) {
+      if (!mergedLinks.includes(issueUrl)) {
         mergedLinks.push(issueUrl)
       }
 
@@ -663,6 +722,9 @@ export async function verifyGitHubWebhookSignature(
   )
 }
 
+/**
+ * Queries GitHub's issue search endpoint for an existing issue containing the feedback's marker.
+ */
 async function findExistingIssueByFeedbackId(params: {
   apiBaseUrl: string
   owner: string
@@ -696,6 +758,31 @@ async function findExistingIssueByFeedbackId(params: {
   }
 }
 
+/**
+ * Checks whether a feedback item's `links` array contains the given GitHub issue URL.
+ */
+function hasMatchingIssueLink(links: ReadonlyArray<string>, candidateIssueUrl: string): boolean {
+  const normalizedCandidate = normalizeIssueUrl(candidateIssueUrl)
+  return links.some((link) => normalizeIssueUrl(link) === normalizedCandidate)
+}
+
+/**
+ * Checks whether a feedback item's `links` array already contains at least one GitHub issue link.
+ */
+function hasAnyGitHubIssueLink(links: ReadonlyArray<string>): boolean {
+  return links.some((link) => /\/issues\/\d+(?:$|[/?#])/i.test(link))
+}
+
+/**
+ * Normalizes a GitHub issue URL for case-insensitive comparison.
+ */
+function normalizeIssueUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '').toLowerCase()
+}
+
+/**
+ * Constructs a concise GitHub Issue title from a feedback record and optional quest title.
+ */
 function buildIssueTitle(
   feedback: FeedbackRecord,
   questTitle: string | null,
@@ -722,6 +809,9 @@ function buildIssueTitle(
   return `${areaPrefix} Feedback on build ${feedback.build}`
 }
 
+/**
+ * Extracts the first non-empty line of a comment or transcript, truncated to `maxChars`.
+ */
 function extractHeadlineSnippet(text: string | null | undefined, maxChars = 80): string | null {
   if (!text) return null
   const firstLine = text
@@ -733,18 +823,37 @@ function extractHeadlineSnippet(text: string | null | undefined, maxChars = 80):
   return `${firstLine.slice(0, maxChars - 1).trimEnd()}…`
 }
 
+/**
+ * Escapes HTML comment delimiters in user-provided markdown text so it cannot spoof HollerKit markers.
+ */
+function escapeUserMarkdown(value: string): string {
+  return value.replace(/<!--/g, '&lt;!--').replace(/-->/g, '--&gt;')
+}
+
+/**
+ * Escapes newlines, pipes, and HTML comment markers inside a Markdown table cell.
+ */
 function escapeTableCell(value: string): string {
-  return value.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|')
+  return escapeUserMarkdown(value).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|')
 }
 
+/**
+ * Escapes backticks, newlines, and HTML comment markers inside inline Markdown code spans.
+ */
 function escapeInlineCode(value: string): string {
-  return value.replace(/`/g, "'").replace(/\r?\n/g, ' ')
+  return escapeUserMarkdown(value).replace(/`/g, "'").replace(/\r?\n/g, ' ')
 }
 
+/**
+ * Escapes `--` and `>` inside JSON embedded in an HTML comment.
+ */
 function escapeHtmlCommentJson(json: string): string {
   return json.replace(/--/g, '\\u002d\\u002d').replace(/>/g, '\\u003e')
 }
 
+/**
+ * Reads a request body into a `Uint8Array`, enforcing `maxBytes`.
+ */
 async function readBoundedBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
   const contentLengthHeader = request.headers.get('content-length')
   if (contentLengthHeader !== null) {
@@ -790,6 +899,9 @@ async function readBoundedBytes(request: Request, maxBytes: number): Promise<Uin
   return merged
 }
 
+/**
+ * Decodes an even-length hexadecimal string into a `Uint8Array`.
+ */
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2)
   for (let i = 0; i < hex.length; i += 2) {
@@ -798,10 +910,16 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes
 }
 
+/**
+ * Extracts a standalone `ArrayBuffer` slice from a `Uint8Array` for Web Crypto calls.
+ */
 function bufferSource(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
 }
 
+/**
+ * Builds a JSON `Response` with the `hollerkit-protocol: 1` header.
+ */
 function webhookJsonResponse(data: unknown, status = 200): Response {
   return Response.json(data, {
     status,
