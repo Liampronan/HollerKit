@@ -73,7 +73,28 @@ components:
 
     QuestBoardStatus:
       type: string
-      enum: [pending, passed, failed]
+      enum: [pending, passed, failed, unsure]
+
+    QuestLatestRun:
+      type: object
+      required: [id, result, build, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        result:
+          $ref: "#/components/schemas/QuestResult"
+        build:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        comment:
+          type: [string, "null"]
+        triageStatus:
+          oneOf:
+            - $ref: "#/components/schemas/TriageStatus"
+            - type: "null"
 
     QuestDefinitionInput:
       type: object
@@ -189,6 +210,12 @@ components:
               type: integer
         passedOnCurrentVersion:
           type: boolean
+        boardStatus:
+          $ref: "#/components/schemas/QuestBoardStatus"
+        latestRun:
+          oneOf:
+            - $ref: "#/components/schemas/QuestLatestRun"
+            - type: "null"
 
     BuildManifestQuestStatus:
       type: object
@@ -254,6 +281,10 @@ components:
               type: integer
             abandoned:
               type: integer
+        latestRun:
+          oneOf:
+            - $ref: "#/components/schemas/QuestLatestRun"
+            - type: "null"
 
     UploadRequest:
       type: object

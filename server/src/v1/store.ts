@@ -4,7 +4,7 @@ export type Scope = 'tester' | 'quests:write' | 'agent:read' | 'agent:triage'
 
 export type QuestRecordMode = 'none' | 'optional' | 'suggested' | 'required'
 export type QuestStatus = 'draft' | 'active' | 'superseded' | 'retired'
-export type QuestBoardStatus = 'pending' | 'passed' | 'failed'
+export type QuestBoardStatus = 'pending' | 'passed' | 'failed' | 'unsure'
 
 export type FeedbackKind = 'report' | 'quest_run'
 export type QuestResult = 'pass' | 'fail' | 'unsure' | 'abandoned'
@@ -41,6 +41,15 @@ export interface QuestResultCounts {
   abandoned: number
 }
 
+export interface QuestLatestRun {
+  id: string
+  result: QuestResult
+  build: string
+  createdAt: string
+  comment: string | null
+  triageStatus: TriageStatus | null
+}
+
 export interface QuestVersionRecord {
   id: string
   version: number
@@ -63,6 +72,8 @@ export interface QuestVersionRecord {
   retiredAt: string | null
   counts: QuestResultCounts
   passedOnCurrentVersion: boolean
+  boardStatus: QuestBoardStatus
+  latestRun: QuestLatestRun | null
 }
 
 export interface BuildManifestQuestStatus {
@@ -85,6 +96,7 @@ export interface BuildManifestQuestStatus {
     added: string | null
   }
   counts: QuestResultCounts
+  latestRun: QuestLatestRun | null
 }
 
 export interface SyncQuestsInput {

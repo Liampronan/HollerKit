@@ -798,5 +798,160 @@ export async function runConformanceSuite(
     assert.equal(tooManyMarksRes.body.error.code, 'too_many_marks')
   })
 
+  // 11. Board status separates unsure from failed, orders untried ahead of needs-attention, and clears on triage
+  await step('boardStatus separates unsure from failed, includes latestRun, orders untried first, and clears when triaged resolved/wontfix', async () => {
+    const questFailTarget: QuestDefinitionInput = {
+      id: 'checkout-coupon-apply',
+      title: 'Apply promo coupon at checkout',
+      area: 'checkout',
+      steps: ['Enter SAVE20', 'Tap Apply'],
+      expect: ['Discount line appears'],
+    }
+    const questUnsureTarget: QuestDefinitionInput = {
+      id: 'checkout-apple-pay',
+      title: 'Open Apple Pay sheet',
+      area: 'checkout',
+      steps: ['Tap Apple Pay button'],
+      expect: ['Sheet appears within 1s'],
+    }
+    const questUntriedTarget: QuestDefinitionInput = {
+      id: 'checkout-receipt-share',
+      title: 'Share order receipt',
+      area: 'checkout',
+      steps: ['Tap Share receipt'],
+      expect: ['System share sheet opens'],
+    }
+
+    const syncRes = await requestJson('/v1/quests', {
+      method: 'PUT',
+      token: options.questsWriteKey,
+      body: {
+        version: 1,
+        sha: '9999aaaa',
+        quests: [questFailTarget, questUnsureTarget, questUntriedTarget],
+      },
+    })
+    assert.equal(syncRes.status, 200)
+
+    await requestJson('/v1/builds/build-200/manifest', {
+      method: 'POST',
+      token: options.testerToken,
+      body: {
+        appVersion: '1.3.0',
+        quests: [questFailTarget, questUnsureTarget, questUntriedTarget],
+      },
+    })
+
+    const failRunId = randomUUID()
+    const unsureRunId = randomUUID()
+
+    const failRunRes = await requestJson('/v1/feedback', {
+      method: 'POST',
+      token: options.testerToken,
+      body: {
+        id: failRunId,
+        kind: 'quest_run',
+        questId: questFailTarget.id,
+        questVersion: 1,
+        result: 'fail',
+        build: 'build-200',
+        comment: 'Coupon spinner hangs forever\nSecond line details',
+      },
+    })
+    assert.equal(failRunRes.status, 201)
+
+    const unsureRunRes = await requestJson('/v1/feedback', {
+      method: 'POST',
+      token: options.testerToken,
+      body: {
+        id: unsureRunId,
+        kind: 'quest_run',
+        questId: questUnsureTarget.id,
+        questVersion: 1,
+        result: 'unsure',
+        build: 'build-200',
+        comment: 'Sandbox Apple Pay sheet did not load on simulator',
+      },
+    })
+    assert.equal(unsureRunRes.status, 201)
+
+    const manifestAfterRuns = await requestJson('/v1/builds/build-200/manifest', {
+      method: 'POST',
+      token: options.testerToken,
+      body: {
+        quests: [questFailTarget, questUnsureTarget, questUntriedTarget],
+      },
+    })
+    assert.equal(manifestAfterRuns.status, 200)
+    const failStatus = manifestAfterRuns.body.quests.find((q: any) => q.id === questFailTarget.id)
+    const unsureStatus = manifestAfterRuns.body.quests.find((q: any) => q.id === questUnsureTarget.id)
+    const untriedStatus = manifestAfterRuns.body.quests.find((q: any) => q.id === questUntriedTarget.id)
+
+    assert.equal(failStatus.boardStatus, 'failed')
+    assert.ok(failStatus.latestRun)
+    assert.equal(failStatus.latestRun.id, failRunId)
+    assert.equal(failStatus.latestRun.result, 'fail')
+    assert.equal(failStatus.latestRun.build, 'build-200')
+    assert.equal(failStatus.latestRun.comment, 'Coupon spinner hangs forever\nSecond line details')
+    assert.equal(failStatus.latestRun.triageStatus, 'new')
+
+    assert.equal(unsureStatus.boardStatus, 'unsure')
+    assert.ok(unsureStatus.latestRun)
+    assert.equal(unsureStatus.latestRun.id, unsureRunId)
+    assert.equal(unsureStatus.latestRun.result, 'unsure')
+    assert.equal(unsureStatus.latestRun.build, 'build-200')
+
+    assert.equal(untriedStatus.boardStatus, 'pending')
+    assert.equal(untriedStatus.latestRun, null)
+
+    // GET /v1/builds/build-200/pending orders untried ('pending') before 'unsure' before 'failed'
+    const pendingRes = await requestJson('/v1/builds/build-200/pending', {
+      method: 'GET',
+      token: options.testerToken,
+    })
+    assert.equal(pendingRes.status, 200)
+    assert.deepEqual(
+      pendingRes.body.quests.map((q: any) => q.id),
+      [questUntriedTarget.id, questUnsureTarget.id, questFailTarget.id],
+    )
+
+    // Triaging the failed run as 'resolved' and unsure run as 'wontfix' clears them back to 'pending'
+    const resolveFail = await requestJson(`/v1/feedback/${failRunId}/triage`, {
+      method: 'PUT',
+      token: options.agentKey,
+      body: {
+        status: 'resolved',
+        summary: 'Fixed coupon endpoint timeout.',
+      },
+    })
+    assert.equal(resolveFail.status, 200)
+
+    const wontfixUnsure = await requestJson(`/v1/feedback/${unsureRunId}/triage`, {
+      method: 'PUT',
+      token: options.agentKey,
+      body: {
+        status: 'wontfix',
+        summary: 'Expected on simulator without Apple Pay pass.',
+      },
+    })
+    assert.equal(wontfixUnsure.status, 200)
+
+    const manifestAfterTriage = await requestJson('/v1/builds/build-200/manifest', {
+      method: 'POST',
+      token: options.testerToken,
+      body: {
+        quests: [questFailTarget, questUnsureTarget, questUntriedTarget],
+      },
+    })
+    assert.equal(manifestAfterTriage.status, 200)
+    const failAfterTriage = manifestAfterTriage.body.quests.find((q: any) => q.id === questFailTarget.id)
+    const unsureAfterTriage = manifestAfterTriage.body.quests.find((q: any) => q.id === questUnsureTarget.id)
+
+    assert.equal(failAfterTriage.boardStatus, 'pending')
+    assert.equal(failAfterTriage.latestRun.triageStatus, 'resolved')
+    assert.equal(unsureAfterTriage.boardStatus, 'pending')
+    assert.equal(unsureAfterTriage.latestRun.triageStatus, 'wontfix')
+  })
+
   return { ok: true, steps }
 }
