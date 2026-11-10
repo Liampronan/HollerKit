@@ -14,10 +14,12 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..')
+
+const SEMVER_REGEX = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+?)(?:\.(\d+))?)?$/
 
 const ALLOWED_AUTHOR_NAMES = new Set(['liam ronan', 'liampronan', 'agent-liam'])
 const ALLOWED_AUTHOR_EMAILS = new Set([
@@ -66,7 +68,7 @@ export function runGit(args, options = {}) {
  * @returns {string}
  */
 export function bumpVersion(currentVersion, bump = 'prerelease') {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+?)(?:\.(\d+))?)?$/.exec(currentVersion.trim())
+  const match = SEMVER_REGEX.exec(currentVersion.trim())
   if (!match) {
     throw new Error(`Invalid semantic version: "${currentVersion}"`)
   }
@@ -217,21 +219,41 @@ function parseArgs(argv) {
       parsed.force = true
     } else if (arg === '--tag-and-publish') {
       parsed.tagAndPublish = true
-    } else if (arg === '--version' && argv[i + 1]) {
-      parsed.version = argv[++i]
-    } else if (arg === '--ref' && argv[i + 1]) {
-      parsed.ref = argv[++i]
-    } else if (arg === '--bump' && argv[i + 1]) {
+    } else if (arg === '--version') {
+      const nextArg = argv[++i]
+      if (!nextArg || nextArg.startsWith('-')) {
+        throw new Error('Missing value for --version')
+      }
+      const v = nextArg.trim()
+      if (!SEMVER_REGEX.test(v)) {
+        throw new Error(`Invalid --version value: "${v}"`)
+      }
+      parsed.version = v
+    } else if (arg === '--ref') {
+      const nextArg = argv[++i]
+      if (!nextArg || nextArg.startsWith('-')) {
+        throw new Error('Missing value for --ref')
+      }
+      parsed.ref = nextArg.trim()
+    } else if (arg === '--bump') {
       const b = argv[++i]
       if (b === 'prerelease' || b === 'patch' || b === 'minor' || b === 'major') {
         parsed.bump = b
       } else {
-        throw new Error(`Invalid --bump value: "${b}"`)
+        throw new Error(`Invalid --bump value: "${b ?? ''}"`)
       }
-    } else if (arg === '--notes' && argv[i + 1]) {
-      parsed.notes = argv[++i]
-    } else if (arg === '--repo' && argv[i + 1]) {
-      parsed.repo = argv[++i]
+    } else if (arg === '--notes') {
+      const nextArg = argv[++i]
+      if (nextArg === undefined) {
+        throw new Error('Missing value for --notes')
+      }
+      parsed.notes = nextArg
+    } else if (arg === '--repo') {
+      const nextArg = argv[++i]
+      if (!nextArg || nextArg.startsWith('-')) {
+        throw new Error('Missing value for --repo')
+      }
+      parsed.repo = nextArg.trim()
     } else if (arg === '--help' || arg === '-h') {
       console.log(
         [
@@ -242,6 +264,8 @@ function parseArgs(argv) {
         ].join('\n'),
       )
       process.exit(0)
+    } else {
+      throw new Error(`Unknown or incomplete argument: "${arg}"`)
     }
   }
   return parsed
@@ -343,13 +367,12 @@ async function tagAndPublishRelease(version, repo, dryRun, ref) {
     }),
   })
 
-  if (response.status === 422) {
-    // Release already exists for this tag
-    console.log(JSON.stringify({ ok: true, version, headSha, note: 'GitHub Release already exists.' }, null, 2))
-    return
-  }
   if (!response.ok) {
     const errText = await response.text()
+    if (response.status === 422 && /"code"\s*:\s*"already_exists"/.test(errText)) {
+      console.log(JSON.stringify({ ok: true, version, headSha, note: 'GitHub Release already exists.' }, null, 2))
+      return
+    }
     throw new Error(`Failed to publish GitHub Release (${response.status}): ${errText}`)
   }
   const releaseJson = await response.json()
@@ -398,7 +421,20 @@ async function main() {
       .map((s) => s.trim())
       .filter(Boolean),
   )
-  const baseRef = existingTags.has(currentVersion) ? currentVersion : null
+  let baseRef = existingTags.has(currentVersion) ? currentVersion : null
+  if (!baseRef) {
+    try {
+      const describedTag = runGit(['describe', '--tags', '--abbrev=0', args.ref])
+      if (describedTag) {
+        baseRef = describedTag
+      }
+    } catch {
+      baseRef = null
+    }
+  }
+  if (!baseRef && !args.force) {
+    throw new Error(`No reachable git tag found from ${args.ref}; pass --force to cut an initial release without a prior tag.`)
+  }
   const logRange = baseRef ? `${baseRef}..${args.ref}` : args.ref
 
   const logLines = runGit(['log', logRange, '--pretty=format:%H\t%an\t%ae\t%s'])
@@ -481,36 +517,48 @@ async function main() {
     return
   }
 
+  // Validate all text replacements in memory before modifying any files on disk
+  const mcpServerTs = readFileSync(mcpServerTsPath, 'utf8')
+  const updatedMcpServerTs = mcpServerTs.replace(
+    /export const HOLLERKIT_MCP_VERSION = '[^']+'/,
+    () => `export const HOLLERKIT_MCP_VERSION = '${nextVersion}'`,
+  )
+  if (
+    updatedMcpServerTs === mcpServerTs &&
+    !mcpServerTs.includes(`export const HOLLERKIT_MCP_VERSION = '${nextVersion}'`)
+  ) {
+    throw new Error('Failed to locate HOLLERKIT_MCP_VERSION in mcp/src/server.ts')
+  }
+
+  const iosReadme = readFileSync(iosReadmePath, 'utf8')
+  const updatedIosReadme = iosReadme.replace(
+    /\*\*Exact Version: `[^`]+`\*\*/,
+    () => `**Exact Version: \`${nextVersion}\`**`,
+  )
+  if (updatedIosReadme === iosReadme && !iosReadme.includes(`**Exact Version: \`${nextVersion}\`**`)) {
+    throw new Error('Failed to locate Exact Version snippet in ios/README.md')
+  }
+
+  const changelog = readFileSync(changelogPath, 'utf8')
+  const escapedVersion = nextVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const changelogAlreadyHasVersion = new RegExp(`^##\\s+${escapedVersion}\\s*$`, 'm').test(changelog)
+  const updatedChangelog = changelogAlreadyHasVersion
+    ? changelog
+    : changelog.replace(/^#\s+Changelog\s*\n+/, () => `# Changelog\n\n${changelogSection}\n\n`)
+  if (!changelogAlreadyHasVersion && updatedChangelog === changelog) {
+    throw new Error('Failed to locate "# Changelog" header in CHANGELOG.md')
+  }
+
   // 1. Update server/package.json, server/package-lock.json, mcp/package.json, mcp/package-lock.json
   updatePackageVersionFile(serverPkgPath, nextVersion)
   updatePackageVersionFile(serverLockPath, nextVersion)
   updatePackageVersionFile(mcpPkgPath, nextVersion)
   updatePackageVersionFile(mcpLockPath, nextVersion)
 
-  // 2. Update HOLLERKIT_MCP_VERSION in mcp/src/server.ts
-  const mcpServerTs = readFileSync(mcpServerTsPath, 'utf8')
-  const updatedMcpServerTs = mcpServerTs.replace(
-    /export const HOLLERKIT_MCP_VERSION = '[^']+'/,
-    `export const HOLLERKIT_MCP_VERSION = '${nextVersion}'`,
-  )
+  // 2. Write validated text updates
   writeFileSync(mcpServerTsPath, updatedMcpServerTs, 'utf8')
-
-  // 3. Update Exact Version in ios/README.md
-  const iosReadme = readFileSync(iosReadmePath, 'utf8')
-  const updatedIosReadme = iosReadme.replace(
-    /\*\*Exact Version: `[^`]+`\*\*/,
-    `**Exact Version: \`${nextVersion}\`**`,
-  )
   writeFileSync(iosReadmePath, updatedIosReadme, 'utf8')
-
-  // 4. Prepend section to CHANGELOG.md (unless already present)
-  const changelog = readFileSync(changelogPath, 'utf8')
-  const escapedVersion = nextVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  if (!new RegExp(`^##\\s+${escapedVersion}\\s*$`, 'm').test(changelog)) {
-    const updatedChangelog = changelog.replace(
-      /^#\s+Changelog\s*\n+/,
-      `# Changelog\n\n${changelogSection}\n\n`,
-    )
+  if (!changelogAlreadyHasVersion) {
     writeFileSync(changelogPath, updatedChangelog, 'utf8')
   }
 
@@ -537,7 +585,7 @@ async function main() {
   )
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : String(err))
     process.exit(1)
