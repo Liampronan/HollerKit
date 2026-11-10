@@ -26,6 +26,106 @@ public enum QuestStatus: String, Codable, CaseIterable, Sendable {
     case pending
     case passed
     case failed
+    case unsure
+
+    /// Sort priority for the Pending tab (`pending` / untried first, then `unsure`, then `failed`).
+    public var pendingSortRank: Int {
+        switch self {
+        case .pending:
+            return 0
+        case .unsure:
+            return 1
+        case .failed:
+            return 2
+        case .passed:
+            return 3
+        }
+    }
+}
+
+/// Summary of the most recent non-abandoned run (`pass`, `fail`, or `unsure`) for a quest version.
+public struct QuestLatestRun: Codable, Equatable, Sendable {
+    public var id: String?
+    public var result: QuestResult
+    public var build: String
+    public var createdAt: String
+    public var comment: String?
+    public var triageStatus: String?
+
+    public init(
+        id: String? = nil,
+        result: QuestResult,
+        build: String,
+        createdAt: String,
+        comment: String? = nil,
+        triageStatus: String? = nil
+    ) {
+        self.id = id
+        self.result = result
+        self.build = build
+        self.createdAt = createdAt
+        let trimmedComment = comment?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.comment = (trimmedComment?.isEmpty == false) ? trimmedComment : nil
+        self.triageStatus = triageStatus
+    }
+
+    /// Parses `createdAt` as an ISO-8601 `Date` (with or without fractional seconds).
+    public var createdAtDate: Date? {
+        Self.parseISO8601(createdAt)
+    }
+
+    /// Returns the first non-empty trimmed line of `comment`, if present.
+    public var firstCommentLine: String? {
+        guard let comment, !comment.isEmpty else { return nil }
+        let line = comment
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+        return line
+    }
+
+    /// Human-readable label for the latest run's outcome.
+    public var resultSummaryLabel: String {
+        switch result {
+        case .pass:
+            return "Passed"
+        case .fail:
+            return "Failed"
+        case .unsure:
+            return "Unsure"
+        case .abandoned:
+            return "Abandoned"
+        }
+    }
+
+    /// Formats a compact metadata summary line (`"<Result> · build <build> · <relative date>[ · Triaged]"`).
+    public func formattedSummary(relativeTo referenceDate: Date = Date()) -> String {
+        var parts: [String] = [resultSummaryLabel]
+        if !build.isEmpty {
+            parts.append("build \(build)")
+        }
+        if let runDate = createdAtDate {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .abbreviated
+            let relative = formatter.localizedString(for: runDate, relativeTo: referenceDate)
+            parts.append(relative)
+        }
+        if triageStatus == "triaged" {
+            parts.append("Triaged")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func parseISO8601(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) {
+            return date
+        }
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        return standard.date(from: value)
+    }
 }
 
 public enum QuestResult: String, Codable, CaseIterable, Sendable {
@@ -244,6 +344,7 @@ public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
     public var status: QuestStatus
     public var questStatus: String
     public var counts: QuestResultCounts
+    public var latestRun: QuestLatestRun?
     public var needWarnings: [String]
 
     private enum CodingKeys: String, CodingKey {
@@ -255,6 +356,7 @@ public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
         case status
         case questStatus
         case counts
+        case latestRun
         case needWarnings
     }
 
@@ -267,6 +369,7 @@ public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
         status: QuestStatus = .pending,
         questStatus: String = "active",
         counts: QuestResultCounts = QuestResultCounts(),
+        latestRun: QuestLatestRun? = nil,
         needWarnings: [String] = []
     ) {
         self.id = id.jsTrimmed
@@ -277,6 +380,7 @@ public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
         self.status = status
         self.questStatus = questStatus
         self.counts = counts
+        self.latestRun = latestRun
         self.needWarnings = needWarnings
     }
 
@@ -291,6 +395,7 @@ public struct QuestBoardItem: Codable, Equatable, Identifiable, Sendable {
         self.status = try container.decode(QuestStatus.self, forKey: .status)
         self.questStatus = try container.decode(String.self, forKey: .questStatus)
         self.counts = try container.decode(QuestResultCounts.self, forKey: .counts)
+        self.latestRun = try container.decodeIfPresent(QuestLatestRun.self, forKey: .latestRun)
         self.needWarnings = try container.decodeIfPresent([String].self, forKey: .needWarnings) ?? []
     }
 }

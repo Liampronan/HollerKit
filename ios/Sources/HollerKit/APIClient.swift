@@ -139,6 +139,7 @@ public struct BuildManifestQuestItem: Codable, Equatable, Sendable {
     public var start: String?
     public var source: QuestManifestSource?
     public var counts: QuestResultCounts?
+    public var latestRun: QuestLatestRun?
 
     public init(
         id: String,
@@ -155,7 +156,8 @@ public struct BuildManifestQuestItem: Codable, Equatable, Sendable {
         record: String = "optional",
         start: String? = nil,
         source: QuestManifestSource? = nil,
-        counts: QuestResultCounts? = nil
+        counts: QuestResultCounts? = nil,
+        latestRun: QuestLatestRun? = nil
     ) {
         self.id = id
         self.version = version
@@ -172,6 +174,7 @@ public struct BuildManifestQuestItem: Codable, Equatable, Sendable {
         self.start = start
         self.source = source
         self.counts = counts
+        self.latestRun = latestRun
     }
 }
 

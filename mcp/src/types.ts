@@ -3,7 +3,20 @@ export type QuestResult = 'pass' | 'fail' | 'unsure' | 'abandoned'
 export type TriageStatus = 'new' | 'triaged' | 'resolved' | 'wontfix' | 'duplicate'
 export type QuestRecordMode = 'none' | 'optional' | 'suggested' | 'required'
 export type QuestStatus = 'draft' | 'active' | 'superseded' | 'retired'
+export type QuestBoardStatus = 'pending' | 'passed' | 'failed' | 'unsure'
 export type AttachmentKind = 'image' | 'audio' | 'video' | 'keyframe' | 'mark'
+
+/**
+ * Summary of the most recent non-abandoned run for a quest version.
+ */
+export interface QuestLatestRun {
+  id: string
+  result: 'pass' | 'fail' | 'unsure'
+  build: string
+  createdAt: string
+  comment: string | null
+  triageStatus: TriageStatus | null
+}
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -71,6 +84,8 @@ export interface QuestVersionRecord {
     abandoned: number
   }
   passedOnCurrentVersion: boolean
+  boardStatus?: QuestBoardStatus | undefined
+  latestRun?: QuestLatestRun | null | undefined
 }
 
 export interface FeedbackEventView {

@@ -49,6 +49,7 @@ export type {
   QuestBoardStatus,
   QuestDefinitionInput,
   QuestHashInput,
+  QuestLatestRun,
   QuestRecordMode,
   QuestResult,
   QuestResultCounts,

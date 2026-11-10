@@ -2247,4 +2247,204 @@ final class HollerKitTests: XCTestCase {
         }
     }
     #endif
+
+    func testQuestLatestRunFormattingAndFirstCommentLine() {
+        let run = QuestLatestRun(
+            id: "fb-1",
+            result: .fail,
+            build: "42",
+            createdAt: "2026-11-08T10:00:00Z",
+            comment: "\n  Coupon spinner hangs forever  \nSecond line details",
+            triageStatus: "triaged"
+        )
+        XCTAssertEqual(run.firstCommentLine, "Coupon spinner hangs forever")
+
+        let referenceDate = ISO8601DateFormatter().date(from: "2026-11-10T10:00:00Z")!
+        let summary = run.formattedSummary(relativeTo: referenceDate)
+        XCTAssertTrue(summary.hasPrefix("Failed · build 42 · "), "Unexpected summary: \(summary)")
+        XCTAssertTrue(summary.hasSuffix(" · Triaged"), "Expected Triaged suffix in summary: \(summary)")
+    }
+
+    @MainActor
+    func testQuestBoardOrdersUntriedBeforeUnsureAndFailedAndClearsOnTriage() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-board-order-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let questFail = QuestDefinition(
+            id: "q-fail",
+            title: "Failed quest",
+            area: "checkout",
+            steps: ["Step 1"],
+            expect: ["Expect 1"]
+        )
+        let questUnsure = QuestDefinition(
+            id: "q-unsure",
+            title: "Unsure quest",
+            area: "checkout",
+            steps: ["Step 1"],
+            expect: ["Expect 1"]
+        )
+        let questUntried = QuestDefinition(
+            id: "q-untried",
+            title: "Untried quest",
+            area: "checkout",
+            steps: ["Step 1"],
+            expect: ["Expect 1"]
+        )
+
+        let state = HollerKitQuestState()
+        state.configure(
+            questsConfiguration: .definitions([questFail, questUnsure, questUntried]),
+            build: "100",
+            cacheDirectoryURL: tempDir
+        )
+
+        // Initially all 3 are untried (.pending)
+        XCTAssertEqual(state.untriedQuests.map(\.id), ["q-fail", "q-unsure", "q-untried"])
+        XCTAssertTrue(state.needsAttentionQuests.isEmpty)
+
+        // Record a local fail on q-fail and unsure on q-unsure
+        let failDate = ISO8601DateFormatter().date(from: "2026-11-09T12:00:00Z")!
+        state.recordLocalResult(
+            .fail,
+            forQuestId: "q-fail",
+            build: "100",
+            comment: "Button did not respond",
+            endedAt: failDate
+        )
+        state.recordLocalResult(
+            .unsure,
+            forQuestId: "q-unsure",
+            build: "100",
+            comment: "Animation looked slightly off",
+            endedAt: failDate
+        )
+
+        // Untried quest must come first in pendingQuests, followed by unsure, then failed
+        XCTAssertEqual(state.untriedQuests.map(\.id), ["q-untried"])
+        XCTAssertEqual(state.needsAttentionQuests.map(\.id), ["q-unsure", "q-fail"])
+        XCTAssertEqual(state.pendingQuests.map(\.id), ["q-untried", "q-unsure", "q-fail"])
+
+        let unsureItem = state.quests.first(where: { $0.id == "q-unsure" })
+        XCTAssertEqual(unsureItem?.status, .unsure)
+        XCTAssertEqual(unsureItem?.latestRun?.result, .unsure)
+        XCTAssertEqual(unsureItem?.latestRun?.firstCommentLine, "Animation looked slightly off")
+
+        // Sync with server where q-fail was triaged 'resolved' -> returns to untried (.pending)
+        let session = makeStubSession()
+        StubURLProtocol.setHandler { request, _ in
+            let url = request.url!
+            let json = """
+            {
+              "ok": true,
+              "build": "100",
+              "pendingCount": 2,
+              "quests": [
+                {
+                  "id": "q-fail",
+                  "version": 1,
+                  "contentHash": "\(questFail.contentHash)",
+                  "questStatus": "active",
+                  "boardStatus": "pending",
+                  "title": "Failed quest",
+                  "area": "checkout",
+                  "setup": [],
+                  "steps": ["Step 1"],
+                  "expect": ["Expect 1"],
+                  "needs": [],
+                  "record": "optional",
+                  "counts": { "pass": 0, "fail": 1, "unsure": 0, "abandoned": 0 },
+                  "latestRun": {
+                    "id": "run-fail-1",
+                    "result": "fail",
+                    "build": "100",
+                    "createdAt": "2026-11-09T12:00:00Z",
+                    "comment": "Button did not respond",
+                    "triageStatus": "resolved"
+                  }
+                },
+                {
+                  "id": "q-unsure",
+                  "version": 1,
+                  "contentHash": "\(questUnsure.contentHash)",
+                  "questStatus": "active",
+                  "boardStatus": "unsure",
+                  "title": "Unsure quest",
+                  "area": "checkout",
+                  "setup": [],
+                  "steps": ["Step 1"],
+                  "expect": ["Expect 1"],
+                  "needs": [],
+                  "record": "optional",
+                  "counts": { "pass": 0, "fail": 0, "unsure": 1, "abandoned": 0 },
+                  "latestRun": {
+                    "id": "run-unsure-1",
+                    "result": "unsure",
+                    "build": "100",
+                    "createdAt": "2026-11-09T12:00:00Z",
+                    "comment": "Animation looked slightly off",
+                    "triageStatus": "new"
+                  }
+                },
+                {
+                  "id": "q-untried",
+                  "version": 1,
+                  "contentHash": "\(questUntried.contentHash)",
+                  "questStatus": "active",
+                  "boardStatus": "pending",
+                  "title": "Untried quest",
+                  "area": "checkout",
+                  "setup": [],
+                  "steps": ["Step 1"],
+                  "expect": ["Expect 1"],
+                  "needs": [],
+                  "record": "optional",
+                  "counts": { "pass": 0, "fail": 0, "unsure": 0, "abandoned": 0 },
+                  "latestRun": null
+                }
+              ]
+            }
+            """
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["hollerkit-protocol": "1"]
+            )!
+            return (response, Data(json.utf8))
+        }
+
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            metadata: { ["appBuild": "100", "appVersion": "1.0.0"] },
+            quests: .definitions([questFail, questUnsure, questUntried]),
+            urlSession: session,
+            outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
+        )
+        HollerKit.configure(config)
+        await state.refresh(using: config)
+
+        XCTAssertEqual(state.untriedQuests.map(\.id), ["q-fail", "q-untried"])
+        XCTAssertEqual(state.needsAttentionQuests.map(\.id), ["q-unsure"])
+        let clearedItem = state.quests.first(where: { $0.id == "q-fail" })
+        XCTAssertEqual(clearedItem?.status, .pending)
+        XCTAssertEqual(clearedItem?.latestRun?.triageStatus, "resolved")
+
+        // A newer queued local result must not be wiped out by an older triage-cleared server latestRun
+        let newerLocalDate = ISO8601DateFormatter().date(from: "2026-11-09T13:30:00Z")!
+        state.recordLocalResult(
+            .fail,
+            forQuestId: "q-fail",
+            build: "100",
+            comment: "New regression after fix",
+            endedAt: newerLocalDate
+        )
+        await state.refresh(using: config)
+        let afterNewerLocal = state.quests.first(where: { $0.id == "q-fail" })
+        XCTAssertEqual(afterNewerLocal?.status, .failed)
+        XCTAssertEqual(afterNewerLocal?.latestRun?.firstCommentLine, "New regression after fix")
+    }
 }

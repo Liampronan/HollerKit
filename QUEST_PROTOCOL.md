@@ -110,10 +110,13 @@ When an iOS Debug or TestFlight build launches, it posts its bundled quests to `
   - If `(id, content_hash)` already exists in `hollerkit.quests`, that version is used.
   - If `(id, content_hash)` does not yet exist in `hollerkit.quests` (e.g. testing an unmerged branch before CI syncs `main`), the server inserts a new version (`max(version) + 1`) with `status = 'draft'`.
   - The server upserts `(quest_id, quest_version, build)` into `hollerkit.quest_builds`.
-- Board status (`boardStatus`) for each quest version is computed from feedback submitted against `(quest_id, quest_version)`:
+- Board status (`boardStatus`) for each quest version is scoped to `(quest_id, quest_version)` (since the last change to the quest's content hash, rather than resetting on every build increment) and is computed from feedback submitted against `(quest_id, quest_version)`:
   - `"passed"`: at least one feedback item for `(quest_id, quest_version)` has `result = 'pass'`.
-  - `"failed"`: no `'pass'` exists, and at least one feedback item has `result IN ('fail', 'unsure')`.
-  - `"pending"`: no `'pass'`, `'fail'`, or `'unsure'` feedback exists for `(quest_id, quest_version)`.
+  - `"failed"`: no `'pass'` exists, and at least one open feedback item (`triage_status` not in `('resolved', 'wontfix', 'duplicate')`) has `result = 'fail'`.
+  - `"unsure"`: no `'pass'` and no open `'fail'` exists, and at least one open feedback item (`triage_status` not in `('resolved', 'wontfix', 'duplicate')`) has `result = 'unsure'`.
+  - `"pending"`: no `'pass'` and no open `'fail'` or `'unsure'` feedback exists for `(quest_id, quest_version)` (untried, only `'abandoned'`, or all prior `'fail'`/`'unsure'` runs have been cleared in triage via `'resolved'`, `'wontfix'`, or `'duplicate'`).
+- Each quest item also includes `latestRun` (`{ id, result, build, createdAt, comment, triageStatus } | null`) for the most recent `'pass'`, `'fail'`, or `'unsure'` run on `(quest_id, quest_version)` so the board card can show the last result, build, relative date, and first line of the tester's note.
+- On the client Quest Board, untried (`"pending"`) quests are always ordered ahead of `"unsure"` and `"failed"` quests so prior runs never crowd out untried quests at the top of Pending.
 
 ---
 

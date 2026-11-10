@@ -21,6 +21,7 @@ import {
   type MarkOutboxFailedInput,
   type OutboxRecord,
   type QuestBoardStatus,
+  type QuestLatestRun,
   type QuestRecordMode,
   type QuestResultCounts,
   type QuestStatus,
@@ -87,18 +88,82 @@ export function memoryStore(): HollerKitStore {
   let nextTriageId = 1
   let nextOutboxId = 1
 
-  function computeCounts(questId: string, questVersion: number): QuestResultCounts {
+  const CLEARED_TRIAGE_STATUSES = new Set<TriageStatus>(['resolved', 'wontfix', 'duplicate'])
+
+  function pendingSortRank(status: QuestBoardStatus): number {
+    switch (status) {
+      case 'pending':
+        return 0
+      case 'unsure':
+        return 1
+      case 'failed':
+        return 2
+      case 'passed':
+        return 3
+    }
+  }
+
+  function computeRunSummary(
+    questId: string,
+    questVersion: number,
+  ): {
+    counts: QuestResultCounts
+    boardStatus: QuestBoardStatus
+    latestRun: QuestLatestRun | null
+  } {
     const counts: QuestResultCounts = { pass: 0, fail: 0, unsure: 0, abandoned: 0 }
+    let unresolvedFail = 0
+    let unresolvedUnsure = 0
+    const nonAbandonedRuns: FeedbackRecord[] = []
+
     for (const fb of feedbacks.values()) {
       if (fb.kind === 'quest_run' && fb.questId === questId && fb.questVersion === questVersion && fb.result) {
         counts[fb.result] += 1
+        const isCleared = fb.triageStatus !== null && CLEARED_TRIAGE_STATUSES.has(fb.triageStatus)
+        if (!isCleared) {
+          if (fb.result === 'fail') unresolvedFail += 1
+          else if (fb.result === 'unsure') unresolvedUnsure += 1
+        }
+        if (fb.result === 'pass' || fb.result === 'fail' || fb.result === 'unsure') {
+          nonAbandonedRuns.push(fb)
+        }
       }
     }
-    return counts
+
+    let boardStatus: QuestBoardStatus = 'pending'
+    if (counts.pass > 0) {
+      boardStatus = 'passed'
+    } else if (unresolvedFail > 0) {
+      boardStatus = 'failed'
+    } else if (unresolvedUnsure > 0) {
+      boardStatus = 'unsure'
+    }
+
+    nonAbandonedRuns.sort((a, b) => {
+      const cmp = b.createdAt.localeCompare(a.createdAt)
+      return cmp !== 0 ? cmp : b.id.localeCompare(a.id)
+    })
+
+    const latest = nonAbandonedRuns[0]
+    const latestComment =
+      (latest?.comment && latest.comment.trim().length > 0 ? latest.comment.trim() : null) ??
+      (latest?.transcript && latest.transcript.trim().length > 0 ? latest.transcript.trim() : null)
+    const latestRun: QuestLatestRun | null = latest && latest.result
+      ? {
+          id: latest.id,
+          result: latest.result,
+          build: latest.build,
+          createdAt: latest.createdAt,
+          comment: latestComment,
+          triageStatus: latest.triageStatus,
+        }
+      : null
+
+    return { counts, boardStatus, latestRun }
   }
 
   function toQuestVersionRecord(row: StoredQuestRow): QuestVersionRecord {
-    const counts = computeCounts(row.id, row.version)
+    const { counts, boardStatus, latestRun } = computeRunSummary(row.id, row.version)
     return {
       id: row.id,
       version: row.version,
@@ -117,6 +182,8 @@ export function memoryStore(): HollerKitStore {
       retiredAt: row.retiredAt,
       counts,
       passedOnCurrentVersion: counts.pass > 0,
+      boardStatus,
+      latestRun,
     }
   }
 
@@ -280,13 +347,7 @@ export function memoryStore(): HollerKitStore {
           })
         }
 
-        const counts = computeCounts(row.id, row.version)
-        let boardStatus: QuestBoardStatus = 'pending'
-        if (counts.pass > 0) {
-          boardStatus = 'passed'
-        } else if (counts.fail > 0 || counts.unsure > 0) {
-          boardStatus = 'failed'
-        }
+        const { counts, boardStatus, latestRun } = computeRunSummary(row.id, row.version)
 
         statuses.push({
           id: row.id,
@@ -304,6 +365,7 @@ export function memoryStore(): HollerKitStore {
           start: row.start,
           source: { ...row.source },
           counts,
+          latestRun,
         })
       }
 
@@ -328,6 +390,7 @@ export function memoryStore(): HollerKitStore {
           pending.push(record)
         }
       }
+      pending.sort((a, b) => pendingSortRank(a.boardStatus) - pendingSortRank(b.boardStatus))
       return pending
     },
 
