@@ -1922,6 +1922,9 @@ final class HollerKitTests: XCTestCase {
     }
 
     @MainActor
+    /// Verifies that `QuestCardView` renders its `Start Quest` button (including a visible `play.fill` icon
+    /// and balanced capsule padding) and its start route row (`link` icon + route text with compact spacing)
+    /// without `List` row `Label` icon-column distortion.
     func testQuestCardViewButtonAndRouteLayoutInsideList() throws {
         let definition = QuestDefinition(
             id: "map-route-quest",
@@ -2051,6 +2054,8 @@ final class HollerKitTests: XCTestCase {
         let midBandMaxY = maxBlueY - (maxBlueY - minBlueY) / 4
         var minWhiteX = maxBlueX
         var maxWhiteX = minBlueX
+        var whiteColumnMinY = [Int](repeating: height, count: width)
+        var whiteColumnMaxY = [Int](repeating: 0, count: width)
         for y in midBandMinY...midBandMaxY {
             var rowMinBlueX = maxBlueX
             var rowMaxBlueX = minBlueX
@@ -2073,6 +2078,8 @@ final class HollerKitTests: XCTestCase {
                 if r > 220 && g > 220 && b > 220 {
                     if x < minWhiteX { minWhiteX = x }
                     if x > maxWhiteX { maxWhiteX = x }
+                    if y < whiteColumnMinY[x] { whiteColumnMinY[x] = y }
+                    if y > whiteColumnMaxY[x] { whiteColumnMaxY[x] = y }
                 }
             }
         }
@@ -2084,6 +2091,56 @@ final class HollerKitTests: XCTestCase {
         let scale = rendererFormat.scale
         let leadingPaddingPt = CGFloat(minWhiteX - minBlueX) / scale
         let trailingPaddingPt = CGFloat(maxBlueX - maxWhiteX) / scale
+
+        // Group white columns inside the button capsule into contiguous horizontal clusters
+        // so we can separately verify the leading play.fill icon and the Start Quest title text.
+        var buttonWhiteClusters: [(start: Int, end: Int)] = []
+        var currentWhiteStart: Int?
+        for x in minBlueX...maxBlueX {
+            if whiteColumnMinY[x] <= whiteColumnMaxY[x] {
+                if currentWhiteStart == nil {
+                    currentWhiteStart = x
+                }
+            } else if let start = currentWhiteStart {
+                buttonWhiteClusters.append((start: start, end: x - 1))
+                currentWhiteStart = nil
+            }
+        }
+        if let start = currentWhiteStart {
+            buttonWhiteClusters.append((start: start, end: maxBlueX))
+        }
+
+        XCTAssertGreaterThanOrEqual(
+            buttonWhiteClusters.count,
+            2,
+            "Expected separate white pixel clusters for the play.fill icon and the Start Quest button title"
+        )
+        if buttonWhiteClusters.count >= 2 {
+            let playIconCluster = buttonWhiteClusters[0]
+            let playIconWidthPt = CGFloat(playIconCluster.end - playIconCluster.start + 1) / scale
+            XCTAssertGreaterThan(playIconWidthPt, 5, "Expected visible play.fill icon width inside Start Quest button")
+            XCTAssertLessThan(playIconWidthPt, 18, "Expected play.fill icon cluster to be distinct from title text")
+
+            // Verify the leading cluster has the right-pointing triangle profile of play.fill
+            // (taller vertical white span near its leading edge than near its trailing tip).
+            let iconSpan = max(1, playIconCluster.end - playIconCluster.start)
+            let leadingSampleX = playIconCluster.start + iconSpan / 4
+            let trailingSampleX = playIconCluster.end - iconSpan / 5
+            let leadingHeight = whiteColumnMaxY[leadingSampleX] - whiteColumnMinY[leadingSampleX]
+            let trailingHeight = whiteColumnMaxY[trailingSampleX] - whiteColumnMinY[trailingSampleX]
+            XCTAssertGreaterThan(
+                leadingHeight,
+                trailingHeight,
+                "Expected play.fill icon cluster to taper from left (\(leadingHeight)px) to right (\(trailingHeight)px)"
+            )
+
+            let iconToTitleGapPt = CGFloat(buttonWhiteClusters[1].start - playIconCluster.end - 1) / scale
+            XCTAssertGreaterThan(iconToTitleGapPt, 2, "Expected visible spacing between play.fill icon and button title")
+            XCTAssertLessThan(iconToTitleGapPt, 10, "Expected compact HStack spacing between play.fill icon and button title")
+
+            let buttonTitleWidthPt = CGFloat(buttonWhiteClusters.last!.end - buttonWhiteClusters[1].start + 1) / scale
+            XCTAssertGreaterThan(buttonTitleWidthPt, 55, "Expected 'Start Quest' title text to render to the right of play.fill")
+        }
 
         // Regression assertions for #26:
         // 1. The play.fill icon must appear near the leading edge (no huge empty slot on the left).
@@ -2106,7 +2163,7 @@ final class HollerKitTests: XCTestCase {
         )
 
         // 4. Verify the start route ("trashapp://map") on the left side of the bottom row renders
-        // its link icon and route text compactly without a wide List icon-column gap.
+        // both the link icon and the route text separately, with compact spacing between them.
         var routeForegroundColumns = [Bool](repeating: false, count: minBlueX)
         for x in 0..<minBlueX {
             for y in minBlueY...maxBlueY {
@@ -2121,7 +2178,7 @@ final class HollerKitTests: XCTestCase {
                 }
             }
         }
-        var clusters: [(start: Int, end: Int)] = []
+        var rawClusters: [(start: Int, end: Int)] = []
         var currentStart: Int?
         for x in 0..<minBlueX {
             if routeForegroundColumns[x] {
@@ -2129,20 +2186,59 @@ final class HollerKitTests: XCTestCase {
                     currentStart = x
                 }
             } else if let start = currentStart {
-                clusters.append((start: start, end: x - 1))
+                rawClusters.append((start: start, end: x - 1))
                 currentStart = nil
             }
         }
         if let start = currentStart {
-            clusters.append((start: start, end: minBlueX - 1))
+            rawClusters.append((start: start, end: minBlueX - 1))
         }
+
+        // Merge tiny 1px intra-symbol gaps so multi-stroke symbols stay a single cluster while preserving
+        // inter-glyph and icon-to-text separation.
+        var clusters: [(start: Int, end: Int)] = []
+        for cluster in rawClusters {
+            if let last = clusters.last, (cluster.start - last.end - 1) <= 1 {
+                clusters[clusters.count - 1] = (start: last.start, end: cluster.end)
+            } else {
+                clusters.append(cluster)
+            }
+        }
+
         XCTAssertGreaterThanOrEqual(
             clusters.count,
             2,
             "Expected link icon and route text clusters on the left side of the bottom row"
         )
         if clusters.count >= 2 {
-            let iconToRouteGapPt = CGFloat(clusters[1].start - clusters[0].end) / scale
+            let linkIconCluster = clusters[0]
+            let linkIconWidthPt = CGFloat(linkIconCluster.end - linkIconCluster.start + 1) / scale
+            // The SF Symbol 'link' glyph is wider than a single caption2.monospaced() character (~5pt),
+            // ensuring clusters[0] is the link icon rather than the first character of "trashapp://map".
+            XCTAssertGreaterThan(
+                linkIconWidthPt,
+                7.5,
+                "Expected leading route cluster to be the 'link' icon (got width \(linkIconWidthPt)pt, which looks like a single text glyph)"
+            )
+            XCTAssertLessThan(
+                linkIconWidthPt,
+                18,
+                "Expected leading route cluster to be a single 'link' icon, got width \(linkIconWidthPt)pt"
+            )
+
+            let routeTextWidthPt = CGFloat(clusters.last!.end - clusters[1].start + 1) / scale
+            XCTAssertGreaterThan(
+                routeTextWidthPt,
+                65,
+                "Expected 'trashapp://map' route text to render to the right of the link icon (got width \(routeTextWidthPt)pt)"
+            )
+
+            let iconToRouteGapPt = CGFloat(clusters[1].start - linkIconCluster.end - 1) / scale
+            XCTAssertGreaterThan(
+                iconToRouteGapPt,
+                1.5,
+                "Expected a distinct gap between the link icon and route text, got \(iconToRouteGapPt)pt"
+            )
             XCTAssertLessThan(
                 iconToRouteGapPt,
                 12,

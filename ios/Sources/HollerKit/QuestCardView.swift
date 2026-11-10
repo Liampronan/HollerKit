@@ -18,6 +18,7 @@ public struct QuestCardView: View {
         self.onStart = onStart
     }
 
+    /// The localized title displayed inside the card's primary action button.
     public var buttonTitle: String {
         if isActive {
             return "Running..."
@@ -25,6 +26,7 @@ public struct QuestCardView: View {
         return item.status == .passed ? "Re-run Quest" : "Start Quest"
     }
 
+    /// The SF Symbol name displayed alongside `buttonTitle` in the card's primary action button.
     public var buttonSystemImage: String {
         isActive ? "play.circle.fill" : "play.fill"
     }
