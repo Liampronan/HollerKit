@@ -19,6 +19,30 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..')
 
+const ALLOWED_AUTHOR_NAMES = new Set(['liam ronan', 'liampronan', 'agent-liam'])
+const ALLOWED_AUTHOR_EMAILS = new Set([
+  'liampronan@gmail.com',
+  'liampronan@users.noreply.github.com',
+  'agent-liam@macbookpro.lan',
+])
+
+/**
+ * Returns `true` only when a commit's author name and email belong to `liampronan`.
+ *
+ * @param {string} authorName
+ * @param {string} authorEmail
+ * @returns {boolean}
+ */
+export function isAllowedAuthor(authorName, authorEmail) {
+  const normName = authorName.trim().toLowerCase()
+  const normEmail = authorEmail.trim().toLowerCase()
+  const emailAllowed =
+    ALLOWED_AUTHOR_EMAILS.has(normEmail) ||
+    /^(?:\d+\+)?liampronan@users\.noreply\.github\.com$/i.test(normEmail)
+  const nameAllowed = ALLOWED_AUTHOR_NAMES.has(normName)
+  return emailAllowed && nameAllowed
+}
+
 /**
  * Runs a git command inside the repository root and returns trimmed stdout.
  *
@@ -240,17 +264,35 @@ function updatePackageVersionFile(filePath, nextVersion) {
 }
 
 /**
- * Tags `HEAD` (or `origin/main`) and publishes the GitHub Release for `version`.
+ * Verifies that the target git ref was authored by `liampronan`, throwing if not.
+ *
+ * @param {string} ref
+ * @returns {{ sha: string; authorName: string; authorEmail: string }}
+ */
+export function verifyRefAuthorAllowed(ref) {
+  const line = runGit(['log', '-1', '--pretty=format:%H\t%an\t%ae', ref])
+  const [sha = '', authorName = '', authorEmail = ''] = line.split('\t')
+  if (!isAllowedAuthor(authorName, authorEmail)) {
+    throw new Error(
+      `Refusing to run release-cut on commit ${sha.slice(0, 7)} authored by "${authorName} <${authorEmail}>" (only liampronan commits are permitted).`,
+    )
+  }
+  return { sha, authorName, authorEmail }
+}
+
+/**
+ * Tags `ref` and publishes the GitHub Release for `version` after verifying the commit author is `liampronan`.
  *
  * @param {string} version
  * @param {string} repo
  * @param {boolean} dryRun
+ * @param {string} ref
  */
-async function tagAndPublishRelease(version, repo, dryRun) {
+async function tagAndPublishRelease(version, repo, dryRun, ref) {
+  const { sha: headSha } = verifyRefAuthorAllowed(ref)
   const changelogPath = resolve(REPO_ROOT, 'CHANGELOG.md')
   const changelog = readFileSync(changelogPath, 'utf8')
   const notesBody = extractChangelogSection(changelog, version)
-  const headSha = runGit(['rev-parse', 'HEAD'])
   const existingTags = new Set(
     runGit(['tag', '--list'])
       .split('\n')
@@ -343,9 +385,11 @@ async function main() {
 
   if (args.tagAndPublish) {
     const targetVersion = args.version ?? currentVersion
-    await tagAndPublishRelease(targetVersion, args.repo, args.dryRun)
+    await tagAndPublishRelease(targetVersion, args.repo, args.dryRun, args.ref)
     return
   }
+
+  verifyRefAuthorAllowed(args.ref)
 
   const nextVersion = args.version ?? bumpVersion(currentVersion, args.bump)
   const existingTags = new Set(
@@ -357,10 +401,25 @@ async function main() {
   const baseRef = existingTags.has(currentVersion) ? currentVersion : null
   const logRange = baseRef ? `${baseRef}..${args.ref}` : args.ref
 
-  const rawCommits = runGit(['log', logRange, '--pretty=format:%s'])
+  const logLines = runGit(['log', logRange, '--pretty=format:%H\t%an\t%ae\t%s'])
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !/^chore:\s*release\b/i.test(line))
+    .filter(Boolean)
+
+  const rawCommits = []
+  const skippedNonAuthorCommits = []
+  for (const line of logLines) {
+    const [sha = '', authorName = '', authorEmail = '', ...subjectParts] = line.split('\t')
+    const subject = subjectParts.join('\t').trim()
+    if (!subject || /^chore:\s*release\b/i.test(subject)) {
+      continue
+    }
+    if (isAllowedAuthor(authorName, authorEmail)) {
+      rawCommits.push(subject)
+    } else {
+      skippedNonAuthorCommits.push(`${sha.slice(0, 7)} (${authorName} <${authorEmail}>): ${subject}`)
+    }
+  }
 
   let hasMigrationChanges = false
   if (baseRef) {
@@ -375,7 +434,8 @@ async function main() {
           ok: true,
           skipped: true,
           currentVersion,
-          reason: `No new commits since ${baseRef ?? 'HEAD'}; skipping release cut.`,
+          skippedNonAuthorCommits,
+          reason: `No new liampronan commits since ${baseRef ?? args.ref}; skipping release cut.`,
         },
         null,
         2,
@@ -402,6 +462,7 @@ async function main() {
           currentVersion,
           nextVersion,
           commitsSinceLastRelease: rawCommits,
+          skippedNonAuthorCommits,
           changelogSection,
           filesToUpdate: [
             'CHANGELOG.md',
