@@ -6,7 +6,8 @@ struct CheckoutMockScreen: View {
     @State private var payTapCount = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Run Club Pro")
                     .font(.largeTitle.bold())
@@ -39,10 +40,35 @@ struct CheckoutMockScreen: View {
             .accessibilityIdentifier("DemoPayButton")
             .accessibilityValue("\(payTapCount)")
 
+            NavigationLink(destination: OrderDetailsMockScreen()) {
+                Text("View Order Details")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("DemoOrderDetailsLink")
+
             Spacer()
         }
         .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        }
         .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .accessibilityIdentifier("DemoCheckoutScrollView")
+    }
+}
+
+struct OrderDetailsMockScreen: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Order #RUN-2026-99")
+                .font(.title2.bold())
+            Text("Swipe from left edge to return to Checkout.")
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding()
+        .navigationTitle("Order Details")
+        .accessibilityIdentifier("DemoOrderDetailsScreen")
     }
 }
 

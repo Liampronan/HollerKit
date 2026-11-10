@@ -30,6 +30,34 @@ struct ContentView: View {
                     }
                     .accessibilityIdentifier("DemoReportButton")
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button("All Triggers (Shake, Strokes, Press)") {
+                            HollerKit.setInvocation([
+                                .shake: .bugReport,
+                                .screenshot: .bugReport,
+                                .stroke(.leftToCenter): .bugReport,
+                                .stroke(.rightToCenter): .quests,
+                                .twoFingerLongPress: .quests
+                            ])
+                        }
+                        Button("Strokes Only") {
+                            HollerKit.setInvocation([
+                                .stroke(.leftToCenter): .bugReport,
+                                .stroke(.rightToCenter): .quests
+                            ])
+                        }
+                        Button("Shake Only") {
+                            HollerKit.setInvocation([.shake: .bugReport])
+                        }
+                        Button("Invocations Off") {
+                            HollerKit.setInvocation([])
+                        }
+                    } label: {
+                        Image(systemName: "flask")
+                    }
+                    .accessibilityIdentifier("DemoExperimentsMenu")
+                }
             }
         }
         .task {

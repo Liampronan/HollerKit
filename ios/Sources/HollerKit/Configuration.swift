@@ -123,6 +123,7 @@ public struct HollerKitConfiguration: Sendable {
     public var auth: @Sendable () async throws -> String?
     public var isEnabled: @Sendable () -> Bool
     public var invocation: HollerKitInvocation
+    public var invocationProvider: (@Sendable () -> HollerKitInvocation)?
     public var inputMode: HollerKitInputMode
     public var audio: HollerKitAudioConfiguration
     public var metadata: @Sendable () -> [String: String]
@@ -137,6 +138,7 @@ public struct HollerKitConfiguration: Sendable {
         auth: @escaping @Sendable () async throws -> String?,
         isEnabled: @escaping @Sendable () -> Bool = { true },
         invocation: HollerKitInvocation = [],
+        invocationProvider: (@Sendable () -> HollerKitInvocation)? = nil,
         inputMode: HollerKitInputMode = .textAndAudio,
         audio: HollerKitAudioConfiguration = .transcriptOnly(
             maxDuration: 60,
@@ -153,6 +155,7 @@ public struct HollerKitConfiguration: Sendable {
         self.auth = auth
         self.isEnabled = isEnabled
         self.invocation = invocation
+        self.invocationProvider = invocationProvider
         self.inputMode = inputMode
         self.audio = audio
         self.metadata = metadata
@@ -162,17 +165,6 @@ public struct HollerKitConfiguration: Sendable {
         self.urlSession = urlSession
         self.outboxDirectoryURL = outboxDirectoryURL
     }
-}
-
-public struct HollerKitInvocation: OptionSet, Sendable {
-    public let rawValue: Int
-
-    public init(rawValue: Int) {
-        self.rawValue = rawValue
-    }
-
-    public static let shake = HollerKitInvocation(rawValue: 1 << 0)
-    public static let screenshot = HollerKitInvocation(rawValue: 1 << 1)
 }
 
 public enum HollerKitInputMode: Sendable, Equatable {
