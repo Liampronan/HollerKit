@@ -165,6 +165,31 @@ final class PassthroughOverlayWindow: UIWindow {
 }
 #endif
 
+/// Explicit UIKit-backed semantic colors for `QuestOverlayView` so material vibrancy inside
+/// `PassthroughOverlayWindow` never washes out secondary labels or checklist icons.
+private enum OverlayPalette {
+    #if canImport(UIKit)
+    static let primaryText = Color(uiColor: .label)
+    static let secondaryText = Color(uiColor: .secondaryLabel)
+    static let tertiaryText = Color(uiColor: .tertiaryLabel)
+    static let uncheckedIcon = Color(uiColor: .secondaryLabel)
+    static let checkedIcon = Color(red: 0.08, green: 0.50, blue: 0.24)
+    static let accentTeal = Color(uiColor: .systemTeal)
+    static let surfaceFill = Color(uiColor: .secondarySystemBackground)
+    static let strokeBorder = Color(uiColor: .separator)
+    #else
+    static let primaryText = Color.primary
+    static let secondaryText = Color.secondary
+    static let tertiaryText = Color.secondary.opacity(0.75)
+    static let uncheckedIcon = Color.secondary
+    static let checkedIcon = Color(red: 0.08, green: 0.50, blue: 0.24)
+    static let accentTeal = Color.teal
+    static let surfaceFill = Color.gray.opacity(0.18)
+    static let strokeBorder = Color.primary.opacity(0.14)
+    #endif
+}
+
+/// Floating quest overlay card and collapsed pill displayed while a quest is active.
 public struct QuestOverlayView: View {
     @ObservedObject private var questState: HollerKitQuestState
     @State private var dragOffset: CGSize = .zero
@@ -249,6 +274,7 @@ public struct QuestOverlayView: View {
         }
     }
 
+    /// Clamps the proposed drag offset so the floating overlay stays within safe viewport margins.
     private func clampOffset(_ proposed: CGSize, viewportSize: CGSize, cardSize: CGSize) -> CGSize {
         guard viewportSize.width > 0, viewportSize.height > 0, cardSize.width > 0, cardSize.height > 0 else {
             return proposed
@@ -266,6 +292,7 @@ public struct QuestOverlayView: View {
         )
     }
 
+    /// Renders the compact floating pill for the active quest session.
     private func collapsedPill(session: ActiveQuestSession) -> some View {
         HStack(spacing: 10) {
             Button {
@@ -275,12 +302,13 @@ public struct QuestOverlayView: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "flag.checkered")
+                        .symbolRenderingMode(.monochrome)
                         .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.teal)
+                        .foregroundStyle(OverlayPalette.accentTeal)
 
                     Text(session.quest.definition.title)
                         .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(OverlayPalette.primaryText)
                         .lineLimit(1)
 
                     ElapsedTimerText(startedAt: session.startedAt)
@@ -296,10 +324,11 @@ public struct QuestOverlayView: View {
             Button {
                 questState.captureMark()
             } label: {
-                Label(
-                    session.marks.isEmpty ? "Mark" : "Mark (\(session.marks.count))",
-                    systemImage: "camera.viewfinder"
-                )
+                HStack(spacing: 4) {
+                    Image(systemName: "camera.viewfinder")
+                        .symbolRenderingMode(.monochrome)
+                    Text(session.marks.isEmpty ? "Mark" : "Mark (\(session.marks.count))")
+                }
                 .font(.caption.weight(.semibold))
             }
             .buttonStyle(.bordered)
@@ -319,14 +348,22 @@ public struct QuestOverlayView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
+        .background {
+            ZStack {
+                Capsule()
+                    .fill(.ultraThinMaterial)
+                Capsule()
+                    .fill(OverlayPalette.surfaceFill.opacity(0.94))
+            }
+        }
         .overlay {
             Capsule()
-                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                .stroke(OverlayPalette.strokeBorder.opacity(0.45), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
     }
 
+    /// Renders the expanded floating quest card with setup, interactive step checklist, and expectations.
     private func expandedCard(session: ActiveQuestSession) -> some View {
         let maxInstructionsHeight: CGFloat = viewportSize.height > 0
             ? min(240, max(110, viewportSize.height * 0.36))
@@ -337,10 +374,10 @@ public struct QuestOverlayView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.quest.definition.area.uppercased())
                         .font(.caption2.weight(.bold))
-                        .foregroundStyle(.teal)
+                        .foregroundStyle(OverlayPalette.accentTeal)
                     Text(session.quest.definition.title)
                         .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(OverlayPalette.primaryText)
                 }
 
                 Spacer()
@@ -353,8 +390,9 @@ public struct QuestOverlayView: View {
                     }
                 } label: {
                     Image(systemName: "chevron.down.circle.fill")
+                        .symbolRenderingMode(.hierarchical)
                         .font(.title3)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(OverlayPalette.secondaryText)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Collapse Quest Overlay")
@@ -367,18 +405,41 @@ public struct QuestOverlayView: View {
 
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 10) {
+                    if !session.quest.definition.setup.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Setup")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(OverlayPalette.secondaryText)
+                            ForEach(Array(session.quest.definition.setup.enumerated()), id: \.offset) { _, line in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: "gearshape")
+                                        .symbolRenderingMode(.monochrome)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(OverlayPalette.secondaryText)
+                                        .frame(width: 16, height: 14, alignment: .center)
+                                    Text(line)
+                                        .font(.caption)
+                                        .foregroundStyle(OverlayPalette.secondaryText)
+                                        .multilineTextAlignment(.leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: 0)
+                                }
+                            }
+                        }
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         let checkedCount = session.stepsChecked.filter { $0 }.count
                         let totalSteps = session.quest.definition.steps.count
                         HStack {
                             Text("Steps (\(checkedCount)/\(totalSteps))")
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(OverlayPalette.secondaryText)
                             Spacer()
                             if totalSteps > 0 {
                                 Text("Tap to check off")
                                     .font(.caption2)
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(OverlayPalette.tertiaryText)
                             }
                         }
 
@@ -388,38 +449,55 @@ public struct QuestOverlayView: View {
                                 questState.toggleStep(at: index)
                             } label: {
                                 HStack(alignment: .top, spacing: 8) {
-                                    Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(isChecked ? .green : .secondary)
-                                        .font(.subheadline)
+                                    Group {
+                                        if isChecked {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .symbolRenderingMode(.palette)
+                                                .foregroundStyle(Color.white, OverlayPalette.checkedIcon)
+                                        } else {
+                                            Image(systemName: "circle")
+                                                .symbolRenderingMode(.monochrome)
+                                                .foregroundStyle(OverlayPalette.uncheckedIcon)
+                                        }
+                                    }
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(width: 16, height: 14, alignment: .center)
+
                                     Text(step)
                                         .font(.caption)
-                                        .foregroundStyle(isChecked ? .secondary : .primary)
-                                        .strikethrough(isChecked)
+                                        .foregroundStyle(isChecked ? OverlayPalette.secondaryText : OverlayPalette.primaryText)
+                                        .strikethrough(isChecked, color: OverlayPalette.secondaryText)
                                         .multilineTextAlignment(.leading)
+                                        .fixedSize(horizontal: false, vertical: true)
                                     Spacer(minLength: 0)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityValue(isChecked ? "checked" : "unchecked")
                             .accessibilityIdentifier("HollerKitQuestStep_\(index)")
                         }
                     }
 
                     if !session.quest.definition.expect.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 5) {
                             Text("Expect")
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(OverlayPalette.secondaryText)
                             ForEach(Array(session.quest.definition.expect.enumerated()), id: \.offset) { _, exp in
-                                HStack(alignment: .top, spacing: 6) {
+                                HStack(alignment: .top, spacing: 8) {
                                     Image(systemName: "sparkles")
-                                        .font(.caption2)
-                                        .foregroundStyle(.teal)
-                                        .padding(.top, 2)
+                                        .symbolRenderingMode(.monochrome)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(OverlayPalette.accentTeal)
+                                        .frame(width: 16, height: 14, alignment: .center)
                                     Text(exp)
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(OverlayPalette.primaryText)
+                                        .multilineTextAlignment(.leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: 0)
                                 }
                             }
                         }
@@ -433,10 +511,11 @@ public struct QuestOverlayView: View {
                 Button {
                     questState.captureMark()
                 } label: {
-                    Label(
-                        session.marks.isEmpty ? "Mark" : "Mark (\(session.marks.count))",
-                        systemImage: "camera.viewfinder"
-                    )
+                    HStack(spacing: 5) {
+                        Image(systemName: "camera.viewfinder")
+                            .symbolRenderingMode(.monochrome)
+                        Text(session.marks.isEmpty ? "Mark" : "Mark (\(session.marks.count))")
+                    }
                     .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
@@ -461,8 +540,12 @@ public struct QuestOverlayView: View {
                 Button {
                     questState.presentResultSheet()
                 } label: {
-                    Label("Done", systemImage: "checkmark.circle.fill")
-                        .font(.caption.weight(.bold))
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .symbolRenderingMode(.monochrome)
+                        Text("Done")
+                    }
+                    .font(.caption.weight(.bold))
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -473,10 +556,17 @@ public struct QuestOverlayView: View {
         }
         .padding(14)
         .frame(maxWidth: 340)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.regularMaterial)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(OverlayPalette.surfaceFill.opacity(0.94))
+            }
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                .stroke(OverlayPalette.strokeBorder.opacity(0.45), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.2), radius: 14, y: 6)
     }
@@ -528,7 +618,7 @@ private struct ElapsedTimerText: View {
             let remainder = seconds % 60
             Text(String(format: "%d:%02d", minutes, remainder))
                 .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OverlayPalette.secondaryText)
         }
     }
 }

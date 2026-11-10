@@ -1,4 +1,9 @@
 export type {
+  FormattedGitHubIssue,
+  GitHubIssuesSinkOptions,
+  GitHubWebhookOptions,
+} from './adapters/sinks/github.js'
+export type {
   ApiKeysAuthOptions,
   Authenticator,
   AuthPrincipal,
@@ -49,6 +54,7 @@ export type {
   QuestBoardStatus,
   QuestDefinitionInput,
   QuestHashInput,
+  QuestLatestRun,
   QuestRecordMode,
   QuestResult,
   QuestResultCounts,

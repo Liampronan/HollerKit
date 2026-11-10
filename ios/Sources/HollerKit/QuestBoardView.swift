@@ -76,19 +76,26 @@ public struct QuestBoardView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 24)
                     }
+                } else if selectedTab == .pending {
+                    if !questState.untriedQuests.isEmpty {
+                        Section("Untried (\(questState.untriedQuests.count))") {
+                            ForEach(questState.untriedQuests) { item in
+                                questCardRow(for: item)
+                            }
+                        }
+                    }
+
+                    if !questState.needsAttentionQuests.isEmpty {
+                        Section("Needs Attention (\(questState.needsAttentionQuests.count))") {
+                            ForEach(questState.needsAttentionQuests) { item in
+                                questCardRow(for: item)
+                            }
+                        }
+                    }
                 } else {
-                    Section(selectedTab == .pending ? "Pending Quests" : "Completed Quests") {
-                        ForEach(displayedQuests) { item in
-                            let isCurrentActive = questState.activeQuest?.quest.id == item.id
-                            let isAnyActive = questState.activeQuest != nil
-                            QuestCardView(
-                                item: item,
-                                isActive: isCurrentActive,
-                                isDisabled: isAnyActive && !isCurrentActive,
-                                onStart: {
-                                    questState.startQuest(item)
-                                }
-                            )
+                    Section("Completed Quests") {
+                        ForEach(questState.completedQuests) { item in
+                            questCardRow(for: item)
                         }
                     }
                 }
@@ -121,5 +128,19 @@ public struct QuestBoardView: View {
             }
         }
         .accessibilityIdentifier("HollerKitQuestBoardView")
+    }
+
+    @ViewBuilder
+    private func questCardRow(for item: QuestBoardItem) -> some View {
+        let isCurrentActive = questState.activeQuest?.quest.id == item.id
+        let isAnyActive = questState.activeQuest != nil
+        QuestCardView(
+            item: item,
+            isActive: isCurrentActive,
+            isDisabled: isAnyActive && !isCurrentActive,
+            onStart: {
+                questState.startQuest(item)
+            }
+        )
     }
 }

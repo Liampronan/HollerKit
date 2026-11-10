@@ -24,6 +24,7 @@ import {
   type MarkOutboxFailedInput,
   type OutboxRecord,
   type QuestBoardStatus,
+  type QuestLatestRun,
   type QuestRecordMode,
   type QuestResult,
   type QuestResultCounts,
@@ -70,32 +71,72 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     onnotice: () => {},
   })
 
+  function pendingSortRank(status: QuestBoardStatus): number {
+    switch (status) {
+      case 'pending':
+        return 0
+      case 'unsure':
+        return 1
+      case 'failed':
+        return 2
+      case 'passed':
+        return 3
+    }
+  }
+
+  interface RunSummary {
+    counts: QuestResultCounts
+    boardStatus: QuestBoardStatus
+    latestRun: QuestLatestRun | null
+  }
+
   /**
-   * Retrieves grouped quest-run result counts for a batch of `(quest_id, quest_version)` pairs
-   * in a single query.
+   * Retrieves grouped quest-run result counts, boardStatus, and latestRun for a batch of
+   * `(quest_id, quest_version)` pairs.
    */
-  async function computeCountsBatch(
+  async function computeRunSummaryBatch(
     db: Sql,
     pairs: ReadonlyArray<{ id: string; version: number }>,
-  ): Promise<Map<string, QuestResultCounts>> {
-    const countsByKey = new Map<string, QuestResultCounts>()
+  ): Promise<Map<string, RunSummary>> {
+    const summaryByKey = new Map<string, RunSummary>()
+    const unresolvedByKey = new Map<string, { fail: number; unsure: number }>()
     for (const pair of pairs) {
-      countsByKey.set(`${pair.id}:${pair.version}`, {
-        pass: 0,
-        fail: 0,
-        unsure: 0,
-        abandoned: 0,
+      const key = `${pair.id}:${pair.version}`
+      summaryByKey.set(key, {
+        counts: {
+          pass: 0,
+          fail: 0,
+          unsure: 0,
+          abandoned: 0,
+        },
+        boardStatus: 'pending',
+        latestRun: null,
       })
+      unresolvedByKey.set(key, { fail: 0, unsure: 0 })
     }
     if (pairs.length === 0) {
-      return countsByKey
+      return summaryByKey
     }
 
     const questIds = Array.from(new Set(pairs.map((p) => p.id)))
     const rows = await db<
-      { quest_id: string; quest_version: number; result: QuestResult; count: number }[]
+      {
+        quest_id: string
+        quest_version: number
+        result: QuestResult
+        count: number
+        unresolved_count: number
+      }[]
     >`
-      SELECT quest_id, quest_version::int AS quest_version, result, COUNT(*)::int AS count
+      SELECT
+        quest_id,
+        quest_version::int AS quest_version,
+        result,
+        COUNT(*)::int AS count,
+        COUNT(*) FILTER (
+          WHERE triage_status IS NULL
+             OR triage_status NOT IN ('resolved', 'wontfix', 'duplicate')
+        )::int AS unresolved_count
       FROM hollerkit.feedback
       WHERE kind = 'quest_run'
         AND quest_id = ANY(ARRAY(SELECT jsonb_array_elements_text(${db.json(questIds)}::jsonb)))
@@ -105,30 +146,98 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
     for (const row of rows) {
       const key = `${row.quest_id}:${Number(row.quest_version)}`
-      const target = countsByKey.get(key)
-      if (target && row.result in target) {
-        target[row.result] = Number(row.count)
+      const target = summaryByKey.get(key)
+      if (target && row.result in target.counts) {
+        target.counts[row.result] = Number(row.count)
+      }
+      const unresolved = unresolvedByKey.get(key)
+      if (unresolved) {
+        if (row.result === 'fail') unresolved.fail = Number(row.unresolved_count)
+        else if (row.result === 'unsure') unresolved.unsure = Number(row.unresolved_count)
       }
     }
 
-    return countsByKey
+    for (const [key, summary] of summaryByKey.entries()) {
+      const unresolved = unresolvedByKey.get(key) ?? { fail: 0, unsure: 0 }
+      if (summary.counts.pass > 0) {
+        summary.boardStatus = 'passed'
+      } else if (unresolved.fail > 0) {
+        summary.boardStatus = 'failed'
+      } else if (unresolved.unsure > 0) {
+        summary.boardStatus = 'unsure'
+      } else {
+        summary.boardStatus = 'pending'
+      }
+    }
+
+    const latestRows = await db<
+      {
+        id: string
+        quest_id: string
+        quest_version: number
+        result: 'pass' | 'fail' | 'unsure'
+        build: string
+        created_at: Date | string
+        comment: string | null
+        triage_status: TriageStatus | null
+      }[]
+    >`
+      SELECT DISTINCT ON (quest_id, quest_version)
+        id,
+        quest_id,
+        quest_version::int AS quest_version,
+        result,
+        build,
+        created_at,
+        COALESCE(
+          NULLIF(btrim(comment), ''),
+          NULLIF(btrim(transcript), '')
+        ) AS comment,
+        triage_status
+      FROM hollerkit.feedback
+      WHERE kind = 'quest_run'
+        AND quest_id = ANY(ARRAY(SELECT jsonb_array_elements_text(${db.json(questIds)}::jsonb)))
+        AND result IN ('pass', 'fail', 'unsure')
+      ORDER BY quest_id, quest_version, created_at DESC, id::text DESC
+    `
+
+    for (const row of latestRows) {
+      const key = `${row.quest_id}:${Number(row.quest_version)}`
+      const target = summaryByKey.get(key)
+      if (target) {
+        target.latestRun = {
+          id: row.id,
+          result: row.result,
+          build: row.build,
+          createdAt: toIso(row.created_at)!,
+          comment: row.comment ?? null,
+          triageStatus: row.triage_status ?? null,
+        }
+      }
+    }
+
+    return summaryByKey
   }
 
   /**
-   * Converts raw `hollerkit.quests` rows into `QuestVersionRecord[]` using a single grouped counts query.
+   * Converts raw `hollerkit.quests` rows into `QuestVersionRecord[]` using grouped run summary queries.
    */
   async function toQuestVersionRecords(db: Sql, rows: any[]): Promise<QuestVersionRecord[]> {
     if (rows.length === 0) return []
     const pairs = rows.map((row) => ({ id: String(row.id), version: Number(row.version) }))
-    const countsByKey = await computeCountsBatch(db, pairs)
+    const summaryByKey = await computeRunSummaryBatch(db, pairs)
 
     return rows.map((row) => {
       const version = Number(row.version)
-      const counts = countsByKey.get(`${row.id}:${version}`) ?? {
-        pass: 0,
-        fail: 0,
-        unsure: 0,
-        abandoned: 0,
+      const summary = summaryByKey.get(`${row.id}:${version}`) ?? {
+        counts: {
+          pass: 0,
+          fail: 0,
+          unsure: 0,
+          abandoned: 0,
+        },
+        boardStatus: 'pending' as QuestBoardStatus,
+        latestRun: null,
       }
       return {
         id: row.id,
@@ -150,8 +259,10 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         status: row.status as QuestStatus,
         createdAt: toIso(row.created_at)!,
         retiredAt: toIso(row.retired_at),
-        counts,
-        passedOnCurrentVersion: counts.pass > 0,
+        counts: summary.counts,
+        passedOnCurrentVersion: summary.counts.pass > 0,
+        boardStatus: summary.boardStatus,
+        latestRun: summary.latestRun,
       }
     })
   }
@@ -388,21 +499,19 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         }
 
         const pairs = syncedRows.map((r) => ({ id: String(r.id), version: Number(r.version) }))
-        const countsByKey = await computeCountsBatch(db, pairs)
+        const summaryByKey = await computeRunSummaryBatch(db, pairs)
 
         const statuses: BuildManifestQuestStatus[] = syncedRows.map((row) => {
           const version = Number(row.version)
-          const counts = countsByKey.get(`${row.id}:${version}`) ?? {
-            pass: 0,
-            fail: 0,
-            unsure: 0,
-            abandoned: 0,
-          }
-          let boardStatus: QuestBoardStatus = 'pending'
-          if (counts.pass > 0) {
-            boardStatus = 'passed'
-          } else if (counts.fail > 0 || counts.unsure > 0) {
-            boardStatus = 'failed'
+          const summary = summaryByKey.get(`${row.id}:${version}`) ?? {
+            counts: {
+              pass: 0,
+              fail: 0,
+              unsure: 0,
+              abandoned: 0,
+            },
+            boardStatus: 'pending' as QuestBoardStatus,
+            latestRun: null,
           }
 
           return {
@@ -410,7 +519,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             version,
             contentHash: row.content_hash,
             questStatus: row.status as QuestStatus,
-            boardStatus,
+            boardStatus: summary.boardStatus,
             title: row.title,
             area: row.area,
             setup: asStringArray(row.setup),
@@ -424,7 +533,8 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
               sha: row.source_sha ?? null,
               added: row.source_added ?? null,
             },
-            counts,
+            counts: summary.counts,
+            latestRun: summary.latestRun,
           }
         })
 
@@ -472,7 +582,9 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           `
 
       const records = await toQuestVersionRecords(sql, rows)
-      return records.filter((record) => !record.passedOnCurrentVersion)
+      return records
+        .filter((record) => !record.passedOnCurrentVersion)
+        .sort((a, b) => pendingSortRank(a.boardStatus) - pendingSortRank(b.boardStatus))
     },
 
     async listQuests(filter: ListQuestsFilter = {}): Promise<QuestVersionRecord[]> {
@@ -1012,6 +1124,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           FROM hollerkit.outbox
           WHERE delivered_at IS NULL
             AND next_attempt_at <= ${nowIso}::timestamptz
+            AND (${input.feedbackId ?? null}::uuid IS NULL OR feedback_id = ${input.feedbackId ?? null}::uuid)
           ORDER BY next_attempt_at ASC, id ASC
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED

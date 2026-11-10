@@ -75,55 +75,71 @@ public struct QuestCardView: View {
             }
 
             if !item.definition.setup.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("Setup")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     ForEach(Array(item.definition.setup.enumerated()), id: \.offset) { _, line in
-                        HStack(alignment: .top, spacing: 6) {
+                        HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "gearshape")
-                                .font(.caption2)
+                                .symbolRenderingMode(.monochrome)
+                                .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.secondary)
-                                .padding(.top, 2)
+                                .frame(width: 16, height: 14, alignment: .center)
                             Text(line)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("Steps")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 ForEach(Array(item.definition.steps.enumerated()), id: \.offset) { index, step in
-                    HStack(alignment: .top, spacing: 6) {
+                    HStack(alignment: .top, spacing: 8) {
                         Text("\(index + 1).")
                             .font(.caption.monospacedDigit().weight(.semibold))
                             .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 14, alignment: .center)
                         Text(step)
                             .font(.caption)
                             .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Expect")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(Array(item.definition.expect.enumerated()), id: \.offset) { _, expectation in
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "checkmark.diamond")
-                            .font(.caption2)
-                            .foregroundStyle(.teal)
-                            .padding(.top, 2)
-                        Text(expectation)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            if !item.definition.expect.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Expect")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(item.definition.expect.enumerated()), id: \.offset) { _, expectation in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "sparkles")
+                                .symbolRenderingMode(.monochrome)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.teal)
+                                .frame(width: 16, height: 14, alignment: .center)
+                            Text(expectation)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
+            }
+
+            if let latestRun = item.latestRun {
+                LatestRunSummaryView(latestRun: latestRun)
+                    .accessibilityIdentifier("HollerKitQuestLatestRun_\(item.id)")
             }
 
             HStack(spacing: 8) {
@@ -161,6 +177,61 @@ public struct QuestCardView: View {
     }
 }
 
+private struct LatestRunSummaryView: View {
+    var latestRun: QuestLatestRun
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Image(systemName: iconName)
+                    .foregroundStyle(tintColor)
+                Text("Last run: \(latestRun.formattedSummary())")
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption2)
+
+            if let commentLine = latestRun.firstCommentLine {
+                Text("\u{201C}\(commentLine)\u{201D}")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(tintColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var iconName: String {
+        switch latestRun.result {
+        case .pass:
+            return "checkmark.circle.fill"
+        case .fail:
+            return "exclamationmark.circle.fill"
+        case .unsure:
+            return "questionmark.circle.fill"
+        case .abandoned:
+            return "xmark.circle"
+        }
+    }
+
+    private var tintColor: Color {
+        switch latestRun.result {
+        case .pass:
+            return .green
+        case .fail:
+            return .red
+        case .unsure:
+            return .orange
+        case .abandoned:
+            return .secondary
+        }
+    }
+}
+
 private struct StatusBadge: View {
     var status: QuestStatus
 
@@ -180,11 +251,13 @@ private struct StatusBadge: View {
     private var label: String {
         switch status {
         case .pending:
-            return "Pending"
+            return "Untried"
         case .passed:
             return "Passed"
         case .failed:
             return "Failed"
+        case .unsure:
+            return "Unsure"
         }
     }
 
@@ -196,6 +269,8 @@ private struct StatusBadge: View {
             return "checkmark.circle.fill"
         case .failed:
             return "exclamationmark.circle.fill"
+        case .unsure:
+            return "questionmark.circle.fill"
         }
     }
 
@@ -207,6 +282,8 @@ private struct StatusBadge: View {
             return .green
         case .failed:
             return .red
+        case .unsure:
+            return .orange
         }
     }
 }

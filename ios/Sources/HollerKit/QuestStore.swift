@@ -167,6 +167,7 @@ public struct QuestStore: Sendable {
                 status: cachedItem?.status ?? .pending,
                 questStatus: cachedItem?.questStatus ?? "active",
                 counts: cachedItem?.counts ?? QuestResultCounts(),
+                latestRun: cachedItem?.latestRun,
                 needWarnings: warnings
             )
         }
@@ -211,7 +212,11 @@ public struct QuestStore: Sendable {
                 isSimulator: isSimulator,
                 isBackendReachable: true
             )
-            let status = QuestStatus(rawValue: serverItem.boardStatus) ?? .pending
+            let counts = serverItem.counts ?? QuestResultCounts()
+            var status = QuestStatus(rawValue: serverItem.boardStatus) ?? .pending
+            if status == .failed, counts.fail == 0, counts.unsure > 0 {
+                status = .unsure
+            }
             return QuestBoardItem(
                 id: normalizedServerId,
                 version: serverItem.version,
@@ -220,7 +225,8 @@ public struct QuestStore: Sendable {
                 definition: definition,
                 status: status,
                 questStatus: serverItem.questStatus,
-                counts: serverItem.counts ?? QuestResultCounts(),
+                counts: counts,
+                latestRun: serverItem.latestRun,
                 needWarnings: warnings
             )
         }
@@ -288,12 +294,26 @@ public final class HollerKitQuestState: ObservableObject {
     private var definitions: [QuestDefinition] = []
     private var store = QuestStore()
     private var localStatusOverrides: [String: QuestStatus] = [:]
+    private var localLatestRunOverrides: [String: QuestLatestRun] = [:]
     private var configurationGeneration: UInt64 = 0
 
     public init() {}
 
+    /// Quests that have not yet been tried (or whose prior failed/unsure runs were cleared by triage).
+    public var untriedQuests: [QuestBoardItem] {
+        quests.filter { $0.status == .pending }
+    }
+
+    /// Quests that have an open unsure or failed run (`unsure` ordered ahead of `failed`).
+    public var needsAttentionQuests: [QuestBoardItem] {
+        quests
+            .filter { $0.status == .unsure || $0.status == .failed }
+            .sorted { $0.status.pendingSortRank < $1.status.pendingSortRank }
+    }
+
+    /// All non-passed quests, ordered with untried (`pending`) quests first so failed/unsure runs never crowd out untried work.
     public var pendingQuests: [QuestBoardItem] {
-        quests.filter { $0.status != .passed }
+        untriedQuests + needsAttentionQuests
     }
 
     public var completedQuests: [QuestBoardItem] {
@@ -310,6 +330,7 @@ public final class HollerKitQuestState: ObservableObject {
         lastSyncError = nil
         definitions = []
         localStatusOverrides = [:]
+        localLatestRunOverrides = [:]
         QuestOverlayWindowManager.shared.hide()
     }
 
@@ -325,6 +346,7 @@ public final class HollerKitQuestState: ObservableObject {
             serverIdentity: serverURL?.absoluteString
         )
         self.localStatusOverrides = [:]
+        self.localLatestRunOverrides = [:]
         guard let questsConfiguration else {
             reset()
             return
@@ -617,7 +639,9 @@ public final class HollerKitQuestState: ObservableObject {
             result,
             forQuestId: session.quest.id,
             contentHash: session.quest.contentHash,
-            build: build
+            build: build,
+            comment: request.comment ?? request.transcript,
+            endedAt: endedAt
         )
         HollerKit.endQuestBreadcrumbs()
         if clearActiveSessionImmediately {
@@ -638,11 +662,14 @@ public final class HollerKitQuestState: ObservableObject {
         }
     }
 
+    /// Records a local quest run result optimistically so the board updates immediately (including when queued offline).
     public func recordLocalResult(
         _ result: QuestResult,
         forQuestId questId: String,
         contentHash: String? = nil,
-        build: String
+        build: String,
+        comment: String? = nil,
+        endedAt: Date = Date()
     ) {
         let normalizedId = questId.jsTrimmed
         guard let index = quests.firstIndex(where: { $0.id == normalizedId }) else { return }
@@ -661,30 +688,69 @@ public final class HollerKitQuestState: ObservableObject {
             }
         case .unsure:
             item.counts.unsure += 1
-            if item.status != .passed {
-                item.status = .failed
+            if item.status != .passed, item.status != .failed {
+                item.status = .unsure
             }
         case .abandoned:
             item.counts.abandoned += 1
         }
         let key = "\(build):\(item.id):\(item.contentHash)"
-        if item.status == .passed || item.status == .failed {
+        if result != .abandoned {
+            let isoFormatter = ISO8601DateFormatter()
+            let latestRun = QuestLatestRun(
+                result: result,
+                build: build,
+                createdAt: isoFormatter.string(from: endedAt),
+                comment: comment,
+                triageStatus: (result == .fail || result == .unsure) ? "new" : nil
+            )
+            item.latestRun = latestRun
+            localLatestRunOverrides[key] = latestRun
+        }
+        if item.status == .passed || item.status == .failed || item.status == .unsure {
             localStatusOverrides[key] = item.status
         }
         quests[index] = item
         applyBoardItems(quests, build: build)
     }
 
+    /// Merges server/cached board items with any newer local overrides and persists the board cache.
     private func applyBoardItems(_ items: [QuestBoardItem], build: String) {
+        let clearedTriageStatuses: Set<String> = ["resolved", "wontfix", "duplicate"]
         let merged = items.map { rawItem -> QuestBoardItem in
             var item = rawItem
             let key = "\(build):\(item.id):\(item.contentHash)"
-            if let overrideStatus = localStatusOverrides[key] {
+            let overrideRun = localLatestRunOverrides[key]
+            let isLocalRunNewer: Bool
+            if let overrideRun {
+                if let serverRun = item.latestRun {
+                    if let localDate = overrideRun.createdAtDate, let serverDate = serverRun.createdAtDate {
+                        isLocalRunNewer = localDate > serverDate
+                    } else {
+                        isLocalRunNewer = false
+                    }
+                } else {
+                    isLocalRunNewer = true
+                }
+            } else {
+                isLocalRunNewer = false
+            }
+
+            let isServerClearedByTriage = item.latestRun?.triageStatus.map { clearedTriageStatuses.contains($0) } ?? false
+            if isServerClearedByTriage && !isLocalRunNewer {
+                localStatusOverrides.removeValue(forKey: key)
+                localLatestRunOverrides.removeValue(forKey: key)
+            } else if let overrideStatus = localStatusOverrides[key] {
                 if overrideStatus == .passed {
                     item.status = .passed
-                } else if overrideStatus == .failed, item.status == .pending {
+                } else if overrideStatus == .failed, (item.status == .pending || item.status == .unsure) {
                     item.status = .failed
+                } else if overrideStatus == .unsure, item.status == .pending {
+                    item.status = .unsure
                 }
+            }
+            if isLocalRunNewer, let overrideRun {
+                item.latestRun = overrideRun
             }
             return item
         }

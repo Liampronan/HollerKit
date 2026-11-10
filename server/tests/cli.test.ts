@@ -353,6 +353,52 @@ test('CLI: quests sync, conformance --server, keys create/revoke, and migrations
     })
     assert.equal(migDuplicateCode, 1)
     assert.ok(migErr.some((l) => l.includes('already exists at destination')))
+
+    // 5. hollerkit outbox flush
+    const outboxFeedback = await store.createFeedback({
+      id: '11111111-2222-4333-8444-555555555555',
+      kind: 'report',
+      build: '500',
+      submitterId: 'tester-cli',
+      comment: 'CLI outbox flush report',
+      sinks: ['github'],
+    })
+    assert.equal(outboxFeedback.feedback.links.length, 0)
+
+    const flushOut: string[] = []
+    const flushCode = await runCli(
+      [
+        'outbox',
+        'flush',
+        '--db',
+        'postgres://mock/db',
+        '--github-repo',
+        'Liampronan/HollerKit',
+        '--github-token',
+        'ghp_cli_token',
+        '--limit',
+        '10',
+      ],
+      {
+        stdout: (l) => flushOut.push(l),
+        stderr: (l) => assert.fail(`Unexpected stderr: ${l}`),
+        storeFactory: () => store,
+        fetchImpl: async () =>
+          Response.json(
+            {
+              number: 88,
+              html_url: 'https://github.com/Liampronan/HollerKit/issues/88',
+            },
+            { status: 201 },
+          ),
+      },
+    )
+    assert.equal(flushCode, 0)
+    assert.ok(flushOut.some((l) => l.includes('claimed=1, delivered=1, failed=0')))
+    const updatedDetail = await store.getFeedbackById(outboxFeedback.feedback.id)
+    assert.deepEqual(updatedDetail?.feedback.links, [
+      'https://github.com/Liampronan/HollerKit/issues/88',
+    ])
   } finally {
     await httpServer.close()
     await rm(tempDir, { recursive: true, force: true })

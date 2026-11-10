@@ -1,6 +1,7 @@
 import {
   apiKeys,
   createHollerKitServer,
+  githubIssuesSink,
   postgresStore,
   supabaseJwt,
   supabaseStorage,
@@ -35,10 +36,21 @@ const storage = supabaseStorage({
   bucket: Deno.env.get('HOLLERKIT_BUCKET') ?? 'hollerkit',
 })
 
+const githubRepo = Deno.env.get('HOLLERKIT_GITHUB_REPO')?.trim()
+const githubToken = Deno.env.get('HOLLERKIT_GITHUB_TOKEN')?.trim()
+const githubWebhookSecret = Deno.env.get('HOLLERKIT_GITHUB_WEBHOOK_SECRET')?.trim()
+const sinks =
+  githubRepo && githubToken
+    ? [githubIssuesSink({ repo: githubRepo, token: githubToken })]
+    : undefined
+
 Deno.serve(
   createHollerKitServer({
     store,
     storage,
+    sinks,
+    autoFlushOutbox: sinks ? 'sync' : undefined,
+    githubWebhook: githubWebhookSecret ? { secret: githubWebhookSecret } : undefined,
     authenticate: [
       supabaseJwt({
         jwksUrl: `${supabaseUrl}/auth/v1/.well-known/jwks.json`,
