@@ -35,6 +35,8 @@ export type {
   McpCallToolResult,
   McpTextContent,
   McpToolDefinition,
+  QuestBoardStatus,
+  QuestLatestRun,
   QuestRecordMode,
   QuestResult,
   QuestsPendingInput,

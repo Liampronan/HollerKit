@@ -662,6 +662,7 @@ public final class HollerKitQuestState: ObservableObject {
         }
     }
 
+    /// Records a local quest run result optimistically so the board updates immediately (including when queued offline).
     public func recordLocalResult(
         _ result: QuestResult,
         forQuestId questId: String,
@@ -713,14 +714,32 @@ public final class HollerKitQuestState: ObservableObject {
         applyBoardItems(quests, build: build)
     }
 
+    /// Merges server/cached board items with any newer local overrides and persists the board cache.
     private func applyBoardItems(_ items: [QuestBoardItem], build: String) {
         let clearedTriageStatuses: Set<String> = ["resolved", "wontfix", "duplicate"]
         let merged = items.map { rawItem -> QuestBoardItem in
             var item = rawItem
             let key = "\(build):\(item.id):\(item.contentHash)"
+            let overrideRun = localLatestRunOverrides[key]
+            let isLocalRunNewer: Bool
+            if let overrideRun {
+                if let serverRun = item.latestRun {
+                    if let localDate = overrideRun.createdAtDate, let serverDate = serverRun.createdAtDate {
+                        isLocalRunNewer = localDate > serverDate
+                    } else {
+                        isLocalRunNewer = false
+                    }
+                } else {
+                    isLocalRunNewer = true
+                }
+            } else {
+                isLocalRunNewer = false
+            }
+
             let isServerClearedByTriage = item.latestRun?.triageStatus.map { clearedTriageStatuses.contains($0) } ?? false
-            if isServerClearedByTriage {
+            if isServerClearedByTriage && !isLocalRunNewer {
                 localStatusOverrides.removeValue(forKey: key)
+                localLatestRunOverrides.removeValue(forKey: key)
             } else if let overrideStatus = localStatusOverrides[key] {
                 if overrideStatus == .passed {
                     item.status = .passed
@@ -730,7 +749,7 @@ public final class HollerKitQuestState: ObservableObject {
                     item.status = .unsure
                 }
             }
-            if item.latestRun == nil, let overrideRun = localLatestRunOverrides[key] {
+            if isLocalRunNewer, let overrideRun {
                 item.latestRun = overrideRun
             }
             return item

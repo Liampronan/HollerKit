@@ -2424,6 +2424,7 @@ final class HollerKitTests: XCTestCase {
             urlSession: session,
             outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
         )
+        HollerKit.configure(config)
         await state.refresh(using: config)
 
         XCTAssertEqual(state.untriedQuests.map(\.id), ["q-fail", "q-untried"])
@@ -2431,5 +2432,19 @@ final class HollerKitTests: XCTestCase {
         let clearedItem = state.quests.first(where: { $0.id == "q-fail" })
         XCTAssertEqual(clearedItem?.status, .pending)
         XCTAssertEqual(clearedItem?.latestRun?.triageStatus, "resolved")
+
+        // A newer queued local result must not be wiped out by an older triage-cleared server latestRun
+        let newerLocalDate = ISO8601DateFormatter().date(from: "2026-11-09T13:30:00Z")!
+        state.recordLocalResult(
+            .fail,
+            forQuestId: "q-fail",
+            build: "100",
+            comment: "New regression after fix",
+            endedAt: newerLocalDate
+        )
+        await state.refresh(using: config)
+        let afterNewerLocal = state.quests.first(where: { $0.id == "q-fail" })
+        XCTAssertEqual(afterNewerLocal?.status, .failed)
+        XCTAssertEqual(afterNewerLocal?.latestRun?.firstCommentLine, "New regression after fix")
     }
 }

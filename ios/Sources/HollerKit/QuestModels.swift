@@ -43,6 +43,7 @@ public enum QuestStatus: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Summary of the most recent non-abandoned run (`pass`, `fail`, or `unsure`) for a quest version.
 public struct QuestLatestRun: Codable, Equatable, Sendable {
     public var id: String?
     public var result: QuestResult
@@ -68,6 +69,12 @@ public struct QuestLatestRun: Codable, Equatable, Sendable {
         self.triageStatus = triageStatus
     }
 
+    /// Parses `createdAt` as an ISO-8601 `Date` (with or without fractional seconds).
+    public var createdAtDate: Date? {
+        Self.parseISO8601(createdAt)
+    }
+
+    /// Returns the first non-empty trimmed line of `comment`, if present.
     public var firstCommentLine: String? {
         guard let comment, !comment.isEmpty else { return nil }
         let line = comment
@@ -77,6 +84,7 @@ public struct QuestLatestRun: Codable, Equatable, Sendable {
         return line
     }
 
+    /// Human-readable label for the latest run's outcome.
     public var resultSummaryLabel: String {
         switch result {
         case .pass:
@@ -90,12 +98,13 @@ public struct QuestLatestRun: Codable, Equatable, Sendable {
         }
     }
 
+    /// Formats a compact metadata summary line (`"<Result> · build <build> · <relative date>[ · Triaged]"`).
     public func formattedSummary(relativeTo referenceDate: Date = Date()) -> String {
         var parts: [String] = [resultSummaryLabel]
         if !build.isEmpty {
             parts.append("build \(build)")
         }
-        if let runDate = Self.parseISO8601(createdAt) {
+        if let runDate = createdAtDate {
             let formatter = RelativeDateTimeFormatter()
             formatter.unitsStyle = .abbreviated
             let relative = formatter.localizedString(for: runDate, relativeTo: referenceDate)

@@ -553,7 +553,7 @@ paths:
       description: >
         Requires `tester` scope. Records `hollerkit.quest_builds` for each bundled quest
         (upserting `draft` quest versions if not yet synced from `main`) and returns each
-        quest's board status (`pending`, `passed`, `failed`) and active version info.
+        quest's board status (`pending`, `passed`, `failed`, `unsure`) and active version info.
       security:
         - bearerAuth: [tester]
       parameters:
