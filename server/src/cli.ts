@@ -3,10 +3,13 @@ import { realpathSync } from 'node:fs'
 import { constants, copyFile, mkdir, readdir, readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { githubIssuesSink } from './adapters/sinks/github.js'
+import { supabaseStorage } from './adapters/storage/supabase.js'
 import { generateApiKey, getApiKeyPrefix, hashApiKey } from './v1/auth.js'
 import { runConformanceSuite } from './v1/conformance.js'
 import { postgresStore } from './v1/postgresStore.js'
 import { parseQuestManifest } from './v1/server.js'
+import { flushOutbox } from './v1/sinks.js'
 import {
   computeQuestContentHash,
   type HollerKitStore,
@@ -290,6 +293,74 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
       return 1
     }
 
+    if (group === 'outbox') {
+      if (subcommand === 'flush') {
+        const { flags } = parseFlags(rest)
+        const dbUrl = flags.get('db') ?? process.env.DATABASE_URL ?? process.env.HOLLERKIT_DB_POOLER_URL
+        const githubRepo = flags.get('github-repo') ?? process.env.HOLLERKIT_GITHUB_REPO
+        const githubToken = flags.get('github-token') ?? process.env.HOLLERKIT_GITHUB_TOKEN
+
+        if (!dbUrl || !githubRepo || !githubToken) {
+          stderr(
+            'Error: Usage: hollerkit outbox flush --db <url> --github-repo <owner/repo> --github-token <token> [--supabase-url <url> --supabase-service-role-key <key>] [--limit <n>]',
+          )
+          return 1
+        }
+
+        let limit: number | undefined
+        const limitRaw = flags.get('limit')
+        if (limitRaw !== undefined) {
+          const parsedLimit = Number(limitRaw)
+          if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
+            stderr('Error: --limit must be a positive integer.')
+            return 1
+          }
+          limit = parsedLimit
+        }
+
+        const supabaseUrl = flags.get('supabase-url') ?? process.env.SUPABASE_URL
+        const supabaseServiceRoleKey =
+          flags.get('supabase-service-role-key') ?? process.env.SUPABASE_SERVICE_ROLE_KEY
+        const bucket = flags.get('bucket') ?? process.env.HOLLERKIT_BUCKET ?? 'hollerkit'
+
+        const storage =
+          supabaseUrl && supabaseServiceRoleKey
+            ? supabaseStorage({
+                url: supabaseUrl,
+                serviceRoleKey: supabaseServiceRoleKey,
+                bucket,
+                fetchImpl: fetchFn,
+              })
+            : undefined
+
+        const sink = githubIssuesSink({
+          repo: githubRepo,
+          token: githubToken,
+          fetchImpl: fetchFn,
+        })
+
+        const store = createStore(dbUrl)
+        try {
+          const flushed = await flushOutbox({
+            store,
+            storage,
+            sinks: [sink],
+            limit,
+            readUrlTtlSeconds: 604_800,
+          })
+          stdout(
+            `Outbox flush complete: claimed=${flushed.claimed}, delivered=${flushed.delivered.length}, failed=${flushed.failed.length}`,
+          )
+          return flushed.failed.length > 0 ? 1 : 0
+        } finally {
+          await store.close?.()
+        }
+      }
+
+      stderr(`Error: Unknown outbox subcommand: ${subcommand ?? ''}`)
+      return 1
+    }
+
     stderr(`Error: Unknown command "${group}". Run "hollerkit --help" for usage.`)
     return 1
   } catch (error) {
@@ -344,6 +415,7 @@ Usage:
   hollerkit keys create --db <url> --scopes <comma-separated-scopes> [--label <label>]
   hollerkit keys revoke --db <url> <key-prefix-or-hash-or-label>
   hollerkit conformance --server <url> [--tester-token <tok>] [--quests-key <key>] [--agent-key <key>]
+  hollerkit outbox flush --db <url> --github-repo <owner/repo> --github-token <token> [--limit <n>]
   hollerkit migrations copy <dir>`)
 }
 

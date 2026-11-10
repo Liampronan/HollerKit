@@ -1,3 +1,14 @@
+export {
+  createGitHubWebhookHandler,
+  extractFeedbackIdFromGitHubIssueBody,
+  formatGitHubIssue,
+  githubIssuesSink,
+  parseGitHubRepo,
+  verifyGitHubWebhookSignature,
+  type FormattedGitHubIssue,
+  type GitHubIssuesSinkOptions,
+  type GitHubWebhookOptions,
+} from './adapters/sinks/github.js'
 export { s3Storage, type S3StorageOptions } from './adapters/storage/s3.js'
 export {
   SUPABASE_UPLOAD_URL_TTL_SECONDS,

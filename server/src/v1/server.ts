@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import {
+  createGitHubWebhookHandler,
+  type GitHubWebhookOptions,
+} from '../adapters/sinks/github.js'
 import { HollerKitError } from '../errors.js'
 import {
   apiKeys,
@@ -15,7 +19,12 @@ import {
   type SupabaseJwtOptions,
 } from './auth.js'
 import { defaultV1Limits, resolveV1Limits, type V1LimitConfig } from './limits.js'
-import { shouldEnqueueSink, validateUniqueSinks, type HollerKitSink } from './sinks.js'
+import {
+  flushOutbox,
+  shouldEnqueueSink,
+  validateUniqueSinks,
+  type HollerKitSink,
+} from './sinks.js'
 import {
   hashApiKey,
   type AttachmentKind,
@@ -69,10 +78,29 @@ export interface CreateHollerKitServerOptions {
   basePath?: string | undefined
   /**
    * Optional notification sinks enrolled in `hollerkit.outbox` when matching feedback is created.
-   * Deployments that configure `sinks` must also invoke `flushOutbox({ store, storage, sinks })`
-   * using the same store and sink registrations so pending outbox notifications are processed.
+   * Deployments that configure `sinks` can either set `autoFlushOutbox` (`true` / `'sync'` / `'background'`)
+   * or invoke `flushOutbox({ store, storage, sinks })` manually.
    */
   sinks?: Array<HollerKitSink | string> | undefined
+  /**
+   * When enabled (`true` / `'sync'` or `'background'`), automatically invokes `flushOutbox`
+   * after `POST /v1/feedback` enqueues matching sinks.
+   */
+  autoFlushOutbox?: boolean | 'sync' | 'background' | undefined
+  /**
+   * Optional read URL lifetime in seconds used when signing attachment URLs during `autoFlushOutbox`.
+   * Defaults to 7 days (`604_800` seconds).
+   */
+  sinkReadUrlTtlSeconds?: number | undefined
+  /**
+   * Optional background task hook (e.g. `EdgeRuntime.waitUntil`) used when `autoFlushOutbox === 'background'`.
+   */
+  waitUntil?: ((promise: Promise<unknown>) => void) | undefined
+  /**
+   * Optional GitHub webhook configuration mounted at `POST /v1/webhooks/github` to synchronize
+   * issue close/reopen events back to `hollerkit.triage` and `hollerkit.feedback`.
+   */
+  githubWebhook?: Omit<GitHubWebhookOptions, 'store' | 'now'> | undefined
   limits?: Partial<V1LimitConfig> | undefined
   now?: (() => Date) | undefined
 }
@@ -126,6 +154,20 @@ export function createHollerKitServer(
     : [options.authenticate]
   const sinksByName = validateUniqueSinks(options.sinks ?? [])
   const configuredSinkNames = Array.from(sinksByName.keys())
+  const executableSinks: HollerKitSink[] = []
+  for (const sink of sinksByName.values()) {
+    if (typeof sink !== 'string') {
+      executableSinks.push(sink)
+    }
+  }
+  const sinkReadUrlTtlSeconds = options.sinkReadUrlTtlSeconds ?? 604_800
+  const gitHubWebhookHandler = options.githubWebhook
+    ? createGitHubWebhookHandler({
+        ...options.githubWebhook,
+        store: options.store,
+        now: nowFn,
+      })
+    : null
 
   return async function hollerKitV1Handler(request: Request): Promise<Response> {
     try {
@@ -265,11 +307,43 @@ export function createHollerKitServer(
             now,
           })
 
+          let feedbackResponse = created.feedback
+          if (!created.idempotent && options.autoFlushOutbox && executableSinks.length > 0) {
+            const flushPromise = flushOutbox({
+              store: options.store,
+              storage: options.storage,
+              sinks: executableSinks,
+              now: nowFn,
+              readUrlTtlSeconds: sinkReadUrlTtlSeconds,
+            }).catch((err) => {
+              console.error('[hollerkit] autoFlushOutbox failed', err)
+            })
+
+            if (options.autoFlushOutbox === 'background') {
+              const globalEdgeRuntime = (
+                globalThis as unknown as {
+                  EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void }
+                }
+              ).EdgeRuntime
+              if (options.waitUntil) {
+                options.waitUntil(flushPromise)
+              } else if (typeof globalEdgeRuntime?.waitUntil === 'function') {
+                globalEdgeRuntime.waitUntil(flushPromise)
+              }
+            } else {
+              await flushPromise
+              const refreshed = await options.store.getFeedbackById(created.feedback.id)
+              if (refreshed) {
+                feedbackResponse = refreshed.feedback
+              }
+            }
+          }
+
           return protocolJsonResponse(
             {
               ok: true,
               idempotent: created.idempotent,
-              feedback: created.feedback,
+              feedback: feedbackResponse,
             },
             created.idempotent ? 200 : 201,
           )
@@ -439,6 +513,14 @@ export function createHollerKitServer(
         throw new HollerKitError(405, 'method_not_allowed', 'Expected GET or PUT.')
       }
 
+      // 10. POST /v1/webhooks/github
+      if (routePath === '/v1/webhooks/github') {
+        if (!gitHubWebhookHandler) {
+          throw new HollerKitError(404, 'not_found', `Route not found: ${routePath}`)
+        }
+        return gitHubWebhookHandler(request)
+      }
+
       throw new HollerKitError(404, 'not_found', `Route not found: ${routePath}`)
     } catch (error) {
       return protocolErrorResponse(error)
@@ -456,7 +538,9 @@ function normalizeV1Path(pathname: string, basePath?: string): string | null {
       cleaned = '/'
     }
   }
-  const routeMatch = cleaned.match(/\/v1(?=\/(?:builds|uploads|feedback|quests)(?:\/|$)|$).*$/)
+  const routeMatch = cleaned.match(
+    /\/v1(?=\/(?:builds|uploads|feedback|quests|webhooks)(?:\/|$)|$).*$/,
+  )
   if (routeMatch) {
     return routeMatch[0]
   }

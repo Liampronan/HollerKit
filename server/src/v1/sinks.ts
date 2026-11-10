@@ -22,12 +22,17 @@ export interface FeedbackDetail extends Omit<FeedbackDetailRecord, 'attachments'
    * Stable string idempotency key (`outbox:<id>`) preserved across retries.
    */
   deliveryKey?: string | undefined
+  /**
+   * Number of prior failed delivery attempts for this outbox item (`0` on first attempt).
+   */
+  attempts?: number | undefined
 }
 
 export interface HollerKitSinkDeliveryContext {
   signal: AbortSignal
   deliveryId: number
   deliveryKey: string
+  attempts?: number | undefined
 }
 
 /**
@@ -180,9 +185,17 @@ export async function flushOutbox(options: FlushOutboxOptions): Promise<FlushOut
         attachments,
         deliveryId,
         deliveryKey,
+        attempts: row.attempts,
       }
 
-      const result = await deliverWithDeadline(sink, payload, deliveryId, deliveryKey, deliveryTimeoutMs)
+      const result = await deliverWithDeadline(
+        sink,
+        payload,
+        deliveryId,
+        deliveryKey,
+        row.attempts,
+        deliveryTimeoutMs,
+      )
 
       const link = result && typeof result.link === 'string' && result.link.trim().length > 0
         ? result.link.trim()
@@ -223,6 +236,7 @@ async function deliverWithDeadline(
   payload: FeedbackDetail,
   deliveryId: number,
   deliveryKey: string,
+  attempts: number,
   timeoutMs: number,
 ): Promise<{ link?: string | undefined } | void> {
   const controller = new AbortController()
@@ -240,6 +254,7 @@ async function deliverWithDeadline(
         signal: controller.signal,
         deliveryId,
         deliveryKey,
+        attempts,
       }),
       timeoutPromise,
     ])

@@ -100,6 +100,20 @@ verify_jwt = false
 
 See [`examples/nodejs/index.ts`](../examples/nodejs/index.ts) for a standalone Node.js HTTP server backed by Postgres and S3-compatible object storage.
 
+### Optional: GitHub Issues Sink & Two-Way Webhook Sync
+
+To automatically create a GitHub Issue for every bug report and failed/unsure quest run—and automatically mark the feedback item as `resolved` (or `wontfix` / `duplicate`) when the GitHub Issue closes—set:
+
+```sh
+supabase secrets set \
+  HOLLERKIT_GITHUB_REPO="owner/repo" \
+  HOLLERKIT_GITHUB_TOKEN="ghp_..." \
+  HOLLERKIT_GITHUB_WEBHOOK_SECRET="your-webhook-secret"
+```
+
+- **Outgoing (`githubIssuesSink`)**: Formats tester notes, voice transcripts, quest checklists, timeline breadcrumbs, and 7-day signed media links into a GitHub Issue and stores the created issue URL on `hollerkit.feedback.links`.
+- **Incoming (`POST /v1/webhooks/github`)**: Point a GitHub repository webhook (`Issues` events, `application/json`) at `<your-server>/v1/webhooks/github` with `HOLLERKIT_GITHUB_WEBHOOK_SECRET`. Closing or reopening the GitHub Issue updates `hollerkit.triage` and `hollerkit.feedback.triage_status` automatically so fixed quests return to `pending` on the iOS Quest Board.
+
 ---
 
 ## 3. CLI Reference
@@ -135,4 +149,10 @@ npx hollerkit-server conformance \
 
 # Copy SQL migrations into your project
 npx hollerkit-server migrations copy ./migrations
+
+# Manually flush pending outbox deliveries to GitHub Issues
+npx hollerkit-server outbox flush \
+  --db "$DATABASE_URL" \
+  --github-repo "owner/repo" \
+  --github-token "$GITHUB_TOKEN"
 ```

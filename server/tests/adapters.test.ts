@@ -3,12 +3,16 @@ import { createHmac, createHash, randomUUID } from 'node:crypto'
 import test from 'node:test'
 import {
   apiKeys,
+  createGitHubWebhookHandler,
   createHollerKitServer,
   defaultV1Limits,
+  extractFeedbackIdFromGitHubIssueBody,
   fakeStorage,
   flushOutbox,
+  formatGitHubIssue,
   generateApiKey,
   getApiKeyPrefix,
+  githubIssuesSink,
   hashApiKey,
   HollerKitError,
   memoryStore,
@@ -836,4 +840,378 @@ test('outbox enqueues matching sinks atomically, delivers with stable deliveryKe
   assert.equal(flushTimeout.failed.length, 1)
   assert.equal(signalAborted, true)
   assert.match(flushTimeout.failed[0]!.lastError ?? '', /timed out|Aborted/)
+})
+
+test('githubIssuesSink formats quest runs & bug reports, deduplicates retries via search, auto-flushes, and syncs webhook closures', async () => {
+  // 1. Validate repo & token guards
+  assert.throws(
+    () => githubIssuesSink({ repo: 'invalid-repo', token: 'ghp_123' }),
+    (err: unknown) => err instanceof HollerKitError && err.code === 'invalid_github_repo',
+  )
+  assert.throws(
+    () => githubIssuesSink({ repo: 'owner/..', token: 'ghp_123' }),
+    (err: unknown) => err instanceof HollerKitError && err.code === 'invalid_github_repo',
+  )
+  assert.throws(
+    () => githubIssuesSink({ repo: 'owner/repo', token: '   ' }),
+    (err: unknown) => err instanceof HollerKitError && err.code === 'invalid_github_token',
+  )
+
+  const store = memoryStore()
+  const currentNow = new Date('2026-11-09T12:00:00.000Z')
+  const storage = fakeStorage({ now: () => currentNow })
+
+  await store.upsertTester({ userId: 'tester-gh', active: true })
+  const agentKey = generateApiKey('agent')
+  await store.createApiKey({
+    keyHash: hashApiKey(agentKey),
+    keyPrefix: getApiKeyPrefix(agentKey),
+    scopes: ['quests:write', 'agent:read', 'agent:triage'],
+  })
+
+  const githubCalls: Array<{
+    url: string
+    method: string
+    headers: Record<string, string>
+    body: Record<string, unknown> | null
+  }> = []
+  let createdIssueCounter = 100
+
+  const ghSink = githubIssuesSink({
+    repo: 'Liampronan/HollerKit',
+    token: 'ghp_test_token_123',
+    assignees: ['liampronan'],
+    fetchImpl: async (input, init) => {
+      const url = String(input)
+      const headers: Record<string, string> = {}
+      new Headers(init?.headers).forEach((v, k) => {
+        headers[k.toLowerCase()] = v
+      })
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null
+      githubCalls.push({ url, method: init?.method ?? 'GET', headers, body })
+
+      if (url.includes('/search/issues')) {
+        return Response.json({
+          total_count: 1,
+          items: [
+            {
+              number: 77,
+              html_url: 'https://github.com/Liampronan/HollerKit/issues/77',
+            },
+          ],
+        })
+      }
+
+      createdIssueCounter += 1
+      return Response.json(
+        {
+          number: createdIssueCounter,
+          html_url: `https://github.com/Liampronan/HollerKit/issues/${createdIssueCounter}`,
+        },
+        { status: 201 },
+      )
+    },
+  })
+
+  const webhookSecret = 'whsec_github_test_secret'
+  const handler = createHollerKitServer({
+    store,
+    storage,
+    now: () => currentNow,
+    sinks: [ghSink],
+    autoFlushOutbox: 'sync',
+    githubWebhook: { secret: webhookSecret },
+    authenticate: [
+      supabaseJwt({ secret: 'gh-jwt-secret', store, now: () => currentNow }),
+      apiKeys({ store }),
+    ],
+  })
+
+  const testerJwt = await signJwtWithHmac(
+    {
+      sub: 'tester-gh',
+      aud: 'authenticated',
+      exp: Math.floor(currentNow.getTime() / 1000) + 3600,
+    },
+    'gh-jwt-secret',
+  )
+
+  // Sync a quest first
+  await handler(
+    new Request('http://hollerkit.local/v1/quests', {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${agentKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        version: 1,
+        quests: [
+          {
+            id: 'camera-flip',
+            title: 'Flip dual camera preview',
+            area: 'camera',
+            setup: ['Grant camera & mic permissions'],
+            steps: ['Tap Flip button', 'Verify PIP swaps smoothly'],
+            expect: ['Front and back feeds swap without stutter'],
+          },
+        ],
+      }),
+    }),
+  )
+
+  // Reserve an image upload grant for the failed quest run
+  const failedFeedbackId = randomUUID()
+  const uploadRes = await handler(
+    new Request('http://hollerkit.local/v1/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${testerJwt}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        feedbackId: failedFeedbackId,
+        kind: 'image',
+        mimeType: 'image/png',
+        size: 4096,
+      }),
+    }),
+  )
+  assert.equal(uploadRes.status, 200)
+  const uploadGrant = (await uploadRes.json()) as { key: string }
+
+  // Submit a failed quest run -> autoFlushOutbox: 'sync' creates the GitHub Issue immediately
+  const failRes = await handler(
+    new Request('http://hollerkit.local/v1/feedback', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${testerJwt}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: failedFeedbackId,
+        kind: 'quest_run',
+        questId: 'camera-flip',
+        result: 'fail',
+        build: '420',
+        appVersion: '1.2.0',
+        device: 'iPhone 16 Pro',
+        os: 'iOS 18.2',
+        comment: 'PIP freezes for 2 seconds when flipping\nSecond line details',
+        transcript: 'Voice note: PIP freezes right after tapping flip.',
+        stepsChecked: [true, false],
+        events: [{ kind: 'mark', offsetSeconds: 3.4, payload: { note: 'freeze frame' } }],
+        attachments: [{ key: uploadGrant.key, kind: 'image', mimeType: 'image/png', size: 4096, offsetSeconds: 3.4 }],
+      }),
+    }),
+  )
+  assert.equal(failRes.status, 201)
+  const failBody = (await failRes.json()) as { feedback: { links: string[]; triageStatus: string } }
+  assert.deepEqual(failBody.feedback.links, ['https://github.com/Liampronan/HollerKit/issues/101'])
+  assert.equal(failBody.feedback.triageStatus, 'new')
+
+  // Verify the outgoing GitHub Issues API request
+  assert.equal(githubCalls.length, 1)
+  const issueCall = githubCalls[0]!
+  assert.equal(issueCall.method, 'POST')
+  assert.equal(issueCall.url, 'https://api.github.com/repos/Liampronan/HollerKit/issues')
+  assert.equal(issueCall.headers['authorization'], 'Bearer ghp_test_token_123')
+  assert.equal(
+    issueCall.body?.title,
+    '[Quest Failed: Flip dual camera preview] PIP freezes for 2 seconds when flipping',
+  )
+  assert.deepEqual(issueCall.body?.labels, ['hollerkit', 'quest:fail', 'area:camera'])
+  assert.deepEqual(issueCall.body?.assignees, ['liampronan'])
+  const createdBodyText = String(issueCall.body?.body ?? '')
+  assert.ok(createdBodyText.includes('- [x] Tap Flip button'))
+  assert.ok(createdBodyText.includes('- [ ] Verify PIP swaps smoothly'))
+  assert.ok(createdBodyText.includes('> Voice note: PIP freezes right after tapping flip.'))
+  assert.ok(createdBodyText.includes('https://storage.hollerkit.test/read/'))
+  // 7-day read URL TTL (604800s) used for autoFlushOutbox
+  assert.ok(
+    createdBodyText.includes(
+      encodeURIComponent(new Date(currentNow.getTime() + 604_800 * 1000).toISOString()),
+    ),
+  )
+  assert.equal(extractFeedbackIdFromGitHubIssueBody(createdBodyText), failedFeedbackId)
+
+  // Verify the failed quest run is in the `triage=new` inbox before closing the GitHub issue
+  const inboxBeforeClose = await handler(
+    new Request('http://hollerkit.local/v1/feedback?triage=new', {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${agentKey}`,
+      },
+    }),
+  )
+  const inboxBefore = (await inboxBeforeClose.json()) as {
+    items: Array<{ id: string; triageStatus: string }>
+  }
+  assert.equal(inboxBefore.items.length, 1)
+  assert.equal(inboxBefore.items[0]?.id, failedFeedbackId)
+
+  // 2. Send GitHub `issues.closed` webhook -> automatically resolves feedback & removes it from `triage=new` inbox
+  const webhookPayload = JSON.stringify({
+    action: 'closed',
+    issue: {
+      number: 101,
+      html_url: 'https://github.com/Liampronan/HollerKit/issues/101',
+      state_reason: 'completed',
+      body: createdBodyText,
+    },
+    sender: { login: 'liampronan' },
+  })
+  const validSig =
+    'sha256=' + createHmac('sha256', webhookSecret).update(webhookPayload, 'utf8').digest('hex')
+
+  // Forged webhook signature is rejected with 401
+  const badWebhookRes = await handler(
+    new Request('http://hollerkit.local/v1/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'issues',
+        'x-hub-signature-256': 'sha256=' + '0'.repeat(64),
+      },
+      body: webhookPayload,
+    }),
+  )
+  assert.equal(badWebhookRes.status, 401)
+
+  // Valid webhook closes & resolves feedback
+  const closeWebhookRes = await handler(
+    new Request('http://hollerkit.local/v1/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'issues',
+        'x-hub-signature-256': validSig,
+      },
+      body: webhookPayload,
+    }),
+  )
+  assert.equal(closeWebhookRes.status, 200)
+  const closeWebhookBody = (await closeWebhookRes.json()) as {
+    ok: boolean
+    triageStatus: string
+  }
+  assert.equal(closeWebhookBody.ok, true)
+  assert.equal(closeWebhookBody.triageStatus, 'resolved')
+
+  // Now `GET /v1/feedback?triage=new` is empty and the feedback item has a triage audit entry from github:liampronan
+  const inboxAfterClose = await handler(
+    new Request('http://hollerkit.local/v1/feedback?triage=new', {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${agentKey}`,
+      },
+    }),
+  )
+  const inboxAfter = (await inboxAfterClose.json()) as {
+    items: Array<{ id: string }>
+  }
+  assert.equal(inboxAfter.items.length, 0)
+
+  // Reopening the GitHub issue sets triageStatus to "triaged" (and state_reason="not_planned" maps to "wontfix")
+  const reopenPayload = JSON.stringify({
+    action: 'reopened',
+    issue: {
+      number: 101,
+      html_url: 'https://github.com/Liampronan/HollerKit/issues/101',
+      body: createdBodyText,
+    },
+    sender: { login: 'liampronan' },
+  })
+  const reopenSig =
+    'sha256=' + createHmac('sha256', webhookSecret).update(reopenPayload, 'utf8').digest('hex')
+  const reopenRes = await handler(
+    new Request('http://hollerkit.local/v1/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'issues',
+        'x-hub-signature-256': reopenSig,
+      },
+      body: reopenPayload,
+    }),
+  )
+  assert.equal(reopenRes.status, 200)
+  const reopenData = (await reopenRes.json()) as { triageStatus: string }
+  assert.equal(reopenData.triageStatus, 'triaged')
+
+  const notPlannedPayload = JSON.stringify({
+    action: 'closed',
+    issue: {
+      number: 101,
+      html_url: 'https://github.com/Liampronan/HollerKit/issues/101',
+      state_reason: 'not_planned',
+      body: createdBodyText,
+    },
+    sender: { login: 'liampronan' },
+  })
+  const notPlannedSig =
+    'sha256=' + createHmac('sha256', webhookSecret).update(notPlannedPayload, 'utf8').digest('hex')
+  const notPlannedRes = await createGitHubWebhookHandler({ store, secret: webhookSecret })(
+    new Request('http://hollerkit.local/v1/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'issues',
+        'x-hub-signature-256': notPlannedSig,
+      },
+      body: notPlannedPayload,
+    }),
+  )
+  assert.equal(notPlannedRes.status, 200)
+  const notPlannedData = (await notPlannedRes.json()) as { triageStatus: string }
+  assert.equal(notPlannedData.triageStatus, 'wontfix')
+
+  // 3. Retry deduplication: when attempts > 0, githubIssuesSink queries /search/issues and returns existing issue #77
+  const retryFeedbackId = randomUUID()
+  const retryDetail = await store.createFeedback({
+    id: retryFeedbackId,
+    kind: 'report',
+    build: '420',
+    submitterId: 'tester-gh',
+    comment: 'Retry dedupe report',
+    now: currentNow,
+  })
+  const callsBeforeRetry = githubCalls.length
+  const retryDeliver = await ghSink.deliver(
+    {
+      feedback: retryDetail.feedback,
+      quest: null,
+      events: [],
+      triage: [],
+      attachments: [],
+      attempts: 1,
+    },
+    {
+      signal: new AbortController().signal,
+      deliveryId: 99,
+      deliveryKey: 'outbox:99',
+      attempts: 1,
+    },
+  )
+  assert.equal(retryDeliver?.link, 'https://github.com/Liampronan/HollerKit/issues/77')
+  assert.equal(githubCalls.length, callsBeforeRetry + 1)
+  assert.equal(githubCalls[callsBeforeRetry]!.method, 'GET')
+  assert.ok(githubCalls[callsBeforeRetry]!.url.includes('/search/issues'))
+
+  // HTML comment escaping prevents breaking out of <!-- hollerkit-meta: ... -->
+  const formattedEvil = formatGitHubIssue({
+    feedback: {
+      ...retryDetail.feedback,
+      build: '100 --> <script>alert(1)</script>',
+    },
+    quest: null,
+    events: [],
+    triage: [],
+    attachments: [],
+  })
+  const metaLine = formattedEvil.body
+    .split('\n')
+    .find((line) => line.startsWith('<!-- hollerkit-meta:'))
+  assert.ok(metaLine)
+  assert.ok(!metaLine.slice(0, -4).includes('-->'))
 })
