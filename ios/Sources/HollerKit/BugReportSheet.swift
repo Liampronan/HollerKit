@@ -71,6 +71,7 @@ final class BugReportDraft: ObservableObject {
     @Published var submissionError: String?
     @Published var submissionOutcome: OutboxSubmissionOutcome?
 
+    var invokingTrigger: String = "manual"
     let speechCapture = SpeechCaptureController()
     var autoDismissDelaySeconds: TimeInterval = 1.2
     private(set) var photoLoadGeneration: UInt64 = 0
@@ -92,8 +93,10 @@ final class BugReportDraft: ObservableObject {
     /// Creates a new bug report draft optionally preloaded with initial images.
     init(
         configuration: HollerKitConfiguration? = nil,
-        invocationAttachments: [HollerKitAttachment] = []
+        invocationAttachments: [HollerKitAttachment] = [],
+        invokingTrigger: String = "manual"
     ) {
+        self.invokingTrigger = invokingTrigger
         if configuration != nil || !invocationAttachments.isEmpty {
             loadInitialImagesIfNeeded(
                 configuration: configuration,
@@ -355,11 +358,14 @@ final class BugReportDraft: ObservableObject {
                 }
             }
 
+            var reportMetadata = MetadataCollector.collect(extra: configuration.metadata())
+            reportMetadata["invocation"] = invokingTrigger
+
             let payload = HollerKitReportPayload(
                 inputMode: configuration.inputMode,
                 comment: audioOnly ? nil : normalizedComment,
                 transcript: transcriptToSubmit,
-                metadata: MetadataCollector.collect(extra: configuration.metadata()),
+                metadata: reportMetadata,
                 breadcrumbs: configuration.captureBreadcrumbs ? breadcrumbs.snapshot() : [],
                 images: attachmentsToUpload
             )

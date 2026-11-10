@@ -27,6 +27,7 @@ public enum HollerKit {
         auth: @escaping @Sendable () async throws -> String?,
         isEnabled: @escaping @Sendable () -> Bool = { true },
         invocation: HollerKitInvocation = [],
+        invocationProvider: (@Sendable () -> HollerKitInvocation)? = nil,
         inputMode: HollerKitInputMode = .textAndAudio,
         audio: HollerKitAudioConfiguration = .transcriptOnly(
             maxDuration: 60,
@@ -42,6 +43,7 @@ public enum HollerKit {
             auth: auth,
             isEnabled: isEnabled,
             invocation: invocation,
+            invocationProvider: invocationProvider,
             inputMode: inputMode,
             audio: audio,
             metadata: metadata,
@@ -54,6 +56,9 @@ public enum HollerKit {
     /// Configures HollerKit with an explicit `HollerKitConfiguration` value and reconciles enablement.
     public static func configure(_ configuration: HollerKitConfiguration) {
         state.configuration = configuration
+        state.invocationOverride = nil
+        state.invocationProvider = configuration.invocationProvider
+        presenterState.currentInvocation = configuration.invocation
         state.activationGeneration &+= 1
         state.activationTask?.cancel()
         state.activationTask = nil
@@ -67,12 +72,30 @@ public enum HollerKit {
         reconcileEnablement()
     }
 
+    /// Sets the active invocation trigger configuration at runtime without restarting HollerKit or rebuilding views.
+    public static func setInvocation(_ invocation: HollerKitInvocation) {
+        state.invocationOverride = invocation
+        state.configuration?.invocation = invocation
+        presenterState.currentInvocation = invocation
+        breadcrumb("Updated invocation triggers at runtime", category: "invocation")
+    }
+
+    /// Sets a dynamic invocation provider closure that is re-evaluated on reconcileEnablement or trigger checks.
+    public static func setInvocationProvider(_ provider: (@Sendable () -> HollerKitInvocation)?) {
+        state.invocationProvider = provider
+        reconcileEnablement()
+    }
+
     /// Re-evaluates the `isEnabled` closure on the active configuration and activates or resets runtime state on transitions.
     @discardableResult
     public static func reconcileEnablement() -> Bool {
         let enabled = state.configuration?.isEnabled() ?? false
         if presenterState.isRuntimeEnabled != enabled {
             presenterState.isRuntimeEnabled = enabled
+        }
+        let activeInvocation = enabled ? currentInvocation : []
+        if presenterState.currentInvocation != activeInvocation {
+            presenterState.currentInvocation = activeInvocation
         }
         if enabled {
             if !state.configuredWhileEnabled, let configuration = state.configuration {
@@ -173,20 +196,31 @@ public enum HollerKit {
         questBoardView()
     }
 
-    public static func presentBugReport(attachments: [HollerKitAttachment] = []) {
+    public static func presentBugReport(
+        attachments: [HollerKitAttachment] = [],
+        trigger: HollerKitTrigger? = nil
+    ) {
         guard reconcileEnablement() else { return }
+        let triggerName = trigger?.description ?? "manual"
+        breadcrumb("Invoked bug report via \(triggerName)", category: "invocation")
         presenterState.presentBugReport(
             configuration: state.configuration,
-            attachments: attachments
+            attachments: attachments,
+            triggerName: triggerName
         )
     }
 
-    public static func present(attachments: [HollerKitAttachment] = []) {
-        presentBugReport(attachments: attachments)
+    public static func present(
+        attachments: [HollerKitAttachment] = [],
+        trigger: HollerKitTrigger? = nil
+    ) {
+        presentBugReport(attachments: attachments, trigger: trigger)
     }
 
-    public static func presentQuests() {
+    public static func presentQuests(trigger: HollerKitTrigger? = nil) {
         guard reconcileEnablement() else { return }
+        let triggerName = trigger?.description ?? "manual"
+        breadcrumb("Invoked quests via \(triggerName)", category: "invocation")
         presenterState.isQuestsPresented = true
     }
 
@@ -243,7 +277,13 @@ public enum HollerKit {
     }
 
     static var currentInvocation: HollerKitInvocation {
-        guard reconcileEnablement() else { return [] }
+        guard state.configuration?.isEnabled() ?? false else { return [] }
+        if let provider = state.invocationProvider {
+            return provider()
+        }
+        if let override = state.invocationOverride {
+            return override
+        }
         return state.configuration?.invocation ?? []
     }
 
@@ -267,6 +307,8 @@ public enum HollerKit {
 @MainActor
 private struct HollerKitState {
     var configuration: HollerKitConfiguration?
+    var invocationOverride: HollerKitInvocation?
+    var invocationProvider: (@Sendable () -> HollerKitInvocation)?
     var configuredWhileEnabled = false
     var activationGeneration: UInt64 = 0
     var activationTask: Task<Void, Never>?
@@ -279,6 +321,7 @@ final class HollerKitPresenterState: ObservableObject {
     @Published var isRuntimeEnabled = false
     @Published var isPresented = false
     @Published var isQuestsPresented = false
+    @Published var currentInvocation: HollerKitInvocation = []
     var presentationId = UUID()
     var activeDraft = BugReportDraft()
     var pendingAttachments: [HollerKitAttachment] = []
@@ -286,14 +329,16 @@ final class HollerKitPresenterState: ObservableObject {
     /// Resets the active draft and presents the bug report sheet with fresh state.
     func presentBugReport(
         configuration: HollerKitConfiguration?,
-        attachments: [HollerKitAttachment]
+        attachments: [HollerKitAttachment],
+        triggerName: String = "manual"
     ) {
         activeDraft.cancelCapture()
         pendingAttachments = attachments
         presentationId = UUID()
         activeDraft = BugReportDraft(
             configuration: configuration,
-            invocationAttachments: attachments
+            invocationAttachments: attachments,
+            invokingTrigger: triggerName
         )
         isPresented = true
     }

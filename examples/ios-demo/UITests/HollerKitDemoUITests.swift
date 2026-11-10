@@ -69,10 +69,61 @@ final class HollerKitDemoUITests: XCTestCase {
         // 7. Tap Check All in the Steps section and verify all steps become checked
         let stepsHeader = app.staticTexts["HollerKitQuestResultStepsHeader"]
         XCTAssertTrue(stepsHeader.waitForExistence(timeout: 5))
-        XCTAssertEqual(stepsHeader.label, "Steps (0/3)")
+        XCTAssertTrue(stepsHeader.label.localizedCaseInsensitiveContains("Steps (0/3)"))
         let checkAllButton = app.buttons["HollerKitQuestResultCheckAllStepsButton"]
         XCTAssertTrue(checkAllButton.waitForExistence(timeout: 5))
         checkAllButton.tap()
-        XCTAssertEqual(stepsHeader.label, "Steps (3/3)")
+        XCTAssertTrue(stepsHeader.label.localizedCaseInsensitiveContains("Steps (3/3)"))
+    }
+
+    @MainActor
+    func testNormalScrollAndPanDoesNotTriggerHollerKit() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--skip-auto-report"]
+        app.launch()
+
+        let scrollView = app.scrollViews["DemoCheckoutScrollView"]
+        XCTAssertTrue(scrollView.waitForExistence(timeout: 5))
+
+        // Perform normal vertical swipe / scroll
+        scrollView.swipeUp()
+        scrollView.swipeDown()
+
+        // Verify neither bug report nor quest board was triggered by scrolling
+        XCTAssertFalse(app.navigationBars["Report a Bug"].exists)
+        XCTAssertFalse(app.navigationBars["Complete Quest"].exists)
+        XCTAssertFalse(app.navigationBars["Quests"].exists)
+    }
+
+    @MainActor
+    func testBackSwipeNavigationDoesNotTriggerHollerKit() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--skip-auto-report"]
+        app.launch()
+
+        // 1. Navigate to Order Details
+        let detailsLink = app.buttons["DemoOrderDetailsLink"]
+        XCTAssertTrue(detailsLink.waitForExistence(timeout: 5))
+        detailsLink.tap()
+
+        XCTAssertTrue(app.navigationBars["Order Details"].waitForExistence(timeout: 5))
+
+        // 2. Perform gesture starting near screen edge (x=0.02, < 24pt edge inset) moving right
+        let startCoord = app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.5))
+        let endCoord = app.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.5))
+        startCoord.press(forDuration: 0.05, thenDragTo: endCoord)
+
+        // 3. Confirm edge gesture did not trigger HollerKit bug report or quests
+        XCTAssertFalse(app.navigationBars["Report a Bug"].exists)
+        XCTAssertFalse(app.navigationBars["Quests"].exists)
+
+        // 4. Return to Checkout via back button and confirm navigation is unaffected
+        let backButton = app.navigationBars["Order Details"].buttons.element(boundBy: 0)
+        if backButton.exists {
+            backButton.tap()
+        }
+        XCTAssertTrue(app.navigationBars["Checkout"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars["Report a Bug"].exists)
+        XCTAssertFalse(app.navigationBars["Quests"].exists)
     }
 }

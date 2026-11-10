@@ -16,15 +16,13 @@ private struct HollerKitPresenterModifier: ViewModifier {
             .background {
                 if enabled {
                     InvocationObserver(
-                        invocation: HollerKit.currentInvocation,
-                        onShake: {
-                            HollerKit.presentBugReport()
-                        },
-                        onScreenshot: { attachment in
-                            if let attachment {
-                                HollerKit.presentBugReport(attachments: [attachment])
-                            } else {
-                                HollerKit.presentBugReport()
+                        invocation: presenter.currentInvocation,
+                        onTrigger: { trigger, action, attachments in
+                            switch action {
+                            case .bugReport:
+                                HollerKit.presentBugReport(attachments: attachments, trigger: trigger)
+                            case .quests:
+                                HollerKit.presentQuests(trigger: trigger)
                             }
                         }
                     )
@@ -60,21 +58,37 @@ private struct HollerKitPresenterModifier: ViewModifier {
 
 private struct InvocationObserver: View {
     var invocation: HollerKitInvocation
-    var onShake: () -> Void
-    var onScreenshot: (HollerKitAttachment?) -> Void
+    var onTrigger: (HollerKitTrigger, HollerKitInvocationAction, [HollerKitAttachment]) -> Void
 
     var body: some View {
         #if canImport(UIKit)
         ZStack {
             if invocation.contains(.shake) {
-                ShakeDetector(onShake: onShake)
-                    .frame(width: 0, height: 0)
+                ShakeDetector(onShake: {
+                    let trigger = HollerKitTrigger.shake
+                    let action = invocation.action(for: trigger) ?? .bugReport
+                    onTrigger(trigger, action, [])
+                })
+                .frame(width: 0, height: 0)
             }
 
             if invocation.contains(.screenshot) {
-                ScreenshotDetector(onScreenshot: onScreenshot)
-                    .frame(width: 0, height: 0)
+                ScreenshotDetector(onScreenshot: { attachment in
+                    let trigger = HollerKitTrigger.screenshot
+                    let action = invocation.action(for: trigger) ?? .bugReport
+                    let attachments = attachment.map { [$0] } ?? []
+                    onTrigger(trigger, action, attachments)
+                })
+                .frame(width: 0, height: 0)
             }
+
+            WindowInvocationDetector(
+                invocation: invocation,
+                onTrigger: { trigger, action in
+                    onTrigger(trigger, action, [])
+                }
+            )
+            .frame(width: 0, height: 0)
         }
         #else
         EmptyView()

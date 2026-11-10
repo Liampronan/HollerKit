@@ -2246,5 +2246,256 @@ final class HollerKitTests: XCTestCase {
             )
         }
     }
+    @MainActor
+    func testInvocationOptionSetAndDictionaryLiteralEquivalenceAndActions() {
+        // 1. Backwards-compatibility OptionSet syntax [.shake, .screenshot]
+        let legacyOptionSet: HollerKitInvocation = [.shake, .screenshot]
+        XCTAssertEqual(legacyOptionSet.rawValue, 3)
+        XCTAssertTrue(legacyOptionSet.contains(.shake))
+        XCTAssertTrue(legacyOptionSet.contains(.screenshot))
+        XCTAssertEqual(legacyOptionSet.action(for: .shake), .bugReport)
+        XCTAssertEqual(legacyOptionSet.action(for: .screenshot), .bugReport)
+
+        // 2. Factory methods combining gestures
+        let combined: HollerKitInvocation = [
+            .shake,
+            .stroke(.leftToCenter, action: .bugReport),
+            .stroke(.rightToCenter, action: .quests)
+        ]
+        XCTAssertTrue(combined.contains(.shake))
+        XCTAssertEqual(combined.action(for: .stroke(.leftToCenter)), .bugReport)
+        XCTAssertEqual(combined.action(for: .stroke(.rightToCenter)), .quests)
+
+        // 3. Dictionary literal syntax mapping triggers to destination actions
+        let mapped: HollerKitInvocation = [
+            .shake: .bugReport,
+            .stroke(.leftToCenter): .bugReport,
+            .stroke(.rightToCenter): .quests,
+            .twoFingerLongPress: .quests,
+            .threeFingerLongPress: .bugReport,
+            .threeFingerDoubleTap: .quests,
+            .floatingButton: .bugReport
+        ]
+        XCTAssertEqual(mapped.action(for: .shake), .bugReport)
+        XCTAssertEqual(mapped.action(for: .stroke(.leftToCenter)), .bugReport)
+        XCTAssertEqual(mapped.action(for: .stroke(.rightToCenter)), .quests)
+        XCTAssertEqual(mapped.action(for: .twoFingerLongPress), .quests)
+        XCTAssertEqual(mapped.action(for: .threeFingerLongPress), .bugReport)
+        XCTAssertEqual(mapped.action(for: .threeFingerDoubleTap), .quests)
+        XCTAssertEqual(mapped.action(for: .floatingButton), .bugReport)
+        XCTAssertTrue(mapped.contains(.stroke(.leftToCenter)))
+        XCTAssertTrue(mapped.contains(.twoFingerLongPress))
+
+        // 4. Subscript manipulation
+        var mutable = mapped
+        mutable[.stroke(.leftToCenter)] = nil
+        XCTAssertFalse(mutable.contains(.stroke(.leftToCenter)))
+        mutable[.stroke(.leftToCenter)] = .quests
+        XCTAssertEqual(mutable.action(for: .stroke(.leftToCenter)), .quests)
+    }
+
+    @MainActor
+    func testRuntimeInvocationReconfigurationUpdatesPresenterState() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-invocation-reconfig-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "token" },
+            isEnabled: { true },
+            invocation: [.shake],
+            outboxDirectoryURL: tempDir
+        ))
+
+        XCTAssertTrue(HollerKit.currentInvocation.contains(.shake))
+        XCTAssertFalse(HollerKit.currentInvocation.contains(.stroke(.leftToCenter)))
+        XCTAssertEqual(HollerKit.presenterState.currentInvocation.actions.keys.contains(.shake), true)
+
+        // Reconfigure at runtime via setInvocation
+        HollerKit.setInvocation([
+            .stroke(.leftToCenter): .bugReport,
+            .stroke(.rightToCenter): .quests
+        ])
+
+        XCTAssertEqual(HollerKit.currentInvocation.action(for: .stroke(.leftToCenter)), .bugReport)
+        XCTAssertEqual(HollerKit.currentInvocation.action(for: .stroke(.rightToCenter)), .quests)
+        XCTAssertEqual(HollerKit.presenterState.currentInvocation.action(for: .stroke(.rightToCenter)), .quests)
+
+        // Dynamic provider re-evaluation
+        let flagBox = LockedBox("quests")
+        HollerKit.setInvocationProvider {
+            if flagBox.withLock({ $0 }) == "quests" {
+                return [.stroke(.rightToCenter): .quests]
+            } else {
+                return [.shake: .bugReport]
+            }
+        }
+
+        XCTAssertEqual(HollerKit.currentInvocation.action(for: .stroke(.rightToCenter)), .quests)
+        flagBox.withLock { $0 = "shake" }
+        HollerKit.reconcileEnablement()
+        XCTAssertEqual(HollerKit.currentInvocation.action(for: .shake), .bugReport)
+    }
+
+    @MainActor
+    func testReportDraftRecordsInvokingTriggerMetadata() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-invocation-metadata-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "token" },
+            isEnabled: { true },
+            invocation: [
+                .shake: .bugReport,
+                .stroke(.leftToCenter): .bugReport
+            ],
+            outboxDirectoryURL: tempDir
+        ))
+
+        // Invoked via leftToCenter stroke
+        HollerKit.presentBugReport(trigger: .stroke(.leftToCenter))
+        XCTAssertEqual(HollerKit.currentBugReportDraft.invokingTrigger, "stroke.leftToCenter")
+
+        // Invoked via shake
+        HollerKit.presentBugReport(trigger: .shake)
+        XCTAssertEqual(HollerKit.currentBugReportDraft.invokingTrigger, "shake")
+
+        // Invoked programmatically without trigger argument
+        HollerKit.presentBugReport()
+        XCTAssertEqual(HollerKit.currentBugReportDraft.invokingTrigger, "manual")
+
+        // Invocations via presentQuests log breadcrumb
+        HollerKit.presentQuests(trigger: .stroke(.rightToCenter))
+        let snapshot = HollerKit.currentBreadcrumbs.snapshot()
+        XCTAssertTrue(snapshot.contains(where: { $0.message.contains("Invoked quests via stroke.rightToCenter") }))
+    }
+
+    func testStrokeGestureClassifierDirectionAndEdgeAvoidance() {
+        let screen = CGRect(x: 0, y: 0, width: 393, height: 852)
+
+        // 1. Valid left-to-center stroke (e.g. from x=45, y=320 to x=200, y=330)
+        let leftStrokePoints = [
+            CGPoint(x: 45, y: 320),
+            CGPoint(x: 95, y: 324),
+            CGPoint(x: 145, y: 328),
+            CGPoint(x: 200, y: 330)
+        ]
+        let leftResult = StrokeGestureClassifier.classify(
+            points: leftStrokePoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter, .rightToCenter]
+        )
+        XCTAssertEqual(leftResult, .leftToCenter)
+
+        // 2. Interactive pop edge avoidance: stroke starting directly on the edge (x < 24pt) is rejected
+        let edgeInteractivePopPoints = [
+            CGPoint(x: 12, y: 320),
+            CGPoint(x: 80, y: 325),
+            CGPoint(x: 160, y: 330)
+        ]
+        let edgeResult = StrokeGestureClassifier.classify(
+            points: edgeInteractivePopPoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter]
+        )
+        XCTAssertNil(edgeResult, "Stroke starting within minEdgeInset must be rejected to preserve UINavigationController interactive pop")
+
+        // 3. Valid right-to-center stroke (from x=350, y=340 to x=190, y=335)
+        let rightStrokePoints = [
+            CGPoint(x: 350, y: 340),
+            CGPoint(x: 290, y: 338),
+            CGPoint(x: 230, y: 336),
+            CGPoint(x: 190, y: 335)
+        ]
+        let rightResult = StrokeGestureClassifier.classify(
+            points: rightStrokePoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter, .rightToCenter]
+        )
+        XCTAssertEqual(rightResult, .rightToCenter)
+
+        // 4. Right edge avoidance: stroke starting directly on right screen edge is rejected
+        let rightEdgePoints = [
+            CGPoint(x: 382, y: 340),
+            CGPoint(x: 280, y: 338),
+            CGPoint(x: 190, y: 335)
+        ]
+        let rightEdgeResult = StrokeGestureClassifier.classify(
+            points: rightEdgePoints,
+            bounds: screen,
+            allowedDirections: [.rightToCenter]
+        )
+        XCTAssertNil(rightEdgeResult, "Stroke starting within right screen edge inset must be rejected")
+
+        // 5. Vertical scroll non-interference: vertical swipe down a scroll view is rejected
+        let verticalScrollPoints = [
+            CGPoint(x: 80, y: 220),
+            CGPoint(x: 82, y: 300),
+            CGPoint(x: 84, y: 400),
+            CGPoint(x: 85, y: 510)
+        ]
+        let verticalResult = StrokeGestureClassifier.classify(
+            points: verticalScrollPoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter, .rightToCenter]
+        )
+        XCTAssertNil(verticalResult, "Vertical scroll motion must not trigger stroke gestures")
+
+        // 6. Diagonal map pan rejection: steep angle (>35 deg) is rejected
+        let diagonalPanPoints = [
+            CGPoint(x: 50, y: 200),
+            CGPoint(x: 100, y: 300),
+            CGPoint(x: 150, y: 410)
+        ]
+        let diagonalResult = StrokeGestureClassifier.classify(
+            points: diagonalPanPoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter, .rightToCenter]
+        )
+        XCTAssertNil(diagonalResult, "Diagonal map panning must not trigger stroke gestures")
+
+        // 7. Wandering path / scribble rejection (wander ratio > 1.35)
+        let wanderingPoints = [
+            CGPoint(x: 50, y: 300),
+            CGPoint(x: 80, y: 360),
+            CGPoint(x: 110, y: 240),
+            CGPoint(x: 150, y: 350),
+            CGPoint(x: 180, y: 305)
+        ]
+        let wanderingResult = StrokeGestureClassifier.classify(
+            points: wanderingPoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter]
+        )
+        XCTAssertNil(wanderingResult, "Wandering / scribbling gestures must be rejected")
+
+        // 8. Short nudge (< 70pt minDistance) is rejected
+        let shortNudgePoints = [
+            CGPoint(x: 50, y: 300),
+            CGPoint(x: 75, y: 305)
+        ]
+        let shortResult = StrokeGestureClassifier.classify(
+            points: shortNudgePoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter]
+        )
+        XCTAssertNil(shortResult, "Short touch movement below minDistance must be rejected")
+
+        // 9. Margin avoidance at top (status bar / dynamic island) and bottom (home bar)
+        let topBarPoints = [
+            CGPoint(x: 50, y: 35),
+            CGPoint(x: 150, y: 38),
+            CGPoint(x: 200, y: 40)
+        ]
+        let topResult = StrokeGestureClassifier.classify(
+            points: topBarPoints,
+            bounds: screen,
+            allowedDirections: [.leftToCenter]
+        )
+        XCTAssertNil(topResult, "Stroke starting within top margin must be rejected")
+    }
     #endif
 }
