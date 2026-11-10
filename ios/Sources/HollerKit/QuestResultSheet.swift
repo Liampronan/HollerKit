@@ -43,15 +43,19 @@ public struct QuestResultSheet: View {
                             Button {
                                 selectedResult = option
                             } label: {
-                                HStack {
+                                HStack(spacing: 10) {
                                     Image(systemName: iconName(for: option))
+                                        .symbolRenderingMode(.monochrome)
                                         .foregroundStyle(color(for: option))
+                                        .frame(width: 20, height: 20, alignment: .center)
                                     Text(option.displayTitle)
                                         .foregroundStyle(.primary)
                                     Spacer()
                                     if selectedResult == option {
                                         Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(color(for: option))
+                                            .symbolRenderingMode(.palette)
+                                            .foregroundStyle(Color.white, color(for: option))
+                                            .frame(width: 20, height: 20, alignment: .center)
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -74,13 +78,26 @@ public struct QuestResultSheet: View {
                                     questState.toggleStep(at: index)
                                 } label: {
                                     HStack(alignment: .top, spacing: 10) {
-                                        Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                                            .foregroundStyle(isChecked ? .green : .secondary)
+                                        Group {
+                                            if isChecked {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .symbolRenderingMode(.palette)
+                                                    .foregroundStyle(Color.white, Color.green)
+                                            } else {
+                                                Image(systemName: "circle")
+                                                    .symbolRenderingMode(.monochrome)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .frame(width: 20, height: 18, alignment: .center)
+
                                         Text(step)
                                             .font(.subheadline)
                                             .foregroundStyle(isChecked ? .secondary : .primary)
                                             .strikethrough(isChecked)
                                             .multilineTextAlignment(.leading)
+                                            .fixedSize(horizontal: false, vertical: true)
                                         Spacer(minLength: 0)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -88,6 +105,7 @@ public struct QuestResultSheet: View {
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(isSubmitting)
+                                .accessibilityValue(isChecked ? "checked" : "unchecked")
                                 .accessibilityIdentifier("HollerKitQuestResultStep_\(index)")
                             }
                         } header: {
@@ -134,10 +152,11 @@ public struct QuestResultSheet: View {
                                     await speechCapture.toggle(configuration: audioConfig)
                                 }
                             } label: {
-                                Label(
-                                    speechCapture.isCapturing ? "Stop Dictation" : "Dictate Note",
-                                    systemImage: speechCapture.isCapturing ? "stop.circle.fill" : "mic.fill"
-                                )
+                                HStack(spacing: 6) {
+                                    Image(systemName: speechCapture.isCapturing ? "stop.circle.fill" : "mic.fill")
+                                        .symbolRenderingMode(.monochrome)
+                                    Text(speechCapture.isCapturing ? "Stop Dictation" : "Dictate Note")
+                                }
                             }
                             .disabled(isSubmitting || speechCapture.isStopping)
 
@@ -163,8 +182,12 @@ public struct QuestResultSheet: View {
                                             await speechCapture.retry(configuration: audioConfig)
                                         }
                                     } label: {
-                                        Label("Retry Dictation", systemImage: "arrow.clockwise")
-                                            .font(.footnote.weight(.semibold))
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "arrow.clockwise")
+                                                .symbolRenderingMode(.monochrome)
+                                            Text("Retry Dictation")
+                                        }
+                                        .font(.footnote.weight(.semibold))
                                     }
                                     .disabled(isSubmitting || speechCapture.isCapturing || speechCapture.isStopping)
                                     .accessibilityIdentifier("HollerKitSpeechRetryButton")
@@ -207,18 +230,26 @@ public struct QuestResultSheet: View {
                     if let submissionError {
                         Section {
                             VStack(alignment: .leading, spacing: 8) {
-                                Label(submissionError, systemImage: "exclamationmark.triangle.fill")
-                                    .font(.footnote)
-                                    .foregroundStyle(.red)
-                                    .accessibilityIdentifier("HollerKitSubmissionErrorText")
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .symbolRenderingMode(.monochrome)
+                                    Text(submissionError)
+                                }
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                                .accessibilityIdentifier("HollerKitSubmissionErrorText")
 
                                 Button {
                                     Task {
                                         await submit()
                                     }
                                 } label: {
-                                    Label("Retry Submission", systemImage: "arrow.clockwise")
-                                        .font(.footnote.weight(.semibold))
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "arrow.clockwise")
+                                            .symbolRenderingMode(.monochrome)
+                                        Text("Retry Submission")
+                                    }
+                                    .font(.footnote.weight(.semibold))
                                 }
                                 .disabled(isSubmitting || speechCapture.isStopping)
                                 .accessibilityIdentifier("HollerKitRetrySubmitButton")

@@ -75,53 +75,64 @@ public struct QuestCardView: View {
             }
 
             if !item.definition.setup.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("Setup")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     ForEach(Array(item.definition.setup.enumerated()), id: \.offset) { _, line in
-                        HStack(alignment: .top, spacing: 6) {
+                        HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "gearshape")
-                                .font(.caption2)
+                                .symbolRenderingMode(.monochrome)
+                                .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.secondary)
-                                .padding(.top, 2)
+                                .frame(width: 16, height: 14, alignment: .center)
                             Text(line)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("Steps")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 ForEach(Array(item.definition.steps.enumerated()), id: \.offset) { index, step in
-                    HStack(alignment: .top, spacing: 6) {
+                    HStack(alignment: .top, spacing: 8) {
                         Text("\(index + 1).")
                             .font(.caption.monospacedDigit().weight(.semibold))
                             .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 14, alignment: .center)
                         Text(step)
                             .font(.caption)
                             .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Expect")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(Array(item.definition.expect.enumerated()), id: \.offset) { _, expectation in
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "checkmark.diamond")
-                            .font(.caption2)
-                            .foregroundStyle(.teal)
-                            .padding(.top, 2)
-                        Text(expectation)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            if !item.definition.expect.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Expect")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(item.definition.expect.enumerated()), id: \.offset) { _, expectation in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "sparkles")
+                                .symbolRenderingMode(.monochrome)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.teal)
+                                .frame(width: 16, height: 14, alignment: .center)
+                            Text(expectation)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }

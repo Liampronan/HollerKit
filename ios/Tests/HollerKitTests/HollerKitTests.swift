@@ -2447,4 +2447,127 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(afterNewerLocal?.status, .failed)
         XCTAssertEqual(afterNewerLocal?.latestRun?.firstCommentLine, "New regression after fix")
     }
+
+    @MainActor
+    func testQuestOverlayCheckmarksAndGuidanceIconsMaintainContrastInTransparentWindow() throws {
+        let definition = QuestDefinition(
+            id: "checkout-promo-math",
+            title: "Apply promo RUN2026 and verify total",
+            area: "checkout",
+            setup: ["Ensure cart has Run Club Pro ($79.00)"],
+            steps: [
+                "Inspect Subtotal ($79.00) and Promo RUN2026 (-$12.00)",
+                "Verify Tax ($7.43) and Total calculation",
+                "Tap Pay button"
+            ],
+            expect: [
+                "Total equals $74.43 (currently shows $91.42 bug in mock)"
+            ]
+        )
+        let item = QuestBoardItem(
+            id: definition.id,
+            version: 1,
+            definition: definition,
+            status: .pending
+        )
+        HollerKit.configure(
+            HollerKitConfiguration(
+                server: URL(string: "https://api.hollerkit.test")!,
+                auth: { "tester-jwt" },
+                isEnabled: { true },
+                inputMode: .textAndAudio
+            )
+        )
+        let state = HollerKitQuestState()
+        state.startQuest(item, startedAt: Date().addingTimeInterval(-8))
+        state.setOverlayExpanded(true)
+        state.toggleStep(at: 0)
+
+        let size = CGSize(width: 393, height: 600)
+        let rootView = ZStack(alignment: .bottom) {
+            Color.clear.ignoresSafeArea()
+            QuestOverlayView(questState: state, viewportSize: size)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 28)
+        }
+        .environment(\.colorScheme, .light)
+
+        let controller = UIHostingController(rootView: rootView)
+        controller.view.backgroundColor = .clear
+        let window = UIWindow(frame: CGRect(origin: .zero, size: size))
+        window.overrideUserInterfaceStyle = .light
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.view.frame = window.bounds
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        controller.view.layoutIfNeeded()
+
+        let scale: CGFloat = 2.0
+        let pixelWidth = Int(size.width * scale)
+        let pixelHeight = Int(size.height * scale)
+        let bpp = 4
+        let bpr = pixelWidth * bpp
+        var rawBytes = [UInt8](repeating: 255, count: pixelHeight * bpr)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        let context = try XCTUnwrap(
+            CGContext(
+                data: &rawBytes,
+                width: pixelWidth,
+                height: pixelHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: bpr,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            )
+        )
+        context.translateBy(x: 0, y: CGFloat(pixelHeight))
+        context.scaleBy(x: scale, y: -scale)
+        controller.view.layer.render(in: context)
+        window.isHidden = true
+
+        var greenCheckmarkPixels = 0
+        var tealSparklesPixels = 0
+        var darkLeadingIconPixels = 0
+
+        // Leading icon column inside the 340pt card centered in 393pt viewport:
+        // Card leading x ≈ 26.5pt, inner padding 14pt -> icon column x ≈ 40..58pt (80..116px at 2x)
+        // Scrollable instructions region y ≈ 270..520pt (540..1040px at 2x)
+        for y in 540..<1040 {
+            for x in 80..<116 {
+                let offset = y * bpr + x * bpp
+                let r = Int(rawBytes[offset])
+                let g = Int(rawBytes[offset + 1])
+                let b = Int(rawBytes[offset + 2])
+
+                if g > r + 40 && g > b + 20 {
+                    greenCheckmarkPixels += 1
+                } else if b > r + 40 && g > r + 25 {
+                    tealSparklesPixels += 1
+                } else if r < 180 && g < 180 && b < 180 {
+                    darkLeadingIconPixels += 1
+                }
+            }
+        }
+
+        XCTAssertGreaterThan(
+            greenCheckmarkPixels,
+            20,
+            "Checked step checkmark.circle.fill must render visible green pixels"
+        )
+        XCTAssertGreaterThan(
+            tealSparklesPixels,
+            10,
+            "Expect guidance sparkles icon must render visible teal pixels"
+        )
+        XCTAssertGreaterThan(
+            darkLeadingIconPixels,
+            25,
+            "Unchecked step circles and setup gearshape icon must maintain dark contrast against light overlay card"
+        )
+    }
 }

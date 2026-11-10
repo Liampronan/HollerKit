@@ -52,6 +52,13 @@ final class HollerKitDemoUITests: XCTestCase {
         expandButton.tap()
         let collapseButton = app.buttons["HollerKitQuestCollapseButton"]
         XCTAssertTrue(collapseButton.waitForExistence(timeout: 5))
+        let step0Button = app.buttons["HollerKitQuestStep_0"]
+        XCTAssertTrue(step0Button.waitForExistence(timeout: 5))
+        XCTAssertEqual(step0Button.value as? String, "unchecked")
+        step0Button.tap()
+        XCTAssertEqual(step0Button.value as? String, "checked")
+        step0Button.tap()
+        XCTAssertEqual(step0Button.value as? String, "unchecked")
 
         // 5. Tap Done and assert the result sheet appears
         doneButton.tap()
