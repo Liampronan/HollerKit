@@ -390,13 +390,10 @@ final class BugReportDraft: ObservableObject {
             submissionOutcome = outcome
             SubmissionHaptics.notify(for: outcome)
 
-            let afterSend = configuration.afterSend
-            let delay = autoDismissDelaySeconds ?? afterSend.delay
-            if case .sent = outcome, delay > 0 {
-                let delayNanoseconds = UInt64(delay * 1_000_000_000)
-                autoDismissTask = Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: delayNanoseconds)
-                    guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
+            if case .sent = outcome {
+                let afterSend = configuration.afterSend
+                let executeAfterSendAction = { [weak self] in
+                    guard let self else { return }
                     switch afterSend {
                     case .stayOpen:
                         self.resetForAnotherReport(
@@ -406,6 +403,29 @@ final class BugReportDraft: ObservableObject {
                         onAutoReset?()
                     case .close:
                         onAutoDismiss?()
+                    }
+                }
+
+                if let override = autoDismissDelaySeconds {
+                    // Internal testing override: delay <= 0 completely disables auto-dismiss/reset
+                    // so tests can inspect .sent outcome synchronously without background tasks.
+                    if override > 0 {
+                        let delayNanoseconds = UInt64(override * 1_000_000_000)
+                        autoDismissTask = Task { @MainActor [weak self] in
+                            try? await Task.sleep(nanoseconds: delayNanoseconds)
+                            guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
+                            executeAfterSendAction()
+                        }
+                    }
+                } else if afterSend.delay <= 0 {
+                    // Configured with zero delay: perform reset or dismissal immediately.
+                    executeAfterSendAction()
+                } else {
+                    let delayNanoseconds = UInt64(afterSend.delay * 1_000_000_000)
+                    autoDismissTask = Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: delayNanoseconds)
+                        guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
+                        executeAfterSendAction()
                     }
                 }
             }

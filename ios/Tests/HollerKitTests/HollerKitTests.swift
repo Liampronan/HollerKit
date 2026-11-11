@@ -1889,6 +1889,62 @@ final class HollerKitTests: XCTestCase {
         }
         XCTAssertTrue(closeDismissedBox.withLock { $0 }, "onAutoDismiss must be called when afterSend is .close")
         XCTAssertFalse(HollerKit.isPresentationRequested)
+
+        // 5. Verify configured afterSend: .stayOpen(resetDelay: 0) immediately resets without timer
+        let immediateStayOpenConfig = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            afterSend: .stayOpen(resetDelay: 0),
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        )
+        HollerKit.configure(immediateStayOpenConfig)
+        HollerKit.presentBugReport()
+        let immediateDraft = HollerKit.currentBugReportDraft
+        immediateDraft.comment = "Immediate reset test"
+        let immediateResetBox = LockedBox<Bool>(false)
+        await immediateDraft.submit(
+            configuration: immediateStayOpenConfig,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore,
+            onAutoReset: {
+                immediateResetBox.withLock { $0 = true }
+            }
+        )
+        XCTAssertTrue(immediateResetBox.withLock { $0 }, "Immediate reset must execute synchronously when resetDelay is 0")
+        XCTAssertNil(immediateDraft.submissionOutcome)
+        XCTAssertEqual(immediateDraft.comment, "")
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+        HollerKit.presenterState.isPresented = false
+        HollerKit.clearPresentationAttachments()
+
+        // 6. Verify configured afterSend: .close(delay: 0) immediately calls onAutoDismiss
+        let immediateCloseConfig = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            afterSend: .close(delay: 0),
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        )
+        HollerKit.configure(immediateCloseConfig)
+        HollerKit.presentBugReport()
+        let immediateCloseDraft = HollerKit.currentBugReportDraft
+        immediateCloseDraft.comment = "Immediate close test"
+        let immediateCloseBox = LockedBox<Bool>(false)
+        await immediateCloseDraft.submit(
+            configuration: immediateCloseConfig,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore,
+            onAutoDismiss: {
+                immediateCloseBox.withLock { $0 = true }
+                HollerKit.presenterState.isPresented = false
+                HollerKit.clearPresentationAttachments()
+            }
+        )
+        XCTAssertTrue(immediateCloseBox.withLock { $0 }, "Immediate close must execute synchronously when delay is 0")
+        XCTAssertFalse(HollerKit.isPresentationRequested)
     }
 
     #if canImport(UIKit)
