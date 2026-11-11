@@ -73,7 +73,7 @@ final class BugReportDraft: ObservableObject {
 
     var invokingTrigger: String = "manual"
     let speechCapture = SpeechCaptureController()
-    var autoDismissDelaySeconds: TimeInterval = 1.2
+    var autoDismissDelaySeconds: TimeInterval? = nil
     private(set) var photoLoadGeneration: UInt64 = 0
 
     private var didLoadInitialImages = false
@@ -305,7 +305,8 @@ final class BugReportDraft: ObservableObject {
         breadcrumbs: BreadcrumbStore,
         outboxStore: OutboxStore,
         onDisabled: (() -> Void)? = nil,
-        onAutoDismiss: (() -> Void)? = nil
+        onAutoDismiss: (() -> Void)? = nil,
+        onAutoReset: (() -> Void)? = nil
     ) async {
         guard !isSubmitting else { return }
         guard let configuration else {
@@ -389,12 +390,23 @@ final class BugReportDraft: ObservableObject {
             submissionOutcome = outcome
             SubmissionHaptics.notify(for: outcome)
 
-            if case .sent = outcome, autoDismissDelaySeconds > 0, let onAutoDismiss {
-                let delayNanoseconds = UInt64(autoDismissDelaySeconds * 1_000_000_000)
+            let afterSend = configuration.afterSend
+            let delay = autoDismissDelaySeconds ?? afterSend.delay
+            if case .sent = outcome, delay > 0 {
+                let delayNanoseconds = UInt64(delay * 1_000_000_000)
                 autoDismissTask = Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: delayNanoseconds)
                     guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
-                    onAutoDismiss()
+                    switch afterSend {
+                    case .stayOpen:
+                        self.resetForAnotherReport(
+                            configuration: configuration,
+                            invocationAttachments: []
+                        )
+                        onAutoReset?()
+                    case .close:
+                        onAutoDismiss?()
+                    }
                 }
             }
         } catch {
@@ -661,6 +673,14 @@ public struct BugReportSheet: View {
             }
             .navigationTitle("Report a Bug")
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        draft.cancelCapture()
+                        finishAndDismiss()
+                    }
+                    .disabled(draft.isSubmitting)
+                    .accessibilityIdentifier("HollerKitToolbarCloseButton")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     if draft.submissionOutcome != nil {
                         Button("Done") {

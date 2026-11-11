@@ -126,6 +126,7 @@ public struct HollerKitConfiguration: Sendable {
     public var invocationProvider: (@Sendable () -> HollerKitInvocation)?
     public var inputMode: HollerKitInputMode
     public var audio: HollerKitAudioConfiguration
+    public var afterSend: HollerKitAfterSendBehavior
     public var metadata: @Sendable () -> [String: String]
     public var initialImages: @Sendable () -> [HollerKitAttachment]
     public var captureBreadcrumbs: Bool
@@ -144,6 +145,7 @@ public struct HollerKitConfiguration: Sendable {
             maxDuration: 60,
             requireOnDeviceTranscription: false
         ),
+        afterSend: HollerKitAfterSendBehavior = .stayOpen,
         metadata: @escaping @Sendable () -> [String: String] = { [:] },
         initialImages: @escaping @Sendable () -> [HollerKitAttachment] = { [] },
         captureBreadcrumbs: Bool = true,
@@ -158,6 +160,7 @@ public struct HollerKitConfiguration: Sendable {
         self.invocationProvider = invocationProvider
         self.inputMode = inputMode
         self.audio = audio
+        self.afterSend = afterSend
         self.metadata = metadata
         self.initialImages = initialImages
         self.captureBreadcrumbs = captureBreadcrumbs
@@ -212,6 +215,35 @@ public enum HollerKitAudioConfiguration: Sendable, Equatable {
             return false
         case .transcriptOnly(_, let requireOnDeviceTranscription):
             return requireOnDeviceTranscription
+        }
+    }
+}
+
+/// Governs whether the bug report sheet remains presented after a report is sent or auto-dismisses.
+public enum HollerKitAfterSendBehavior: Sendable, Equatable {
+    /// Keeps the bug report sheet open after a successful submission, briefly displaying the sent confirmation
+    /// before resetting to a blank draft for subsequent reports.
+    case stayOpen(resetDelay: TimeInterval = 1.2)
+
+    /// Automatically dismisses the bug report sheet after a successful submission once the confirmation delay elapses.
+    case close(delay: TimeInterval = 1.2)
+
+    public static let stayOpen = HollerKitAfterSendBehavior.stayOpen()
+    public static let close = HollerKitAfterSendBehavior.close()
+
+    /// Returns `true` if the sheet stays open after a successful send.
+    public var isStayOpen: Bool {
+        if case .stayOpen = self { return true }
+        return false
+    }
+
+    /// Returns the delay in seconds before the sheet resets or closes.
+    public var delay: TimeInterval {
+        switch self {
+        case .stayOpen(let resetDelay):
+            return resetDelay
+        case .close(let delay):
+            return delay
         }
     }
 }

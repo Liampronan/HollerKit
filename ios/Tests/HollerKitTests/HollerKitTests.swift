@@ -1710,6 +1710,187 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(receivedRequestsBox.withLock { $0.count }, 4)
     }
 
+    @MainActor
+    func testBugReportSheetStaysOpenAfterSendAndResetsToBlankReportForSubsequentSend() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-stay-open-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let receivedRequestsBox = LockedBox<[[String: Any]]>([])
+        StubURLProtocol.setHandler { request, bodyData in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            if url.path == "/v1/feedback", request.httpMethod == "POST" {
+                let body = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                receivedRequestsBox.withLock { $0.append(body) }
+                let id = (body["id"] as? String) ?? UUID().uuidString.lowercased()
+                let comment = body["comment"] as? String
+                let build = (body["build"] as? String) ?? "1"
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": id,
+                        "kind": "report",
+                        "build": build,
+                        "submitterId": "tester-stayopen",
+                        "createdAt": "2026-11-11T20:00:00Z",
+                        "updatedAt": "2026-11-11T20:00:00Z",
+                        "comment": comment as Any
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let session = makeStubSession()
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        )
+        XCTAssertEqual(config.afterSend, .stayOpen)
+        XCTAssertTrue(config.afterSend.isStayOpen)
+        XCTAssertEqual(config.afterSend.delay, 1.2)
+        HollerKit.configure(config)
+
+        // 1. Present bug report sheet
+        HollerKit.presentBugReport()
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+        let draft = HollerKit.currentBugReportDraft
+        XCTAssertEqual(draft.comment, "")
+        XCTAssertNil(draft.submissionOutcome)
+        XCTAssertFalse(draft.canSubmit(configuration: config))
+
+        // Configure a fast auto-reset delay for unit testing
+        draft.autoDismissDelaySeconds = 0.05
+        draft.comment = "First bug report: profile button broken"
+        XCTAssertTrue(draft.canSubmit(configuration: config))
+
+        // Submit first report
+        let resetCalledBox = LockedBox<Bool>(false)
+        await draft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore,
+            onAutoReset: {
+                resetCalledBox.withLock { $0 = true }
+            }
+        )
+
+        // Immediately after submit returns, comment is cleared, outcome is .sent, and sheet is still open
+        XCTAssertEqual(draft.comment, "")
+        guard case .sent(let firstResponse) = draft.submissionOutcome else {
+            XCTFail("Expected first submission outcome to be .sent, got \(String(describing: draft.submissionOutcome))")
+            return
+        }
+        XCTAssertEqual(firstResponse.feedback.comment, "First bug report: profile button broken")
+        XCTAssertTrue(HollerKit.isPresentationRequested, "Sheet must remain presented after first send succeeds")
+
+        // Wait for auto-reset delay to trigger
+        for _ in 0..<20 {
+            if resetCalledBox.withLock({ $0 }) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(resetCalledBox.withLock { $0 }, "onAutoReset must be called after reset delay")
+
+        // Sheet is still open, but draft has been blanked out
+        XCTAssertTrue(HollerKit.isPresentationRequested, "Sheet must remain presented after draft auto-resets")
+        XCTAssertNil(draft.submissionOutcome, "submissionOutcome must be cleared to dismiss overlay")
+        XCTAssertEqual(draft.comment, "", "Comment must be empty for subsequent report")
+        XCTAssertEqual(draft.images.count, 0, "Images must be empty for subsequent report")
+        XCTAssertFalse(draft.isSubmitting)
+        XCTAssertFalse(draft.canSubmit(configuration: config))
+
+        // 2. Submit second report from the exact same sheet without dismissing or shaking again
+        draft.autoDismissDelaySeconds = 0.05
+        draft.comment = "Second bug report: dark mode colors inverted"
+        XCTAssertTrue(draft.canSubmit(configuration: config))
+
+        let secondResetCalledBox = LockedBox<Bool>(false)
+        await draft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore,
+            onAutoReset: {
+                secondResetCalledBox.withLock { $0 = true }
+            }
+        )
+
+        XCTAssertEqual(draft.comment, "")
+        guard case .sent(let secondResponse) = draft.submissionOutcome else {
+            XCTFail("Expected second submission outcome to be .sent, got \(String(describing: draft.submissionOutcome))")
+            return
+        }
+        XCTAssertEqual(secondResponse.feedback.comment, "Second bug report: dark mode colors inverted")
+        XCTAssertNotEqual(firstResponse.feedback.id, secondResponse.feedback.id)
+        XCTAssertTrue(HollerKit.isPresentationRequested, "Sheet remains open after second report")
+
+        for _ in 0..<20 {
+            if secondResetCalledBox.withLock({ $0 }) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(secondResetCalledBox.withLock { $0 })
+        XCTAssertNil(draft.submissionOutcome)
+
+        // 3. Close the sheet via dismiss / clearPresentationAttachments
+        HollerKit.presenterState.isPresented = false
+        HollerKit.clearPresentationAttachments()
+        XCTAssertFalse(HollerKit.isPresentationRequested)
+
+        // Verify both reports were sent to server
+        let requests = receivedRequestsBox.withLock { $0 }
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0]["comment"] as? String, "First bug report: profile button broken")
+        XCTAssertEqual(requests[1]["comment"] as? String, "Second bug report: dark mode colors inverted")
+
+        // 4. Verify afterSend: .close auto-dismisses instead of staying open
+        let closeDismissedBox = LockedBox<Bool>(false)
+        let closeConfig = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            afterSend: .close(delay: 0.05),
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        )
+        XCTAssertEqual(closeConfig.afterSend, .close(delay: 0.05))
+        XCTAssertFalse(closeConfig.afterSend.isStayOpen)
+        XCTAssertEqual(closeConfig.afterSend.delay, 0.05)
+        HollerKit.configure(closeConfig)
+
+        HollerKit.presentBugReport()
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+        let closeDraft = HollerKit.currentBugReportDraft
+        closeDraft.autoDismissDelaySeconds = 0.05
+        closeDraft.comment = "Third report expecting auto-close"
+
+        await closeDraft.submit(
+            configuration: closeConfig,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore,
+            onAutoDismiss: {
+                closeDismissedBox.withLock { $0 = true }
+                HollerKit.presenterState.isPresented = false
+                HollerKit.clearPresentationAttachments()
+            }
+        )
+
+        for _ in 0..<20 {
+            if closeDismissedBox.withLock({ $0 }) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(closeDismissedBox.withLock { $0 }, "onAutoDismiss must be called when afterSend is .close")
+        XCTAssertFalse(HollerKit.isPresentationRequested)
+    }
+
     #if canImport(UIKit)
     @MainActor
     /// Verifies attaching photos, pasting from the clipboard, removing attachments, downsampling/JPEG compression,
