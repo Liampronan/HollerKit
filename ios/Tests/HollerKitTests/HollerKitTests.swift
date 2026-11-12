@@ -1578,6 +1578,9 @@ final class HollerKitTests: XCTestCase {
             urlSession: session,
             outboxDirectoryURL: tempDir
         )
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
         HollerKit.configure(config)
 
         // 1. First shake presentation & submit
@@ -1759,6 +1762,9 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(config.afterSend, .stayOpen)
         XCTAssertTrue(config.afterSend.isStayOpen)
         XCTAssertEqual(config.afterSend.delay, 1.2)
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
         HollerKit.configure(config)
 
         // 1. Present bug report sheet
@@ -2157,6 +2163,291 @@ final class HollerKitTests: XCTestCase {
         XCTAssertNotEqual(submittedKeys, Array(issuedGrantKeys.prefix(2)))
         XCTAssertNotEqual(submittedAttachments[0]["key"] as? String, submittedAttachments[1]["key"] as? String)
     }
+
+    #if canImport(UIKit)
+    @MainActor
+    /// Verifies attaching photos, pasting from the clipboard, removing attachments, downsampling/JPEG compression,
+    /// and submitting user-attached photos alongside marks in an active quest run.
+    func testQuestResultDraftAttachPasteRemoveAndCompressImages() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitTests-QuestPhotoAttach-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let uploadedMimeTypesBox = LockedBox<[String]>([])
+        let uploadedPutSizesBox = LockedBox<[Int]>([])
+        let issuedGrantKeysBox = LockedBox<[String]>([])
+        let submittedAttachmentsBox = LockedBox<[[String: Any]]>([])
+        let submittedFeedbackBox = LockedBox<[String: Any]?>([:])
+        let simulateExpiredGrantOnceBox = LockedBox<Bool>(true)
+
+        StubURLProtocol.setHandler { request, bodyData in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            if url.path.hasSuffix("/manifest") {
+                let json = """
+                {
+                  "ok": true,
+                  "build": "1",
+                  "pendingCount": 1,
+                  "quests": [
+                    {
+                      "id": "camera-mode-switch",
+                      "version": 1,
+                      "contentHash": "test-hash",
+                      "questStatus": "active",
+                      "boardStatus": "pending",
+                      "title": "Switch between wide and ultra-wide cameras",
+                      "area": "camera",
+                      "setup": ["Camera permission granted"],
+                      "steps": ["Tap 0.5x button", "Verify zoom level", "Tap 1x button"],
+                      "expect": ["Smooth transition between lenses"],
+                      "needs": ["device"],
+                      "record": "suggested",
+                      "start": "trashapp://camera",
+                      "counts": { "pass": 0, "fail": 0, "unsure": 0, "abandoned": 0 }
+                    }
+                  ]
+                }
+                """
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["hollerkit-protocol": "1"])!
+                return (response, Data(json.utf8))
+            }
+            if url.path == "/v1/uploads" {
+                let json = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                if let mimeType = json["mimeType"] as? String {
+                    uploadedMimeTypesBox.withLock { $0.append(mimeType) }
+                }
+                let grantKey = "uploads/quest-attachment-\(UUID().uuidString)"
+                issuedGrantKeysBox.withLock { $0.append(grantKey) }
+                let grantJSON: [String: Any] = [
+                    "ok": true,
+                    "url": "https://upload.hollerkit.test/put/\(UUID().uuidString)",
+                    "key": grantKey,
+                    "expiresAt": "2099-01-01T00:00:00Z"
+                ]
+                let data = try JSONSerialization.data(withJSONObject: grantJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            if url.host == "upload.hollerkit.test" {
+                uploadedPutSizesBox.withLock { $0.append(bodyData?.count ?? 0) }
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data())
+            }
+            if url.path == "/v1/feedback" {
+                let shouldRejectWithExpiredGrant = simulateExpiredGrantOnceBox.withLock { value -> Bool in
+                    if value {
+                        value = false
+                        return true
+                    }
+                    return false
+                }
+                if shouldRejectWithExpiredGrant {
+                    let errorJSON: [String: Any] = [
+                        "ok": false,
+                        "error": [
+                            "code": "expired_or_consumed_grant",
+                            "message": "Attachment grant has expired."
+                        ]
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: errorJSON)
+                    let response = HTTPURLResponse(url: url, statusCode: 400, httpVersion: nil, headerFields: nil)!
+                    return (response, data)
+                }
+
+                let json = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                submittedFeedbackBox.withLock { $0 = json }
+                let feedbackId = (json["id"] as? String) ?? UUID().uuidString.lowercased()
+                let build = (json["build"] as? String) ?? "1"
+                let attachments = (json["attachments"] as? [[String: Any]]) ?? []
+                submittedAttachmentsBox.withLock { $0 = attachments }
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": feedbackId,
+                        "kind": "quest_run",
+                        "build": build,
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-08T20:00:00Z",
+                        "updatedAt": "2026-11-08T20:00:00Z"
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let session = makeStubSession()
+        let questDef = QuestDefinition(
+            id: "camera-mode-switch",
+            title: "Switch between wide and ultra-wide cameras",
+            area: "camera",
+            setup: ["Camera permission granted"],
+            steps: ["Tap 0.5x button", "Verify zoom level", "Tap 1x button"],
+            expect: ["Smooth transition between lenses"],
+            needs: ["device"],
+            start: "trashapp://camera"
+        )
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            quests: .definitions([questDef]),
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        )
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
+        HollerKit.configure(config)
+        await HollerKit.quests.refresh()
+        guard let questItem = HollerKit.quests.quests.first else {
+            XCTFail("Expected loaded quest item")
+            return
+        }
+
+        let startDate = Date(timeIntervalSince1970: 1_700_000_000)
+        HollerKit.quests.startQuest(questItem, startedAt: startDate)
+        XCTAssertNotNil(HollerKit.quests.activeQuest)
+
+        // Capture an automatic mark during the quest run
+        let markPNGData = UIGraphicsImageRenderer(size: CGSize(width: 50, height: 50)).image { ctx in
+            UIColor.systemPurple.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 50, height: 50))
+        }.pngData()!
+        let mark = HollerKit.quests.captureMark(
+            label: "Glitch on 0.5x toggle",
+            imageData: markPNGData,
+            at: startDate.addingTimeInterval(3.0)
+        )
+        XCTAssertNotNil(mark)
+
+        // 1. Initial draft state
+        let draft = QuestResultDraft(initialResult: .fail, initialComment: "Lens stuck for a second")
+        draft.autoDismissDelaySeconds = 0
+        XCTAssertTrue(draft.images.isEmpty)
+        XCTAssertTrue(draft.canAddMoreImages)
+        XCTAssertEqual(draft.remainingImageSlots, QuestResultDraft.maxAttachments)
+        XCTAssertEqual(draft.selectedResult, .fail)
+        XCTAssertEqual(draft.comment, "Lens stuck for a second")
+
+        // 2. Add Photo via Data
+        let smallImage = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { ctx in
+            UIColor.systemBlue.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+        }
+        let smallPNGData = try XCTUnwrap(smallImage.pngData())
+        XCTAssertTrue(draft.addImageData(smallPNGData))
+        XCTAssertEqual(draft.images.count, 1)
+        XCTAssertEqual(draft.images[0].title, "Photo 1")
+
+        // 3. Add photo off-main-actor
+        let offMainActorAdded = await draft.addImageDataOffMainActor(smallPNGData, title: "Detached Photo")
+        XCTAssertTrue(offMainActorAdded)
+        XCTAssertEqual(draft.images.count, 2)
+        XCTAssertEqual(draft.images[1].title, "Detached Photo")
+
+        // 4. Paste images from clipboard
+        let pastedImage = UIGraphicsImageRenderer(size: CGSize(width: 60, height: 60)).image { ctx in
+            UIColor.systemGreen.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 60, height: 60))
+        }
+        let pastedCount = draft.pasteImagesFromClipboard(images: [pastedImage])
+        XCTAssertEqual(pastedCount, 1)
+        XCTAssertEqual(draft.images.count, 3)
+        XCTAssertEqual(draft.images[2].title, "Pasted Image 3")
+
+        // 5. Annotating replaces the image in-place
+        let annotatedImage = UIGraphicsImageRenderer(size: CGSize(width: 80, height: 80)).image { ctx in
+            UIColor.systemRed.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 80, height: 80))
+        }
+        draft.replaceImage(id: draft.images[2].id, with: annotatedImage)
+        XCTAssertEqual(draft.images[2].image.size.width, 80)
+
+        // 6. Removing an image
+        let firstId = draft.images[0].id
+        draft.selectedImage = draft.images[0]
+        draft.removeImage(id: firstId)
+        XCTAssertNil(draft.selectedImage)
+        XCTAssertEqual(draft.images.count, 2)
+        XCTAssertEqual(draft.images[0].title, "Detached Photo")
+        XCTAssertEqual(draft.images[1].title, "Pasted Image 3")
+
+        // 7. Oversized images are downscaled within maxPixelDimension
+        let oversizedFormat = UIGraphicsImageRendererFormat.default()
+        oversizedFormat.scale = 1.0
+        let oversizedImage = UIGraphicsImageRenderer(
+            size: CGSize(width: 3200, height: 2400),
+            format: oversizedFormat
+        ).image { ctx in
+            UIColor.systemYellow.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 3200, height: 2400))
+        }
+        let normalized = BugReportImage.normalizedImage(oversizedImage, maxPixelDimension: QuestResultDraft.maxPixelDimension)
+        XCTAssertEqual(normalized.size.width * normalized.scale, 2400, accuracy: 1.0)
+        XCTAssertEqual(normalized.size.height * normalized.scale, 1800, accuracy: 1.0)
+
+        // 8. Cap at 12 attachments
+        let extraImages = (0..<15).map { _ in smallImage }
+        let addedFromBatch = draft.pasteImagesFromClipboard(images: extraImages)
+        XCTAssertEqual(addedFromBatch, 10)
+        XCTAssertEqual(draft.images.count, QuestResultDraft.maxAttachments)
+        XCTAssertFalse(draft.canAddMoreImages)
+        XCTAssertEqual(draft.remainingImageSlots, 0)
+        XCTAssertNotNil(draft.attachmentStatusMessage)
+        XCTAssertFalse(draft.addImage(smallImage))
+
+        // Remove extra images so we submit 2 user-attached photos
+        while draft.images.count > 2 {
+            draft.removeImage(id: draft.images.last!.id)
+        }
+        XCTAssertEqual(draft.images.count, 2)
+        XCTAssertTrue(draft.canAddMoreImages)
+        XCTAssertNil(draft.attachmentStatusMessage)
+
+        // 9. Submit quest run through QuestResultDraft (including retry on expired upload grant)
+        await draft.submit(questState: HollerKit.quests)
+        guard case .sent(let response) = draft.submissionOutcome else {
+            XCTFail("Expected quest run submission to succeed, got \(String(describing: draft.submissionOutcome))")
+            return
+        }
+        XCTAssertEqual(response.feedback.kind, "quest_run")
+        XCTAssertTrue(draft.images.isEmpty, "Draft images should be cleared after successful submission")
+
+        // Verify uploads: 1 mark + 2 user photos = 3 uploads, and with 1 grant expired retry = 6 uploads
+        let uploadedMimeTypes = uploadedMimeTypesBox.withLock { $0 }
+        XCTAssertEqual(uploadedMimeTypes.count, 6)
+        XCTAssertTrue(uploadedMimeTypes.allSatisfy { $0 == "image/png" })
+
+        // Verify submitted payload
+        let submitted = submittedFeedbackBox.withLock { $0 }
+        XCTAssertEqual(submitted?["kind"] as? String, "quest_run")
+        XCTAssertEqual(submitted?["questId"] as? String, "camera-mode-switch")
+        XCTAssertEqual(submitted?["result"] as? String, "fail")
+        XCTAssertEqual(submitted?["comment"] as? String, "Lens stuck for a second")
+
+        // Attachments on the quest run: 1 mark + 2 user photos = 3 attachments
+        let submittedAttachments = submittedAttachmentsBox.withLock { $0 }
+        XCTAssertEqual(submittedAttachments.count, 3)
+        let markAttachments = submittedAttachments.filter { ($0["kind"] as? String) == "mark" }
+        let imageAttachments = submittedAttachments.filter { ($0["kind"] as? String) == "image" }
+        XCTAssertEqual(markAttachments.count, 1)
+        XCTAssertEqual(imageAttachments.count, 2)
+        XCTAssertEqual(markAttachments[0]["offsetSeconds"] as? Double ?? -1, 3.0, accuracy: 0.001)
+
+        // 10. Verify QuestResultSheet view instantiation with custom draft
+        let freshDraft = QuestResultDraft()
+        let sheet = QuestResultSheet(questState: HollerKit.quests, draft: freshDraft)
+        XCTAssertNotNil(sheet)
+    }
+    #endif
 
     @MainActor
     /// Verifies that `QuestCardView` renders its `Start Quest` button (including a visible `play.fill` icon
@@ -2632,6 +2923,9 @@ final class HollerKitTests: XCTestCase {
             urlSession: session,
             outboxDirectoryURL: tempDir
         )
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
         HollerKit.configure(config)
 
         // Invoked via leftToCenter stroke
@@ -2968,6 +3262,9 @@ final class HollerKitTests: XCTestCase {
             urlSession: session,
             outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
         )
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
         HollerKit.configure(config)
         await state.refresh(using: config)
 
