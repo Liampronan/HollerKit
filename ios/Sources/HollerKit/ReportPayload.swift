@@ -122,7 +122,7 @@ public struct HollerKitReportPayload: Sendable {
             )
         }
 
-        let request = FeedbackSubmissionRequest(
+        var request = FeedbackSubmissionRequest(
             id: id,
             kind: "report",
             build: resolvedBuild,
@@ -134,6 +134,7 @@ public struct HollerKitReportPayload: Sendable {
             metadata: enrichedMetadata,
             events: events
         )
+        request.clampToBudget()
 
         return (request, outboxAttachments)
     }

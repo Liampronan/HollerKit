@@ -95,17 +95,26 @@ final class HollerKitTests: XCTestCase {
     }
 
     func testBreadcrumbStoreKeepsNewestEntries() {
-        var store = BreadcrumbStore(capacity: 2)
+        var store = BreadcrumbStore(capacity: 3)
         store.append(.init(message: "one"))
         store.append(.init(message: "two"))
         store.append(.init(message: "three"))
-
-        XCTAssertEqual(store.snapshot().map(\.message), ["breadcrumbs.truncated", "two", "three"])
-        XCTAssertEqual(store.truncatedCount, 1)
+        XCTAssertEqual(store.snapshot().map(\.message), ["one", "two", "three"])
+        XCTAssertEqual(store.snapshot().count, 3)
 
         store.append(.init(message: "four"))
         XCTAssertEqual(store.snapshot().map(\.message), ["breadcrumbs.truncated", "three", "four"])
+        XCTAssertEqual(store.snapshot().count, 3)
         XCTAssertEqual(store.truncatedCount, 2)
+
+        store.append(.init(message: "five"))
+        XCTAssertEqual(store.snapshot().map(\.message), ["breadcrumbs.truncated", "four", "five"])
+        XCTAssertEqual(store.snapshot().count, 3)
+        XCTAssertEqual(store.truncatedCount, 3)
+
+        var store0 = BreadcrumbStore(capacity: 0)
+        store0.append(.init(message: "never"))
+        XCTAssertEqual(store0.snapshot().count, 0)
     }
 
     func testBreadcrumbStoreTypedFieldsAndPayloadCap() {
@@ -252,6 +261,29 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(
             computeQuestContentHash(questBeta),
             "0bfdcddc41b204e0e20dbe05257e54a5a71c32bc82409cca75358dce22c8cd61"
+        )
+
+        let questGamma = QuestDefinition(
+            id: "share-video-time-to-send",
+            title: "Share video time to send",
+            area: "share",
+            steps: ["Tap Share", "Wait for video to be ready"],
+            expect: ["Video renders in reasonable time"],
+            capture: [
+                QuestCaptureDefinition(
+                    event: "share.render",
+                    value: "durationMs",
+                    unit: "ms",
+                    label: "First render",
+                    whereClause: ["cached": .bool(false)]
+                )
+            ]
+        )
+        let expectedGammaJSON = #"{"area":"share","capture":[{"event":"share.render","label":"First render","max":null,"min":null,"unit":"ms","value":"durationMs","where":{"cached":false}}],"expect":["Video renders in reasonable time"],"needs":[],"record":"optional","setup":[],"start":null,"steps":["Tap Share","Wait for video to be ready"],"title":"Share video time to send"}"#
+        XCTAssertEqual(canonicalQuestJSON(questGamma), expectedGammaJSON)
+        XCTAssertEqual(
+            computeQuestContentHash(questGamma),
+            "cf0bdb6e1f189112213c6cbb38232e7c12102abd2040953b01ce4509f9bb7b4a"
         )
     }
 
@@ -3518,5 +3550,51 @@ final class HollerKitTests: XCTestCase {
             25,
             "Unchecked step circles and setup gearshape icon must maintain dark contrast against light overlay card"
         )
+    }
+
+    @MainActor
+    func testSpanInvalidatedOnEnablementToggle() {
+        final class FlagBox: @unchecked Sendable {
+            var value: Bool = true
+        }
+        let flag = FlagBox()
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://example.com")!,
+            auth: { "token" },
+            isEnabled: { flag.value },
+            captureBreadcrumbs: true,
+            maxBreadcrumbs: 50
+        )
+        HollerKit.configure(config)
+
+        let span = HollerKit.begin("operation.to.cancel")
+
+        // Disable HollerKit
+        flag.value = false
+        HollerKit.reconcileEnablement()
+
+        // Re-enable HollerKit
+        flag.value = true
+        HollerKit.reconcileEnablement()
+
+        // Now end the old span
+        span.end()
+
+        // The old span must NOT be recorded because it was started in an earlier enablement generation
+        let recorded = HollerKit.currentBreadcrumbs.snapshot().filter { $0.message == "operation.to.cancel" }
+        XCTAssertTrue(recorded.isEmpty, "Span started before disablement must not be recorded after re-enablement")
+    }
+
+    func testFeedbackEventPayloadReservedKeyFallback() throws {
+        let json = #"{"message":"test","durationMs":"not-a-number","fields":"not-a-dict","startOffsetSeconds":"zero"}"#
+        let data = json.data(using: .utf8)!
+        let payload = try JSONDecoder().decode(FeedbackEventPayload.self, from: data)
+
+        XCTAssertNil(payload.durationMs)
+        XCTAssertNil(payload.fields)
+        XCTAssertNil(payload.startOffsetSeconds)
+        XCTAssertEqual(payload.strings["durationMs"], "not-a-number")
+        XCTAssertEqual(payload.strings["fields"], "not-a-dict")
+        XCTAssertEqual(payload.strings["startOffsetSeconds"], "zero")
     }
 }

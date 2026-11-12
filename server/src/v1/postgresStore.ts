@@ -286,39 +286,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     return records[0]!
   }
 
-  let valuesSchemaEnsured = false
-  async function ensureValuesSchema(db: Sql): Promise<void> {
-    if (valuesSchemaEnsured) return
-    await db`
-      ALTER TABLE hollerkit.quests
-      ADD COLUMN IF NOT EXISTS capture jsonb NOT NULL DEFAULT '[]'::jsonb
-    `
-    await db`
-      CREATE TABLE IF NOT EXISTS hollerkit.values (
-        id            bigserial PRIMARY KEY,
-        feedback_id   uuid NOT NULL REFERENCES hollerkit.feedback (id) ON DELETE CASCADE,
-        quest_id      text NOT NULL,
-        quest_version integer NOT NULL,
-        source        text NOT NULL DEFAULT 'capture' CHECK (source IN ('capture', 'answer')),
-        label         text NOT NULL,
-        value         double precision NOT NULL,
-        unit          text NOT NULL CHECK (unit IN ('ms', 's', 'bytes', 'count', 'percent', 'none')),
-        event         text,
-        offset_seconds double precision,
-        min           double precision,
-        max           double precision,
-        flags         jsonb NOT NULL DEFAULT '[]'::jsonb,
-        build         text NOT NULL,
-        app_version   text,
-        device        text,
-        os            text,
-        created_at    timestamptz NOT NULL DEFAULT now(),
-        FOREIGN KEY (quest_id, quest_version) REFERENCES hollerkit.quests (id, version)
-      )
-    `
-    valuesSchemaEnsured = true
-  }
-
   return {
     sql,
 
@@ -327,7 +294,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
-        await ensureValuesSchema(db)
 
         // Acquire per-quest transaction advisory locks in sorted ID order to serialize version allocation
         const sortedIds = Array.from(new Set(input.quests.map((q) => q.id.trim()))).sort()
@@ -463,7 +429,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
-        await ensureValuesSchema(db)
 
         // Ensure hollerkit.builds exists and persist the build registration transactionally
         await db`
@@ -857,7 +822,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         if (resolvedQuestRow && resolvedQuestId && resolvedQuestVersion !== null && resultVal !== 'abandoned') {
           const questCaptures = asQuestCaptures(resolvedQuestRow.capture)
           if (questCaptures.length > 0) {
-            await ensureValuesSchema(db)
             const evaluated = evaluateQuestCaptures(questCaptures, input.events ?? [])
             for (const mv of evaluated.matchedValues) {
               await db`
@@ -1033,7 +997,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     },
 
     async queryValues(filter: QueryValuesFilter = {}): Promise<QueryValuesResult> {
-      await ensureValuesSchema(sql)
       const targetQuestId = filter.quest ?? filter.questId ?? null
       const rows = await sql<any[]>`
         SELECT *

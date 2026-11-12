@@ -77,6 +77,7 @@ public final class HollerKitSpan: @unchecked Sendable {
     public let startDate: Date
     public let startFields: [String: HollerKitFieldValue]
     public let startMetadata: [String: String]
+    public let generation: UInt64
     private let isEnabled: Bool
     private let lock = NSLock()
     private var hasEnded = false
@@ -87,7 +88,8 @@ public final class HollerKitSpan: @unchecked Sendable {
         fields: [String: HollerKitFieldValue] = [:],
         metadata: [String: String] = [:],
         startDate: Date = Date(),
-        isEnabled: Bool = true
+        isEnabled: Bool = true,
+        generation: UInt64 = 0
     ) {
         self.name = name
         self.category = category
@@ -95,6 +97,7 @@ public final class HollerKitSpan: @unchecked Sendable {
         self.startMetadata = metadata
         self.startDate = startDate
         self.isEnabled = isEnabled
+        self.generation = generation
     }
 
     public func end(
@@ -128,7 +131,8 @@ public final class HollerKitSpan: @unchecked Sendable {
                 metadata: mergedMetadata,
                 durationMs: durationMs,
                 startDate: self.startDate,
-                endDate: endDate
+                endDate: endDate,
+                generation: self.generation
             )
         }
 
@@ -137,9 +141,19 @@ public final class HollerKitSpan: @unchecked Sendable {
                 recordAction()
             }
         } else {
-            Task { @MainActor in
+            DispatchQueue.main.sync {
                 recordAction()
             }
+        }
+    }
+
+    public func end(
+        fields: [String: HollerKitFieldValue] = [:],
+        metadata: [String: String] = [:],
+        endDate: Date = Date()
+    ) async {
+        await MainActor.run {
+            self.end(fields: fields, metadata: metadata, endDate: endDate)
         }
     }
 }
@@ -231,29 +245,37 @@ public struct BreadcrumbStore: Sendable {
     }
 
     private mutating func enforceCapacity() {
-        guard capacity > 0 else { return }
+        if capacity <= 0 {
+            breadcrumbs.removeAll()
+            truncatedCount = 0
+            return
+        }
+
         let hasMarker = !breadcrumbs.isEmpty && breadcrumbs[0].message == "breadcrumbs.truncated"
         let normalCount = hasMarker ? breadcrumbs.count - 1 : breadcrumbs.count
+        let allowedNormal = max(0, capacity - 1)
 
-        if normalCount > capacity {
-            let overflow = normalCount - capacity
-            truncatedCount += overflow
+        if breadcrumbs.count > capacity {
+            let overflow = normalCount - allowedNormal
+            if overflow > 0 {
+                truncatedCount += overflow
 
-            let truncatedCrumb = HollerKitBreadcrumb(
-                timestamp: questStartedAt ?? (breadcrumbs.first?.timestamp ?? Date()),
-                category: "hollerkit",
-                message: "breadcrumbs.truncated",
-                fields: ["dropped": .int(truncatedCount)],
-                metadata: ["truncated": "true"],
-                offsetSeconds: 0
-            )
+                let truncatedCrumb = HollerKitBreadcrumb(
+                    timestamp: questStartedAt ?? (breadcrumbs.first?.timestamp ?? Date()),
+                    category: "hollerkit",
+                    message: "breadcrumbs.truncated",
+                    fields: ["dropped": .int(truncatedCount)],
+                    metadata: ["truncated": "true"],
+                    offsetSeconds: 0
+                )
 
-            if hasMarker {
-                breadcrumbs.removeSubrange(1...overflow)
-                breadcrumbs[0] = truncatedCrumb
-            } else {
-                breadcrumbs.removeFirst(overflow)
-                breadcrumbs.insert(truncatedCrumb, at: 0)
+                if hasMarker {
+                    breadcrumbs.removeSubrange(1...overflow)
+                    breadcrumbs[0] = truncatedCrumb
+                } else {
+                    breadcrumbs.removeFirst(overflow)
+                    breadcrumbs.insert(truncatedCrumb, at: 0)
+                }
             }
         }
     }

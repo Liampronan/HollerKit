@@ -81,6 +81,7 @@ public struct QuestManifestEntry: Codable, Equatable, Sendable {
     public var record: String
     public var start: String?
     public var source: QuestManifestSource?
+    public var capture: [QuestCaptureDefinition]?
 
     public init(
         id: String,
@@ -93,7 +94,8 @@ public struct QuestManifestEntry: Codable, Equatable, Sendable {
         needs: [String] = [],
         record: String = "optional",
         start: String? = nil,
-        source: QuestManifestSource? = nil
+        source: QuestManifestSource? = nil,
+        capture: [QuestCaptureDefinition]? = nil
     ) {
         self.id = id
         self.contentHash = contentHash
@@ -106,6 +108,7 @@ public struct QuestManifestEntry: Codable, Equatable, Sendable {
         self.record = record
         self.start = start
         self.source = source
+        self.capture = capture
     }
 }
 
@@ -271,11 +274,23 @@ public struct FeedbackEventPayload: Codable, Equatable, Sendable, ExpressibleByD
 
         for key in container.allKeys {
             if key.stringValue == "fields" {
-                fields = try? container.decode([String: HollerKitFieldValue].self, forKey: key)
+                if let decodedFields = try? container.decode([String: HollerKitFieldValue].self, forKey: key) {
+                    fields = decodedFields
+                } else if let str = try? container.decode(String.self, forKey: key) {
+                    strings[key.stringValue] = str
+                }
             } else if key.stringValue == "durationMs" {
-                durationMs = try? container.decode(Double.self, forKey: key)
+                if let decoded = try? container.decode(Double.self, forKey: key), decoded.isFinite {
+                    durationMs = decoded
+                } else if let str = try? container.decode(String.self, forKey: key) {
+                    strings[key.stringValue] = str
+                }
             } else if key.stringValue == "startOffsetSeconds" {
-                startOffsetSeconds = try? container.decode(Double.self, forKey: key)
+                if let decoded = try? container.decode(Double.self, forKey: key), decoded.isFinite {
+                    startOffsetSeconds = decoded
+                } else if let str = try? container.decode(String.self, forKey: key) {
+                    strings[key.stringValue] = str
+                }
             } else if let str = try? container.decode(String.self, forKey: key) {
                 strings[key.stringValue] = str
             }
@@ -296,17 +311,17 @@ public struct FeedbackEventPayload: Codable, Equatable, Sendable, ExpressibleByD
         if let fields, !fields.isEmpty, let key = DynamicCodingKey(stringValue: "fields") {
             try container.encode(fields, forKey: key)
         }
-        if let durationMs, let key = DynamicCodingKey(stringValue: "durationMs") {
+        if let durationMs, durationMs.isFinite, let key = DynamicCodingKey(stringValue: "durationMs") {
             try container.encode(durationMs, forKey: key)
         }
-        if let startOffsetSeconds, let key = DynamicCodingKey(stringValue: "startOffsetSeconds") {
+        if let startOffsetSeconds, startOffsetSeconds.isFinite, let key = DynamicCodingKey(stringValue: "startOffsetSeconds") {
             try container.encode(startOffsetSeconds, forKey: key)
         }
     }
 
     public mutating func clampToSize(maxBytes: Int = 2048) {
         var iterations = 0
-        while iterations < 10, let data = try? JSONEncoder().encode(self), data.count > maxBytes {
+        while iterations < 20, let data = try? JSONEncoder().encode(self), data.count > maxBytes {
             iterations += 1
             let overhead = data.count - maxBytes
             var trimmedSomething = false
@@ -340,7 +355,16 @@ public struct FeedbackEventPayload: Codable, Equatable, Sendable, ExpressibleByD
             }
 
             if !trimmedSomething {
-                break
+                if let k = strings.keys.first(where: { $0 != "message" && $0 != "category" }) ?? strings.keys.first {
+                    strings.removeValue(forKey: k)
+                    trimmedSomething = true
+                } else if var curFields = fields, let k = curFields.keys.first {
+                    curFields.removeValue(forKey: k)
+                    fields = curFields.isEmpty ? nil : curFields
+                    trimmedSomething = true
+                } else {
+                    break
+                }
             }
         }
     }
@@ -363,6 +387,21 @@ public struct FeedbackEventInput: Codable, Equatable, Sendable {
         self.kind = kind
         self.payload = FeedbackEventPayload(strings: payload)
         self.payload.clampToSize(maxBytes: 2048)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case offsetSeconds
+        case kind
+        case payload
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var clampedPayload = payload
+        clampedPayload.clampToSize(maxBytes: 2048)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(offsetSeconds, forKey: .offsetSeconds)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(clampedPayload, forKey: .payload)
     }
 }
 
@@ -446,6 +485,41 @@ public struct FeedbackSubmissionRequest: Codable, Equatable, Sendable {
         self.endedAt = endedAt
         self.events = events
         self.attachments = attachments
+    }
+
+    public mutating func clampToBudget(maxBytes: Int = 240 * 1024) {
+        for i in 0..<events.count {
+            events[i].payload.clampToSize(maxBytes: 2048)
+        }
+
+        let encoder = JSONEncoder()
+        guard let data = try? encoder.encode(self), data.count > maxBytes else { return }
+
+        var droppedCount = 0
+        while events.count > 1, let current = try? encoder.encode(self), current.count > maxBytes {
+            if events.first?.payload["message"] == "breadcrumbs.truncated" {
+                if events.count > 2 {
+                    events.remove(at: 1)
+                    droppedCount += 1
+                } else {
+                    break
+                }
+            } else {
+                events.removeFirst()
+                droppedCount += 1
+            }
+
+            if events.first?.payload["message"] != "breadcrumbs.truncated" {
+                var marker = FeedbackEventPayload()
+                marker["message"] = "breadcrumbs.truncated"
+                marker["category"] = "hollerkit"
+                marker["truncated"] = "true"
+                marker.fields = ["dropped": .int(droppedCount)]
+                events.insert(FeedbackEventInput(offsetSeconds: 0, kind: "breadcrumb", payload: marker), at: 0)
+            } else {
+                events[0].payload.fields = ["dropped": .int(droppedCount)]
+            }
+        }
     }
 }
 
@@ -628,12 +702,14 @@ public struct APIClient: Sendable {
         _ request: FeedbackSubmissionRequest,
         token: String? = nil
     ) async throws -> FeedbackSubmissionResponse {
+        var sanitizedRequest = request
+        sanitizedRequest.clampToBudget()
         let resolvedToken = try await resolvedBearerToken(token)
         return try await sendJSONRequest(
             method: "POST",
             path: "/v1/feedback",
             token: resolvedToken,
-            body: request
+            body: sanitizedRequest
         )
     }
 

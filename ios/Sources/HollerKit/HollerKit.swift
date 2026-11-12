@@ -116,7 +116,7 @@ public enum HollerKit {
             state.activationTask = nil
             state.configuredWhileEnabled = false
             quests.reset()
-            state.breadcrumbs = BreadcrumbStore()
+            state.breadcrumbs = BreadcrumbStore(capacity: state.configuration?.maxBreadcrumbs ?? 500)
             if presenterState.isPresented {
                 presenterState.isPresented = false
                 presenterState.handleSheetDismissed(configuration: nil)
@@ -182,13 +182,15 @@ public enum HollerKit {
         startDate: Date = Date()
     ) -> HollerKitSpan {
         let enabled = reconcileEnablement() && state.configuration?.captureBreadcrumbs == true
+        let generation = state.activationGeneration
         return HollerKitSpan(
             name: name,
             category: category,
             fields: fields,
             metadata: metadata,
             startDate: startDate,
-            isEnabled: enabled
+            isEnabled: enabled,
+            generation: generation
         )
     }
 
@@ -199,9 +201,12 @@ public enum HollerKit {
         metadata: [String: String],
         durationMs: Double,
         startDate: Date,
-        endDate: Date
+        endDate: Date,
+        generation: UInt64
     ) {
-        guard reconcileEnablement(), state.configuration?.captureBreadcrumbs == true else { return }
+        guard reconcileEnablement(),
+              state.configuration?.captureBreadcrumbs == true,
+              generation == state.activationGeneration else { return }
         state.breadcrumbs.append(.init(
             timestamp: endDate,
             category: category,

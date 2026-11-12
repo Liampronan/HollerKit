@@ -196,15 +196,12 @@ test('runs full v1 conformance suite and Postgres-specific invariants against po
   const store = postgresStore({ url: harness.url, max: 2, prepare: false, fetchTypes: false })
   const secondStore = postgresStore({ url: harness.url })
   try {
-    const migrationPath = resolve(
-      dirname(fileURLToPath(import.meta.url)),
-      '..',
-      'migrations',
-      '001_hollerkit_v1.sql',
-    )
-    const migrationSql = await readFile(migrationPath, 'utf8')
+    const migrationsDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'migrations')
+    const migration001Sql = await readFile(join(migrationsDir, '001_hollerkit_v1.sql'), 'utf8')
+    const migration002Sql = await readFile(join(migrationsDir, '002_hollerkit_values.sql'), 'utf8')
     await store.sql.unsafe('DROP SCHEMA IF EXISTS hollerkit CASCADE;')
-    await store.sql.unsafe(migrationSql)
+    await store.sql.unsafe(migration001Sql)
+    await store.sql.unsafe(migration002Sql)
     await store.sql.unsafe(
       'CREATE TABLE IF NOT EXISTS hollerkit._test_disposable_marker (created_at timestamptz DEFAULT now());',
     )

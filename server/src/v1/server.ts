@@ -576,7 +576,7 @@ export function createHollerKitServer(
         await requireAuth(request, authenticators, ['agent:read'])
         const questParam = url.searchParams.get('quest') ?? url.searchParams.get('questId')
         const quest = questParam && questParam.trim().length > 0 ? questParam.trim() : undefined
-        const version = parseOptionalNullableInteger(url.searchParams.get('version'), 'version') ?? undefined
+        const version = parseQueryInteger(url.searchParams.get('version'), 'version', 1)
         const labelParam = url.searchParams.get('label')
         const label = labelParam && labelParam.trim().length > 0 ? labelParam.trim() : undefined
         const buildParam = url.searchParams.get('build')
@@ -595,8 +595,15 @@ export function createHollerKitServer(
           }
           source = sourceParam as ValueSource
         }
-        const sinceParam = url.searchParams.get('since')
-        const since = sinceParam && sinceParam.trim().length > 0 ? sinceParam.trim() : undefined
+        const sinceRaw = url.searchParams.get('since')
+        let since: string | undefined
+        if (sinceRaw !== null && sinceRaw.trim() !== '') {
+          const ms = Date.parse(sinceRaw.trim())
+          if (Number.isNaN(ms)) {
+            throw new HollerKitError(400, 'invalid_since', 'since must be a valid ISO-8601 timestamp.')
+          }
+          since = new Date(ms).toISOString()
+        }
         const groupByParam = url.searchParams.get('groupBy')
         let groupBy: ValueGroupBy | undefined
         if (groupByParam !== null && groupByParam !== '') {
@@ -605,8 +612,7 @@ export function createHollerKitServer(
           }
           groupBy = groupByParam as ValueGroupBy
         }
-        const limitParam = url.searchParams.get('limit')
-        const limit = parseOptionalNullableInteger(limitParam, 'limit') ?? undefined
+        const limit = parseQueryInteger(url.searchParams.get('limit'), 'limit', 1, 500)
 
         const result = await options.store.queryValues({
           quest,
@@ -1298,6 +1304,23 @@ function parseOptionalNullableInteger(value: unknown, field: string): number | n
     throw new HollerKitError(400, 'invalid_field', `${field} must be an integer.`)
   }
   return value
+}
+
+/**
+ * Validates an optional integer query parameter string within [min, max].
+ */
+function parseQueryInteger(
+  raw: string | null,
+  field: string,
+  min = 1,
+  max = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+  if (raw === null || raw.trim() === '') return undefined
+  const parsed = Number(raw.trim())
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new HollerKitError(400, 'invalid_filter', `${field} must be an integer between ${min} and ${max}.`)
+  }
+  return parsed
 }
 
 /**

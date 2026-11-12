@@ -15,6 +15,8 @@ import {
   type HollerKitStore,
   type QuestVersionRecord,
   type Scope,
+  type ValueGroupBy,
+  type ValueSource,
 } from './v1/store.js'
 
 const VALID_SCOPES = new Set<Scope>(['tester', 'quests:write', 'agent:read', 'agent:triage'])
@@ -369,17 +371,53 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
       const dbUrl = flags.get('db') ?? process.env.DATABASE_URL ?? process.env.HOLLERKIT_DB_POOLER_URL
       const quest = flags.get('quest') ?? flags.get('questId')
       const label = flags.get('label')
-      const groupBy = flags.get('groupBy') as any
+      const rawGroupBy = flags.get('groupBy')
+      const allowedGroupBys = new Set<ValueGroupBy>(['build', 'appVersion', 'device', 'os', 'version', 'label'])
+      if (rawGroupBy !== undefined && rawGroupBy.trim() !== '') {
+        if (!allowedGroupBys.has(rawGroupBy as ValueGroupBy)) {
+          stderr(`Error: Invalid --groupBy "${rawGroupBy}". Must be one of: build, appVersion, device, os, version, label.`)
+          return 1
+        }
+      }
+      const groupBy = (rawGroupBy && rawGroupBy.trim() !== '' ? rawGroupBy.trim() : undefined) as ValueGroupBy | undefined
+
       const build = flags.get('build')
       const appVersion = flags.get('appVersion')
       const device = flags.get('device')
       const os = flags.get('os')
-      const source = flags.get('source') as any
+
+      const rawSource = flags.get('source')
+      const allowedSources = new Set<ValueSource>(['capture', 'answer'])
+      if (rawSource !== undefined && rawSource.trim() !== '') {
+        if (!allowedSources.has(rawSource as ValueSource)) {
+          stderr(`Error: Invalid --source "${rawSource}". Must be one of: capture, answer.`)
+          return 1
+        }
+      }
+      const source = (rawSource && rawSource.trim() !== '' ? rawSource.trim() : undefined) as ValueSource | undefined
+
       const since = flags.get('since')
       const versionRaw = flags.get('version')
-      const version = versionRaw ? Number(versionRaw) : undefined
+      let version: number | undefined
+      if (versionRaw !== undefined) {
+        const parsed = Number(versionRaw)
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          stderr('Error: --version must be an integer >= 1.')
+          return 1
+        }
+        version = parsed
+      }
+
       const limitRaw = flags.get('limit')
-      const limit = limitRaw ? Number(limitRaw) : undefined
+      let limit: number | undefined
+      if (limitRaw !== undefined) {
+        const parsed = Number(limitRaw)
+        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
+          stderr('Error: --limit must be an integer between 1 and 500.')
+          return 1
+        }
+        limit = parsed
+      }
       const isJson = flags.has('json')
 
       let queryResult: any

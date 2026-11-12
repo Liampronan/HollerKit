@@ -96,6 +96,30 @@ components:
             - $ref: "#/components/schemas/TriageStatus"
             - type: "null"
 
+    QuestCaptureDefinition:
+      type: object
+      required: [event, value, label]
+      properties:
+        event:
+          type: string
+        value:
+          type: string
+        unit:
+          type: string
+          enum: [ms, s, bytes, count, percent, none]
+          default: none
+        label:
+          type: string
+        where:
+          type: object
+          additionalProperties: true
+        min:
+          type: number
+          nullable: true
+        max:
+          type: number
+          nullable: true
+
     QuestDefinitionInput:
       type: object
       required: [id, title, area, steps, expect]
@@ -139,6 +163,11 @@ components:
           type: [string, "null"]
         source:
           $ref: "#/components/schemas/QuestSource"
+        capture:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestCaptureDefinition"
+          default: []
 
     QuestVersionRecord:
       type: object
@@ -420,6 +449,96 @@ components:
     TriageStatus:
       type: string
       enum: [new, triaged, resolved, wontfix, duplicate]
+
+    FeedbackCaptureView:
+      type: object
+      required: [label, unit, event]
+      properties:
+        label:
+          type: string
+        unit:
+          type: string
+          enum: [ms, s, bytes, count, percent, none]
+        event:
+          type: string
+        value:
+          type: number
+          nullable: true
+        flag:
+          type: string
+          nullable: true
+          enum: [missing, below_min, above_max]
+        min:
+          type: number
+          nullable: true
+        max:
+          type: number
+          nullable: true
+
+    ValueStats:
+      type: object
+      required: [n, median, p90, min, max]
+      properties:
+        n:
+          type: integer
+        median:
+          type: number
+          nullable: true
+        p90:
+          type: number
+          nullable: true
+        min:
+          type: number
+          nullable: true
+        max:
+          type: number
+          nullable: true
+
+    ValueGroupSummary:
+      type: object
+      required: [key, n, median, p90, min, max]
+      properties:
+        key:
+          type: string
+        n:
+          type: integer
+        median:
+          type: number
+          nullable: true
+        p90:
+          type: number
+          nullable: true
+        min:
+          type: number
+          nullable: true
+        max:
+          type: number
+          nullable: true
+
+    QueryValuesResult:
+      type: object
+      required: [ok, quest, label, source, unit, stats, groups]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        quest:
+          type: string
+        label:
+          type: string
+        source:
+          type: string
+        unit:
+          type: string
+        groupBy:
+          type: string
+          nullable: true
+        stats:
+          $ref: "#/components/schemas/ValueStats"
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValueGroupSummary"
 
     TriageEntry:
       type: object
@@ -894,6 +1013,10 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/FeedbackAttachmentView"
+                  captures:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeedbackCaptureView"
         "404":
           description: Feedback item not found
           content:
@@ -1070,6 +1193,109 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/QuestVersionRecord"
+
+  /v1/values:
+    get:
+      operationId: queryValues
+      summary: Query measured values and aggregated summary stats across runs
+      description: >
+        Requires `agent:read` scope. Queries captured quest breadcrumbs and answer values
+        matching quest, label, build, version, and other filters. Computes summary stats
+        (n, median, p90, min, max) and optional group breakdowns.
+      security:
+        - bearerAuth: [agent:read]
+      parameters:
+        - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
+        - name: quest
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: label
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+        - name: build
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: appVersion
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: device
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: os
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: source
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [capture, answer]
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: groupBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [build, appVersion, device, os, version, label]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Query results with summary stats and group breakdowns
+          headers:
+            hollerkit-protocol:
+              $ref: "#/components/headers/HollerKitProtocol"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryValuesResult"
+        "400":
+          description: Invalid filter or query parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Missing required agent:read scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
 
   /v1/builds/{build}/pending:
     get:
