@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS hollerkit.quests (
   needs jsonb NOT NULL DEFAULT '[]'::jsonb,
   record text NOT NULL DEFAULT 'optional' CHECK (record IN ('none', 'optional', 'suggested', 'required')),
   start text,
+  capture jsonb NOT NULL DEFAULT '[]'::jsonb,
   source_pr integer,
   source_sha text,
   source_added text,
@@ -149,7 +150,32 @@ CREATE TABLE IF NOT EXISTS hollerkit.api_keys (
   revoked_at timestamptz
 );
 
--- Indexes for inbox, pending quests, and build queries
+-- 11. values: captured quest measurements and structured answers across runs and builds
+CREATE TABLE IF NOT EXISTS hollerkit.values (
+  id bigserial PRIMARY KEY,
+  feedback_id uuid NOT NULL REFERENCES hollerkit.feedback(id) ON DELETE CASCADE,
+  quest_id text NOT NULL,
+  quest_version integer NOT NULL,
+  source text NOT NULL DEFAULT 'capture' CHECK (source IN ('capture', 'answer')),
+  label text NOT NULL,
+  value double precision,
+  text_value text,
+  bool_value boolean,
+  unit text NOT NULL DEFAULT 'none' CHECK (unit IN ('ms', 's', 'bytes', 'count', 'percent', 'none')),
+  event text,
+  offset_seconds double precision,
+  min double precision,
+  max double precision,
+  flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+  build text NOT NULL,
+  app_version text,
+  device text,
+  os text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (quest_id, quest_version) REFERENCES hollerkit.quests(id, version) ON DELETE CASCADE
+);
+
+-- Indexes for inbox, pending quests, values, and build queries
 CREATE INDEX IF NOT EXISTS idx_quests_status_area
   ON hollerkit.quests (status, area);
 
@@ -181,6 +207,12 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending
   ON hollerkit.outbox (next_attempt_at ASC)
   WHERE delivered_at IS NULL;
 
+CREATE INDEX IF NOT EXISTS idx_values_quest_label_build
+  ON hollerkit.values (quest_id, label, build, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_values_feedback
+  ON hollerkit.values (feedback_id, id ASC);
+
 -- Enable Row Level Security on every table in hollerkit (deny-by-default for public/anon roles)
 ALTER TABLE hollerkit.quests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hollerkit.builds ENABLE ROW LEVEL SECURITY;
@@ -193,3 +225,4 @@ ALTER TABLE hollerkit.triage ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hollerkit.outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hollerkit.testers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hollerkit.api_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hollerkit.values ENABLE ROW LEVEL SECURITY;

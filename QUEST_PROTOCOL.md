@@ -40,7 +40,7 @@ All `/v1/*` endpoints authenticate via `Authorization: Bearer <token>`. Two cred
    - The server hashes the bearer token with SHA-256 hex and looks up `key_hash` in `hollerkit.api_keys` where `revoked_at IS NULL`.
    - Grants the scopes stored in `hollerkit.api_keys.scopes`:
      - `quests:write`: CI workflow syncing `hollerkit-quests.json` on push to `main` (`PUT /v1/quests`).
-     - `agent:read`: Coding agent reading feedback inbox, details, pending quests, and retirable quests (`GET /v1/feedback`, `GET /v1/feedback/{id}`, `GET /v1/quests`, `GET /v1/builds/{build}/pending`).
+     - `agent:read`: Coding agent reading feedback inbox, details, pending quests, and retirable quests, and values (`GET /v1/feedback`, `GET /v1/feedback/{id}`, `GET /v1/quests`, `GET /v1/builds/{build}/pending`, `GET /v1/values`).
      - `agent:triage`: Coding agent recording triage decisions (`PUT /v1/feedback/{id}/triage`).
 
 | Endpoint | Required Scope |
@@ -54,6 +54,7 @@ All `/v1/*` endpoints authenticate via `Authorization: Bearer <token>`. Two cred
 | `PUT /v1/feedback/{id}/triage` | `agent:triage` |
 | `GET /v1/quests` | `agent:read` |
 | `GET /v1/builds/{build}/pending` | `tester` or `agent:read` |
+| `GET /v1/values` | `agent:read` |
 
 Missing or invalid credentials return `401 Unauthorized` (`code: "unauthorized"`). Valid credentials lacking the required scope return `403 Forbidden` (`code: "forbidden"`).
 
@@ -70,6 +71,17 @@ Keys are serialized in exact alphabetical order (`area`, `expect`, `needs`, `rec
 ```json
 {
   "area": "<trimmed string>",
+  "capture": [
+    {
+      "event": "<trimmed string>",
+      "label": "<trimmed string>",
+      "max": null,
+      "min": null,
+      "unit": "none",
+      "value": "<trimmed string>",
+      "where": null
+    }
+  ],
   "expect": ["<trimmed string>", "..."],
   "needs": ["<trimmed string>", "..."],
   "record": "optional",
@@ -82,10 +94,16 @@ Keys are serialized in exact alphabetical order (`area`, `expect`, `needs`, `rec
 
 Normalization rules applied by `computeQuestContentHash(quest)`:
 - `area` and `title`: trimmed strings.
+- `capture`: optional array of normalized capture definitions. When omitted or empty, the `capture` key is excluded from canonical JSON. When present, each capture definition is normalized:
+  - `event`, `label`, `value`: trimmed strings.
+  - `unit`: defaults to `"none"` (`"ms" | "s" | "bytes" | "count" | "percent" | "none"`).
+  - `min`, `max`: finite number or `null`.
+  - `where`: object with scalar values (`string | number | boolean`) with keys sorted alphabetically, or `null` if empty/omitted.
+  - Keys within each capture object are serialized in alphabetical order (`event`, `label`, `max`, `min`, `unit`, `value`, `where`).
 - `setup`, `steps`, `expect`, `needs`: arrays of trimmed strings (`setup` and `needs` default to `[]`).
 - `record`: defaults to `"optional"` (`"none" | "optional" | "suggested" | "required"`).
 - `start`: trimmed non-empty string, or `null` if omitted/empty.
-- JSON is serialized with no whitespace (`JSON.stringify`) with the 8 keys in alphabetical order and hashed with SHA-256 hex.
+- JSON is serialized with no whitespace (`JSON.stringify`) with top-level keys in alphabetical order and hashed with SHA-256 hex.
 
 `computeQuestContentHash(quest)` is exported from `hollerkit-server` so the server, CLI, and conformance suite share the exact implementation.
 
@@ -167,3 +185,27 @@ Default `/v1` limits enforced by `createHollerKitServer`:
 - **Max mark events / attachments per feedback**: `20` marks → `413 too_many_marks`
 - **Max audio attachment size**: `10,485,760` bytes (10 MB) → `413 audio_too_large`
 - **Max video attachment size**: `52,428,800` bytes (50 MB) → `413 video_too_large`
+
+
+---
+
+## 9. Measured Values & Querying (`GET /v1/values`)
+
+When testers run quests that define `capture` rules, the server matches breadcrumbs at submit time and stores rows in `hollerkit.values`.
+
+`GET /v1/values` requires `agent:read` scope and allows querying measured values across runs:
+- Query parameters:
+  - `quest` (required): quest ID.
+  - `label` (required): capture label.
+  - `version`: optional quest version number.
+  - `build`: optional build string filter.
+  - `appVersion`, `device`, `os`: optional device/environment filters.
+  - `source`: optional source filter (`capture` | `answer`, defaults to `capture`).
+  - `since`: optional ISO-8601 timestamp cutoff.
+  - `groupBy`: optional breakdown dimension (`build`, `appVersion`, `device`, `os`, `version`, `label`).
+  - `limit`: optional max rows to aggregate (1–500, default 100).
+- Response:
+  - Summary stats: `n`, `median`, `p90`, `min`, `max`.
+  - Group summaries when `groupBy` is specified.
+
+Feedback details (`GET /v1/feedback/{id}`) include a `captures` array listing each expected capture, its measured `value`, and advisory flags (`missing`, `below_min`, `above_max`).

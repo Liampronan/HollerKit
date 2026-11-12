@@ -613,7 +613,7 @@ public final class HollerKitQuestState: ObservableObject {
         let isoFormatter = ISO8601DateFormatter()
         let trimmedComment = comment?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let request = FeedbackSubmissionRequest(
+        var request = FeedbackSubmissionRequest(
             id: session.id,
             kind: "quest_run",
             questId: session.quest.id,
@@ -631,6 +631,7 @@ public final class HollerKitQuestState: ObservableObject {
             endedAt: isoFormatter.string(from: endedAt),
             events: events
         )
+        request.clampToBudget()
 
         let client = APIClient(configuration: config)
         let unconfirmedManifestEntry = session.quest.isVersionConfirmed

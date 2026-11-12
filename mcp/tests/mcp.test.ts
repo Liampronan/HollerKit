@@ -354,7 +354,7 @@ async function createSeededTestHarness() {
   }
 }
 
-test('exercises all 5 MCP tools end-to-end via callTool dispatcher and verifies protocol headers', async () => {
+test('exercises all 6 MCP tools end-to-end via callTool dispatcher and verifies protocol headers', async () => {
   const harness = await createSeededTestHarness()
 
   const mcp = createHollerKitMcpServer({
@@ -363,7 +363,7 @@ test('exercises all 5 MCP tools end-to-end via callTool dispatcher and verifies 
     fetch: harness.inProcessFetch,
   })
 
-  assert.equal(mcp.tools.length, 5)
+  assert.equal(mcp.tools.length, 6)
   assert.deepEqual(
     mcp.tools.map((t) => t.name),
     [
@@ -372,6 +372,7 @@ test('exercises all 5 MCP tools end-to-end via callTool dispatcher and verifies 
       'feedback_triage',
       'quests_pending',
       'quests_retirable',
+      'values_query',
     ],
   )
 
@@ -467,6 +468,11 @@ test('exercises all 5 MCP tools end-to-end via callTool dispatcher and verifies 
   assert.ok(!retirableIds.includes('camera-zoom-active-unpassed'))
   assert.ok(!retirableIds.includes('camera-flash-retired-passed'))
   assert.equal(retirableCall.structuredContent.quests[0]?.passedOnCurrentVersion, true)
+
+  // 6. values_query -> queries measurements and captures
+  const valuesCall = (await mcp.callTool('values_query', {})) as McpCallToolResult<any>
+  assert.equal(valuesCall.isError, false)
+  assert.equal(valuesCall.structuredContent.ok, true)
 
   // Verify every request sent Authorization: Bearer <apiKey> and hollerkit-protocol: 1
   assert.ok(harness.observedRequests.length >= 6)
@@ -605,14 +611,25 @@ test('exercises full JSON-RPC 2.0 stdio protocol (initialize, notifications/init
         },
       })}\n`,
     )
+    input.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 8,
+        method: 'tools/call',
+        params: {
+          name: 'values_query',
+          arguments: {},
+        },
+      })}\n`,
+    )
 
-    await waitForLines(7)
+    await waitForLines(8)
     connection.close()
 
     const responses = outputLines.map((line) => JSON.parse(line) as JsonRpcSuccessResponse)
     assert.deepEqual(
       responses.map((r) => r.id),
-      [1, 2, 3, 4, 5, 6, 7],
+      [1, 2, 3, 4, 5, 6, 7, 8],
     )
 
     const initResult = responses[0]?.result as {
@@ -623,9 +640,9 @@ test('exercises full JSON-RPC 2.0 stdio protocol (initialize, notifications/init
     assert.equal(initResult.serverInfo.name, 'hollerkit-mcp')
 
     const listResult = responses[1]?.result as { tools: typeof HOLLERKIT_MCP_TOOLS }
-    assert.equal(listResult.tools.length, 5)
+    assert.equal(listResult.tools.length, 6)
 
-    for (let i = 2; i <= 6; i++) {
+    for (let i = 2; i <= 7; i++) {
       const callResult = responses[i]?.result as McpCallToolResult
       assert.equal(callResult.isError, false)
       assert.equal(callResult.content[0]?.type, 'text')

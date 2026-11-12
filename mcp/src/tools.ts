@@ -135,4 +135,67 @@ export const HOLLERKIT_MCP_TOOLS: readonly McpToolDefinition[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'values_query',
+    description:
+      'Query aggregated measurements and quest captures across feedback runs and builds, returning n, median, p90, min, max, and optional grouped breakdowns.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        quest: {
+          type: 'string',
+          description: 'Filter measurements by quest ID.',
+        },
+        questId: {
+          type: 'string',
+          description: 'Alias for quest.',
+        },
+        version: {
+          type: 'integer',
+          description: 'Filter by specific quest version number.',
+        },
+        label: {
+          type: 'string',
+          description: 'Filter measurements by capture or answer label.',
+        },
+        build: {
+          type: 'string',
+          description: 'Filter measurements by app build identifier.',
+        },
+        appVersion: {
+          type: 'string',
+          description: 'Filter by semantic app version string.',
+        },
+        device: {
+          type: 'string',
+          description: 'Filter by device model string.',
+        },
+        os: {
+          type: 'string',
+          description: 'Filter by OS version string.',
+        },
+        source: {
+          type: 'string',
+          enum: ['capture', 'answer'],
+          description: 'Filter by measurement source ("capture" or "answer").',
+        },
+        since: {
+          type: 'string',
+          description: 'Filter values created at or after this ISO-8601 timestamp.',
+        },
+        groupBy: {
+          type: 'string',
+          enum: ['build', 'appVersion', 'device', 'os', 'version', 'label'],
+          description: 'Dimension to group and aggregate statistics by.',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          description: 'Maximum number of raw value records to include (1-500, default 100).',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
 ]

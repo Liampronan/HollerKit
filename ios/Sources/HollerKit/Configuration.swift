@@ -130,6 +130,7 @@ public struct HollerKitConfiguration: Sendable {
     public var metadata: @Sendable () -> [String: String]
     public var initialImages: @Sendable () -> [HollerKitAttachment]
     public var captureBreadcrumbs: Bool
+    public var maxBreadcrumbs: Int
     public var quests: HollerKitQuestsConfiguration?
     public var urlSession: URLSession
     public var outboxDirectoryURL: URL?
@@ -149,6 +150,7 @@ public struct HollerKitConfiguration: Sendable {
         metadata: @escaping @Sendable () -> [String: String] = { [:] },
         initialImages: @escaping @Sendable () -> [HollerKitAttachment] = { [] },
         captureBreadcrumbs: Bool = true,
+        maxBreadcrumbs: Int = 500,
         quests: HollerKitQuestsConfiguration? = nil,
         urlSession: URLSession = .shared,
         outboxDirectoryURL: URL? = nil
@@ -164,6 +166,7 @@ public struct HollerKitConfiguration: Sendable {
         self.metadata = metadata
         self.initialImages = initialImages
         self.captureBreadcrumbs = captureBreadcrumbs
+        self.maxBreadcrumbs = maxBreadcrumbs
         self.quests = quests
         self.urlSession = urlSession
         self.outboxDirectoryURL = outboxDirectoryURL

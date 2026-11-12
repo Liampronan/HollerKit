@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { HollerKitError } from '../errors.js'
 import {
+  buildQueryValuesResult,
   computeQuestContentHash,
+  evaluateQuestCaptures,
+  normalizeQuestCaptures,
   type ApiKeyRecord,
   type BuildManifestQuestStatus,
   type ClaimPendingOutboxInput,
@@ -10,6 +13,7 @@ import {
   type CreateUploadGrantInput,
   type EnqueueOutboxInput,
   type FeedbackAttachmentRecord,
+  type FeedbackCaptureRecord,
   type FeedbackDetailRecord,
   type FeedbackEventRecord,
   type FeedbackRecord,
@@ -20,7 +24,10 @@ import {
   type MarkOutboxDeliveredInput,
   type MarkOutboxFailedInput,
   type OutboxRecord,
+  type QueryValuesFilter,
+  type QueryValuesResult,
   type QuestBoardStatus,
+  type QuestCapture,
   type QuestLatestRun,
   type QuestRecordMode,
   type QuestResultCounts,
@@ -36,6 +43,7 @@ import {
   type TriageStatus,
   type UploadGrantRecord,
   type UpsertTesterInput,
+  type ValueRecord,
 } from './store.js'
 
 interface StoredQuestRow {
@@ -50,6 +58,7 @@ interface StoredQuestRow {
   needs: string[]
   record: QuestRecordMode
   start: string | null
+  capture: QuestCapture[]
   source: {
     pr: number | null
     sha: string | null
@@ -80,6 +89,8 @@ export function memoryStore(): HollerKitStore {
   const eventsByFeedback = new Map<string, FeedbackEventRecord[]>()
   const attachmentsByFeedback = new Map<string, FeedbackAttachmentRecord[]>()
   const triageByFeedback = new Map<string, TriageRecord[]>()
+  const capturesByFeedback = new Map<string, FeedbackCaptureRecord[]>()
+  const values: ValueRecord[] = []
   const testers = new Map<string, TesterRecord>()
   const apiKeys = new Map<string, ApiKeyRecord>()
   const outbox = new Map<number, OutboxRecord>()
@@ -87,6 +98,7 @@ export function memoryStore(): HollerKitStore {
   let nextEventId = 1
   let nextTriageId = 1
   let nextOutboxId = 1
+  let nextValueId = 1
 
   const CLEARED_TRIAGE_STATUSES = new Set<TriageStatus>(['resolved', 'wontfix', 'duplicate'])
 
@@ -176,6 +188,7 @@ export function memoryStore(): HollerKitStore {
       needs: [...row.needs],
       record: row.record,
       start: row.start,
+      capture: structuredClone(row.capture),
       source: { ...row.source },
       status: row.status,
       createdAt: row.createdAt,
@@ -236,6 +249,7 @@ export function memoryStore(): HollerKitStore {
           existingMatch.needs = (def.needs ?? []).map((s) => s.trim())
           existingMatch.record = def.record ?? 'optional'
           existingMatch.start = def.start && def.start.trim().length > 0 ? def.start.trim() : null
+          existingMatch.capture = normalizeQuestCaptures(def.capture)
           existingMatch.source = {
             pr: def.source?.pr ?? input.pr ?? existingMatch.source.pr,
             sha: def.source?.sha ?? input.sha ?? existingMatch.source.sha,
@@ -264,6 +278,7 @@ export function memoryStore(): HollerKitStore {
             needs: (def.needs ?? []).map((s) => s.trim()),
             record: def.record ?? 'optional',
             start: def.start && def.start.trim().length > 0 ? def.start.trim() : null,
+            capture: normalizeQuestCaptures(def.capture),
             source: {
               pr: def.source?.pr ?? input.pr ?? null,
               sha: def.source?.sha ?? input.sha ?? null,
@@ -324,6 +339,7 @@ export function memoryStore(): HollerKitStore {
             needs: (def.needs ?? []).map((s) => s.trim()),
             record: def.record ?? 'optional',
             start: def.start && def.start.trim().length > 0 ? def.start.trim() : null,
+            capture: normalizeQuestCaptures(def.capture),
             source: {
               pr: def.source?.pr ?? null,
               sha: def.source?.sha ?? null,
@@ -363,6 +379,7 @@ export function memoryStore(): HollerKitStore {
           needs: [...row.needs],
           record: row.record,
           start: row.start,
+          capture: structuredClone(row.capture),
           source: { ...row.source },
           counts,
           latestRun,
@@ -509,6 +526,7 @@ export function memoryStore(): HollerKitStore {
       let resolvedQuestVersion: number | null = input.questVersion ?? null
       let resolvedArea: string | null =
         typeof input.metadata?.area === 'string' ? (input.metadata.area as string) : null
+      let resolvedQuestRow: StoredQuestRow | undefined
 
       if (input.kind === 'quest_run') {
         if (!resolvedQuestId) {
@@ -527,6 +545,7 @@ export function memoryStore(): HollerKitStore {
         if (!questRow) {
           throw new HollerKitError(400, 'invalid_quest', `Unknown quest or version for ${resolvedQuestId}.`)
         }
+        resolvedQuestRow = questRow
         resolvedQuestVersion = questRow.version
         resolvedArea = questRow.area
       }
@@ -575,6 +594,37 @@ export function memoryStore(): HollerKitStore {
         payload: ev.payload ? structuredClone(ev.payload) : {},
       }))
       eventsByFeedback.set(record.id, eventRecords)
+
+      if (resolvedQuestRow && resolvedQuestId && resolvedQuestVersion !== null) {
+        const evaluated = evaluateQuestCaptures(resolvedQuestRow.capture, eventRecords)
+        capturesByFeedback.set(record.id, evaluated.captures)
+        if (record.result !== 'abandoned') {
+          for (const mv of evaluated.matchedValues) {
+            values.push({
+              id: nextValueId++,
+              feedbackId: record.id,
+              questId: resolvedQuestId,
+              questVersion: resolvedQuestVersion,
+              source: 'capture',
+              label: mv.label,
+              value: mv.value,
+              unit: mv.unit,
+              event: mv.event,
+              offsetSeconds: mv.offsetSeconds,
+              min: mv.min,
+              max: mv.max,
+              flags: [...mv.flags],
+              build: record.build,
+              appVersion: record.appVersion,
+              device: record.device,
+              os: record.os,
+              createdAt: nowIso,
+            })
+          }
+        }
+      } else {
+        capturesByFeedback.set(record.id, [])
+      }
 
       const attachmentRecords: FeedbackAttachmentRecord[] = attachmentsInput.map((att, idx) => {
         const grant = grantsToConsume[idx]!
@@ -672,6 +722,13 @@ export function memoryStore(): HollerKitStore {
       })
 
       const attachments = [...(attachmentsByFeedback.get(id) ?? [])]
+      const captures = (capturesByFeedback.get(id) ?? evaluateQuestCaptures(quest?.capture, events).captures).map(
+        (cap) => ({
+          ...cap,
+          flags: [...cap.flags],
+          ...(cap.where ? { where: { ...cap.where } } : {}),
+        }),
+      )
 
       return {
         feedback: cloneFeedback(fb),
@@ -679,7 +736,35 @@ export function memoryStore(): HollerKitStore {
         events: events.map((ev) => ({ ...ev, payload: structuredClone(ev.payload) })),
         triage: triage.map((tr) => ({ ...tr, links: [...tr.links] })),
         attachments: attachments.map((att) => ({ ...att })),
+        captures,
       }
+    },
+
+    async queryValues(filter: QueryValuesFilter = {}): Promise<QueryValuesResult> {
+      const targetQuestId = filter.quest ?? filter.questId
+      const sinceMs = filter.since ? new Date(filter.since).getTime() : null
+
+      const filtered = values.filter((row) => {
+        if (targetQuestId && row.questId !== targetQuestId) return false
+        if (filter.version !== undefined && row.questVersion !== filter.version) return false
+        if (filter.label && row.label !== filter.label) return false
+        if (filter.build && row.build !== filter.build) return false
+        if (filter.appVersion && row.appVersion !== filter.appVersion) return false
+        if (filter.device && row.device !== filter.device) return false
+        if (filter.os && row.os !== filter.os) return false
+        if (filter.source && row.source !== filter.source) return false
+        if (sinceMs !== null && !Number.isNaN(sinceMs) && new Date(row.createdAt).getTime() < sinceMs) {
+          return false
+        }
+        return true
+      })
+
+      filtered.sort((a, b) => {
+        const cmp = b.createdAt.localeCompare(a.createdAt)
+        return cmp !== 0 ? cmp : b.id - a.id
+      })
+
+      return buildQueryValuesResult(filtered, filter)
     },
 
     async triageFeedback(

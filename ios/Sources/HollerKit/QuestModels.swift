@@ -148,6 +148,89 @@ public enum QuestResult: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public struct QuestCaptureDefinition: Codable, Equatable, Sendable {
+    public var event: String
+    public var value: String
+    public var unit: String
+    public var label: String
+    public var whereClause: [String: HollerKitFieldValue]?
+    public var min: Double?
+    public var max: Double?
+
+    public init(
+        event: String,
+        value: String,
+        unit: String = "none",
+        label: String,
+        whereClause: [String: HollerKitFieldValue]? = nil,
+        min: Double? = nil,
+        max: Double? = nil
+    ) {
+        self.event = event.jsTrimmed
+        self.value = value.jsTrimmed
+        let trimmedUnit = unit.jsTrimmed
+        self.unit = trimmedUnit.isEmpty ? "none" : trimmedUnit
+        self.label = label.jsTrimmed
+        self.whereClause = whereClause
+        self.min = min
+        self.max = max
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case event
+        case value
+        case unit
+        case label
+        case whereClause = "where"
+        case min
+        case max
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawEvent = try container.decode(String.self, forKey: .event)
+        let rawValue = try container.decode(String.self, forKey: .value)
+        let rawUnit = try container.decodeIfPresent(String.self, forKey: .unit) ?? "none"
+        let rawLabel = try container.decode(String.self, forKey: .label)
+        let rawWhere = try container.decodeIfPresent([String: HollerKitFieldValue].self, forKey: .whereClause)
+        let rawMin = try container.decodeIfPresent(Double.self, forKey: .min)
+        let rawMax = try container.decodeIfPresent(Double.self, forKey: .max)
+
+        self.init(
+            event: rawEvent,
+            value: rawValue,
+            unit: rawUnit,
+            label: rawLabel,
+            whereClause: rawWhere,
+            min: rawMin,
+            max: rawMax
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(event, forKey: .event)
+        try container.encode(value, forKey: .value)
+        try container.encode(unit, forKey: .unit)
+        try container.encode(label, forKey: .label)
+        if let whereClause, !whereClause.isEmpty {
+            try container.encode(whereClause, forKey: .whereClause)
+        } else {
+            try container.encodeNil(forKey: .whereClause)
+        }
+        if let min {
+            try container.encode(min, forKey: .min)
+        } else {
+            try container.encodeNil(forKey: .min)
+        }
+        if let max {
+            try container.encode(max, forKey: .max)
+        } else {
+            try container.encodeNil(forKey: .max)
+        }
+    }
+}
+
 public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var title: String
@@ -159,6 +242,7 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
     public var record: QuestRecordMode
     public var start: String?
     public var source: QuestManifestSource?
+    public var capture: [QuestCaptureDefinition]?
 
     public init(
         id: String,
@@ -170,7 +254,8 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
         needs: [String] = [],
         record: QuestRecordMode = .optional,
         start: String? = nil,
-        source: QuestManifestSource? = nil
+        source: QuestManifestSource? = nil,
+        capture: [QuestCaptureDefinition]? = nil
     ) {
         self.id = id.jsTrimmed
         self.title = title.jsTrimmed
@@ -183,6 +268,7 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
         let trimmedStart = start?.jsTrimmed
         self.start = (trimmedStart?.isEmpty == false) ? trimmedStart : nil
         self.source = source
+        self.capture = capture
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -196,6 +282,7 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
         case record
         case start
         case source
+        case capture
     }
 
     public init(from decoder: Decoder) throws {
@@ -210,6 +297,7 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
         let rawRecord = try container.decodeIfPresent(QuestRecordMode.self, forKey: .record) ?? .optional
         let rawStart = try container.decodeIfPresent(String.self, forKey: .start)
         let rawSource = try container.decodeIfPresent(QuestManifestSource.self, forKey: .source)
+        let rawCapture = try container.decodeIfPresent([QuestCaptureDefinition].self, forKey: .capture)
 
         self.init(
             id: rawId,
@@ -221,7 +309,8 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
             needs: rawNeeds,
             record: rawRecord,
             start: rawStart,
-            source: rawSource
+            source: rawSource,
+            capture: rawCapture
         )
     }
 
@@ -242,7 +331,8 @@ public struct QuestDefinition: Codable, Equatable, Identifiable, Sendable {
             needs: needs.map(\.jsTrimmed),
             record: record.rawValue,
             start: (trimmedStart?.isEmpty == false) ? trimmedStart : nil,
-            source: source
+            source: source,
+            capture: capture
         )
     }
 }
@@ -268,8 +358,52 @@ public struct QuestManifest: Codable, Equatable, Sendable {
     }
 }
 
+private struct CanonicalQuestCapturePayload: Encodable {
+    var event: String
+    var label: String
+    var max: Double?
+    var min: Double?
+    var unit: String
+    var value: String
+    var whereClause: [String: HollerKitFieldValue]?
+
+    private enum CodingKeys: String, CodingKey {
+        case event
+        case label
+        case max
+        case min
+        case unit
+        case value
+        case whereClause = "where"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(event, forKey: .event)
+        try container.encode(label, forKey: .label)
+        if let max {
+            try container.encode(max, forKey: .max)
+        } else {
+            try container.encodeNil(forKey: .max)
+        }
+        if let min {
+            try container.encode(min, forKey: .min)
+        } else {
+            try container.encodeNil(forKey: .min)
+        }
+        try container.encode(unit, forKey: .unit)
+        try container.encode(value, forKey: .value)
+        if let whereClause, !whereClause.isEmpty {
+            try container.encode(whereClause, forKey: .whereClause)
+        } else {
+            try container.encodeNil(forKey: .whereClause)
+        }
+    }
+}
+
 private struct CanonicalQuestPayload: Encodable {
     var area: String
+    var capture: [CanonicalQuestCapturePayload]?
     var expect: [String]
     var needs: [String]
     var record: String
@@ -280,6 +414,7 @@ private struct CanonicalQuestPayload: Encodable {
 
     private enum CodingKeys: String, CodingKey {
         case area
+        case capture
         case expect
         case needs
         case record
@@ -292,6 +427,9 @@ private struct CanonicalQuestPayload: Encodable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(area, forKey: .area)
+        if let capture, !capture.isEmpty {
+            try container.encode(capture, forKey: .capture)
+        }
         try container.encode(expect, forKey: .expect)
         try container.encode(needs, forKey: .needs)
         try container.encode(record, forKey: .record)
@@ -310,8 +448,29 @@ public func canonicalQuestJSON(_ quest: QuestDefinition) -> String {
     let trimmedStart = quest.start?.jsTrimmed
     let normalizedStart = (trimmedStart?.isEmpty == false) ? trimmedStart : nil
 
+    let normalizedCaptures: [CanonicalQuestCapturePayload]? = quest.capture.flatMap { caps in
+        guard !caps.isEmpty else { return nil }
+        return caps.map { c in
+            var normalizedWhere: [String: HollerKitFieldValue]? = nil
+            if let w = c.whereClause, !w.isEmpty {
+                normalizedWhere = w
+            }
+            let trimmedUnit = c.unit.jsTrimmed
+            return CanonicalQuestCapturePayload(
+                event: c.event.jsTrimmed,
+                label: c.label.jsTrimmed,
+                max: c.max,
+                min: c.min,
+                unit: trimmedUnit.isEmpty ? "none" : trimmedUnit,
+                value: c.value.jsTrimmed,
+                whereClause: normalizedWhere
+            )
+        }
+    }
+
     let payload = CanonicalQuestPayload(
         area: quest.area.jsTrimmed,
+        capture: normalizedCaptures,
         expect: quest.expect.map(\.jsTrimmed),
         needs: quest.needs.map(\.jsTrimmed),
         record: quest.record.rawValue,

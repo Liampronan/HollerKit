@@ -2,10 +2,14 @@ import { randomUUID } from 'node:crypto'
 import postgres, { type Sql } from 'postgres'
 import { HollerKitError } from '../errors.js'
 import {
+  buildQueryValuesResult,
   computeQuestContentHash,
+  evaluateQuestCaptures,
+  normalizeQuestCaptures,
   type ApiKeyRecord,
   type AttachmentKind,
   type BuildManifestQuestStatus,
+  type CaptureFlag,
   type ClaimPendingOutboxInput,
   type CreateApiKeyInput,
   type CreateFeedbackStoreInput,
@@ -23,7 +27,11 @@ import {
   type MarkOutboxDeliveredInput,
   type MarkOutboxFailedInput,
   type OutboxRecord,
+  type QueryValuesFilter,
+  type QueryValuesResult,
   type QuestBoardStatus,
+  type QuestCapture,
+  type QuestCaptureUnit,
   type QuestLatestRun,
   type QuestRecordMode,
   type QuestResult,
@@ -41,6 +49,8 @@ import {
   type TriageStatus,
   type UploadGrantRecord,
   type UpsertTesterInput,
+  type ValueRecord,
+  type ValueSource,
 } from './store.js'
 
 export interface PostgresStoreOptions {
@@ -251,6 +261,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         needs: asStringArray(row.needs),
         record: row.record as QuestRecordMode,
         start: row.start ?? null,
+        capture: asQuestCaptures(row.capture),
         source: {
           pr: row.source_pr !== null && row.source_pr !== undefined ? Number(row.source_pr) : null,
           sha: row.source_sha ?? null,
@@ -311,6 +322,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           const needs = (def.needs ?? []).map((s) => s.trim())
           const record: QuestRecordMode = def.record ?? 'optional'
           const start = def.start && def.start.trim().length > 0 ? def.start.trim() : null
+          const capture = normalizeQuestCaptures(def.capture)
           const sourcePr = def.source?.pr ?? input.pr ?? null
           const sourceSha = def.source?.sha ?? input.sha ?? null
           const sourceAdded = def.source?.added ?? null
@@ -343,6 +355,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
                   needs = ${db.json(needs)},
                   record = ${record},
                   start = ${start},
+                  capture = ${db.json(capture as any)},
                   source_pr = COALESCE(${sourcePr}, source_pr),
                   source_sha = COALESCE(${sourceSha}, source_sha),
                   source_added = COALESCE(${sourceAdded}, source_added),
@@ -371,13 +384,13 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             const insertedRows = await db<any[]>`
               INSERT INTO hollerkit.quests (
                 id, version, content_hash, title, area,
-                setup, steps, expect, needs, record, start,
+                setup, steps, expect, needs, record, start, capture,
                 source_pr, source_sha, source_added,
                 status, created_at, retired_at
               ) VALUES (
                 ${id}, ${nextVersion}, ${contentHash}, ${title}, ${area},
                 ${db.json(setup)}, ${db.json(steps)}, ${db.json(expect)}, ${db.json(needs)},
-                ${record}, ${start},
+                ${record}, ${start}, ${db.json(capture as any)},
                 ${sourcePr}, ${sourceSha}, ${sourceAdded},
                 'active', ${nowIso}, NULL
               )
@@ -451,6 +464,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           const needs = (def.needs ?? []).map((s) => s.trim())
           const record: QuestRecordMode = def.record ?? 'optional'
           const start = def.start && def.start.trim().length > 0 ? def.start.trim() : null
+          const capture = normalizeQuestCaptures(def.capture)
 
           const rows = await db<any[]>`
             SELECT * FROM hollerkit.quests
@@ -471,13 +485,13 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             const inserted = await db<any[]>`
               INSERT INTO hollerkit.quests (
                 id, version, content_hash, title, area,
-                setup, steps, expect, needs, record, start,
+                setup, steps, expect, needs, record, start, capture,
                 source_pr, source_sha, source_added,
                 status, created_at, retired_at
               ) VALUES (
                 ${id}, ${nextVersion}, ${contentHash}, ${title}, ${area},
                 ${db.json(setup)}, ${db.json(steps)}, ${db.json(expect)}, ${db.json(needs)},
-                ${record}, ${start},
+                ${record}, ${start}, ${db.json(capture as any)},
                 ${def.source?.pr ?? null}, ${def.source?.sha ?? null}, ${def.source?.added ?? null},
                 'draft', ${nowIso}, NULL
               )
@@ -528,6 +542,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             needs: asStringArray(row.needs),
             record: row.record as QuestRecordMode,
             start: row.start ?? null,
+            capture: asQuestCaptures(row.capture),
             source: {
               pr: row.source_pr !== null && row.source_pr !== undefined ? Number(row.source_pr) : null,
               sha: row.source_sha ?? null,
@@ -729,6 +744,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         let resolvedQuestVersion: number | null = input.questVersion ?? null
         let resolvedArea: string | null =
           typeof input.metadata?.area === 'string' ? (input.metadata.area as string) : null
+        let resolvedQuestRow: any = null
 
         if (input.kind === 'quest_run') {
           if (!resolvedQuestId) {
@@ -752,8 +768,9 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           if (questRows.length === 0) {
             throw new HollerKitError(400, 'invalid_quest', `Unknown quest or version for ${resolvedQuestId}.`)
           }
-          resolvedQuestVersion = Number(questRows[0]!.version)
-          resolvedArea = questRows[0]!.area
+          resolvedQuestRow = questRows[0]!
+          resolvedQuestVersion = Number(resolvedQuestRow.version)
+          resolvedArea = resolvedQuestRow.area
         }
 
         let triageStatus: TriageStatus | null = null
@@ -800,6 +817,28 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
               ${input.id}, ${offsetSeconds}, ${ev.kind}, ${db.json(payload as any)}
             )
           `
+        }
+
+        if (resolvedQuestRow && resolvedQuestId && resolvedQuestVersion !== null && resultVal !== 'abandoned') {
+          const questCaptures = asQuestCaptures(resolvedQuestRow.capture)
+          if (questCaptures.length > 0) {
+            const evaluated = evaluateQuestCaptures(questCaptures, input.events ?? [])
+            for (const mv of evaluated.matchedValues) {
+              await db`
+                INSERT INTO hollerkit.values (
+                  feedback_id, quest_id, quest_version, source, label, value, unit,
+                  event, offset_seconds, min, max, flags,
+                  build, app_version, device, os, created_at
+                ) VALUES (
+                  ${input.id}, ${resolvedQuestId}, ${resolvedQuestVersion}, 'capture',
+                  ${mv.label}, ${mv.value}, ${mv.unit},
+                  ${mv.event}, ${mv.offsetSeconds}, ${mv.min}, ${mv.max}, ${db.json(mv.flags as any)},
+                  ${input.build}, ${input.appVersion ?? null}, ${input.device ?? null}, ${input.os ?? null},
+                  ${nowIso}
+                )
+              `
+            }
+          }
         }
 
         for (let idx = 0; idx < attachmentsInput.length; idx++) {
@@ -944,13 +983,37 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         ORDER BY created_at ASC
       `
 
+      const events = eventRows.map(toEventRecord)
+      const captures = evaluateQuestCaptures(quest?.capture, events).captures
+
       return {
         feedback,
         quest,
-        events: eventRows.map(toEventRecord),
+        events,
         triage: triageRows.map(toTriageRecord),
         attachments: attachmentRows.map(toAttachmentRecord),
+        captures,
       }
+    },
+
+    async queryValues(filter: QueryValuesFilter = {}): Promise<QueryValuesResult> {
+      const targetQuestId = filter.quest ?? filter.questId ?? null
+      const rows = await sql<any[]>`
+        SELECT *
+        FROM hollerkit.values
+        WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
+          AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
+          AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
+          AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
+          AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
+          AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
+          AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
+          AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
+          AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
+        ORDER BY created_at DESC, id DESC
+      `
+      const records = rows.map(toValueRecord)
+      return buildQueryValuesResult(records, filter)
     },
 
     async triageFeedback(
@@ -1435,4 +1498,45 @@ function asPlainObject(value: unknown): Record<string, unknown> {
     return { ...(value as Record<string, unknown>) }
   }
   return {}
+}
+
+function asQuestCaptures(value: unknown): QuestCapture[] {
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      if (Array.isArray(parsed)) {
+        return normalizeQuestCaptures(parsed as QuestCapture[])
+      }
+    } catch {
+      return []
+    }
+  }
+  if (Array.isArray(value)) {
+    return normalizeQuestCaptures(value as QuestCapture[])
+  }
+  return []
+}
+
+function toValueRecord(row: any): ValueRecord {
+  return {
+    id: Number(row.id),
+    feedbackId: row.feedback_id,
+    questId: row.quest_id,
+    questVersion: Number(row.quest_version),
+    source: (row.source as ValueSource) ?? 'capture',
+    label: row.label,
+    value: Number(row.value),
+    unit: row.unit as QuestCaptureUnit,
+    event: row.event ?? null,
+    offsetSeconds:
+      row.offset_seconds !== null && row.offset_seconds !== undefined ? Number(row.offset_seconds) : null,
+    min: row.min !== null && row.min !== undefined ? Number(row.min) : null,
+    max: row.max !== null && row.max !== undefined ? Number(row.max) : null,
+    flags: asStringArray(row.flags) as CaptureFlag[],
+    build: row.build,
+    appVersion: row.app_version ?? null,
+    device: row.device ?? null,
+    os: row.os ?? null,
+    createdAt: toIso(row.created_at)!,
+  }
 }

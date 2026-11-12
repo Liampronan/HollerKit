@@ -19,6 +19,7 @@ import type {
   McpToolDefinition,
   QuestsPendingInput,
   QuestsRetirableInput,
+  ValuesQueryInput,
 } from './types.js'
 
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05'
@@ -81,6 +82,8 @@ export function createHollerKitMcpServer(
         return client.questsPending(args as unknown as QuestsPendingInput)
       case 'quests_retirable':
         return client.questsRetirable(args as QuestsRetirableInput)
+      case 'values_query':
+        return client.valuesQuery(args as ValuesQueryInput)
     }
   }
 

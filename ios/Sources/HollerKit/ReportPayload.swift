@@ -92,11 +92,20 @@ public struct HollerKitReportPayload: Sendable {
 
         let isoFormatter = ISO8601DateFormatter()
         let events: [FeedbackEventInput] = breadcrumbs.map { crumb in
-            var payload = crumb.metadata
+            var payload = FeedbackEventPayload(strings: crumb.metadata)
             payload["message"] = crumb.message
             payload["timestamp"] = isoFormatter.string(from: crumb.timestamp)
             if let category = crumb.category {
                 payload["category"] = category
+            }
+            if !crumb.fields.isEmpty {
+                payload.fields = crumb.fields
+            }
+            if let durationMs = crumb.durationMs {
+                payload.durationMs = durationMs
+            }
+            if let startOffset = crumb.startOffsetSeconds {
+                payload.startOffsetSeconds = startOffset
             }
             return FeedbackEventInput(
                 offsetSeconds: crumb.offsetSeconds ?? 0,
@@ -113,7 +122,7 @@ public struct HollerKitReportPayload: Sendable {
             )
         }
 
-        let request = FeedbackSubmissionRequest(
+        var request = FeedbackSubmissionRequest(
             id: id,
             kind: "report",
             build: resolvedBuild,
@@ -125,6 +134,7 @@ public struct HollerKitReportPayload: Sendable {
             metadata: enrichedMetadata,
             events: events
         )
+        request.clampToBudget()
 
         return (request, outboxAttachments)
     }
