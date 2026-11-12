@@ -6,6 +6,8 @@ export interface V1LimitConfig {
   maxAudioBytes: number
   maxVideoBytes: number
   maxMarks: number
+  maxBreadcrumbs: number
+  maxEventPayloadBytes: number
   uploadGrantTtlSeconds: number
   readUrlTtlSeconds: number
   acceptedImageMimeTypes: string[]
@@ -21,6 +23,8 @@ export const defaultV1Limits: V1LimitConfig = {
   maxAudioBytes: 10 * 1024 * 1024, // 10 MB (10,485,760 bytes)
   maxVideoBytes: 50 * 1024 * 1024, // 50 MB (52,428,800 bytes)
   maxMarks: 20, // 20 marks
+  maxBreadcrumbs: 500, // 500 breadcrumbs
+  maxEventPayloadBytes: 2 * 1024, // 2 KB (2,048 bytes) per event payload
   uploadGrantTtlSeconds: 10 * 60, // 10 minutes
   readUrlTtlSeconds: 60 * 60, // 1 hour
   acceptedImageMimeTypes: ['image/png', 'image/jpeg', 'image/heic', 'image/heif', 'image/webp'],

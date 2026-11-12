@@ -14,6 +14,9 @@ import type {
   QuestsRetirableInput,
   QuestsRetirableOutput,
   TriageStatus,
+  ValueGroupBy,
+  ValuesQueryInput,
+  ValuesQueryResult,
 } from './types.js'
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
@@ -43,6 +46,22 @@ const FEEDBACK_GET_ALLOWED_KEYS = new Set(['id'])
 const FEEDBACK_TRIAGE_ALLOWED_KEYS = new Set(['id', 'status', 'summary', 'links', 'actor'])
 const QUESTS_PENDING_ALLOWED_KEYS = new Set(['build'])
 const QUESTS_RETIRABLE_ALLOWED_KEYS = new Set(['area'])
+const VALUES_QUERY_ALLOWED_KEYS = new Set([
+  'quest',
+  'questId',
+  'version',
+  'label',
+  'build',
+  'appVersion',
+  'device',
+  'os',
+  'source',
+  'since',
+  'groupBy',
+  'limit',
+])
+const VALID_VALUE_SOURCES = new Set(['capture', 'answer'])
+const VALID_VALUE_GROUP_BY = new Set(['build', 'appVersion', 'device', 'os', 'version', 'label'])
 
 /**
  * Structured error thrown by HollerKit MCP client and tool validation routines.
@@ -163,6 +182,7 @@ export interface HollerKitMcpClient {
   feedbackTriage(input: FeedbackTriageInput): Promise<FeedbackTriageOutput>
   questsPending(input: QuestsPendingInput): Promise<QuestsPendingOutput>
   questsRetirable(input?: QuestsRetirableInput): Promise<QuestsRetirableOutput>
+  valuesQuery(input?: ValuesQueryInput): Promise<ValuesQueryResult>
 }
 
 /**
@@ -536,6 +556,80 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
       }
 
       return raw as unknown as QuestsRetirableOutput
+    },
+
+    /**
+     * Queries aggregated measurements and quest captures across feedback runs and builds (`GET /v1/values`).
+     */
+    async valuesQuery(input: ValuesQueryInput = {}): Promise<ValuesQueryResult> {
+      const normalized = requireArgumentObject(input, 'values_query', VALUES_QUERY_ALLOWED_KEYS)
+
+      const quest = requireOptionalString(normalized.quest ?? normalized.questId, 'quest')
+      const label = requireOptionalString(normalized.label, 'label')
+      const build = requireOptionalString(normalized.build, 'build')
+      const appVersion = requireOptionalString(normalized.appVersion, 'appVersion')
+      const device = requireOptionalString(normalized.device, 'device')
+      const os = requireOptionalString(normalized.os, 'os')
+      const since = requireOptionalString(normalized.since, 'since')
+
+      let source: 'capture' | 'answer' | undefined
+      if (normalized.source !== undefined) {
+        if (typeof normalized.source !== 'string' || !VALID_VALUE_SOURCES.has(normalized.source)) {
+          throw new HollerKitMcpError(400, 'invalid_arguments', 'source must be "capture" or "answer".')
+        }
+        source = normalized.source as 'capture' | 'answer'
+      }
+
+      let groupBy: ValueGroupBy | undefined
+      if (normalized.groupBy !== undefined) {
+        if (typeof normalized.groupBy !== 'string' || !VALID_VALUE_GROUP_BY.has(normalized.groupBy)) {
+          throw new HollerKitMcpError(
+            400,
+            'invalid_arguments',
+            'groupBy must be one of build, appVersion, device, os, version, label.',
+          )
+        }
+        groupBy = normalized.groupBy as ValueGroupBy
+      }
+
+      let version: number | undefined
+      if (normalized.version !== undefined) {
+        if (typeof normalized.version !== 'number' || !Number.isInteger(normalized.version)) {
+          throw new HollerKitMcpError(400, 'invalid_arguments', 'version must be an integer.')
+        }
+        version = normalized.version
+      }
+
+      let limit: number | undefined
+      if (normalized.limit !== undefined) {
+        if (
+          typeof normalized.limit !== 'number' ||
+          !Number.isInteger(normalized.limit) ||
+          normalized.limit < 1 ||
+          normalized.limit > 500
+        ) {
+          throw new HollerKitMcpError(400, 'invalid_arguments', 'limit must be an integer between 1 and 500.')
+        }
+        limit = normalized.limit
+      }
+
+      const raw = await requestJson('GET', '/v1/values', {
+        query: {
+          quest,
+          label,
+          build,
+          appVersion,
+          device,
+          os,
+          source,
+          since,
+          groupBy,
+          version,
+          limit,
+        },
+      })
+
+      return raw as unknown as ValuesQueryResult
     },
   }
 }

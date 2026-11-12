@@ -206,15 +206,163 @@ public struct UploadGrantResponse: Codable, Equatable, Sendable {
     }
 }
 
+private struct DynamicCodingKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        self.intValue = nil
+    }
+
+    init?(intValue: Int) {
+        self.stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+public struct FeedbackEventPayload: Codable, Equatable, Sendable, ExpressibleByDictionaryLiteral {
+    public var strings: [String: String]
+    public var fields: [String: HollerKitFieldValue]?
+    public var durationMs: Double?
+    public var startOffsetSeconds: Double?
+
+    public init() {
+        self.strings = [:]
+        self.fields = nil
+        self.durationMs = nil
+        self.startOffsetSeconds = nil
+    }
+
+    public init(
+        strings: [String: String],
+        fields: [String: HollerKitFieldValue]? = nil,
+        durationMs: Double? = nil,
+        startOffsetSeconds: Double? = nil
+    ) {
+        self.strings = strings
+        self.fields = fields
+        self.durationMs = durationMs
+        self.startOffsetSeconds = startOffsetSeconds
+    }
+
+    public init(dictionaryLiteral elements: (String, String)...) {
+        var dict: [String: String] = [:]
+        for (k, v) in elements {
+            dict[k] = v
+        }
+        self.strings = dict
+        self.fields = nil
+        self.durationMs = nil
+        self.startOffsetSeconds = nil
+    }
+
+    public subscript(key: String) -> String? {
+        get { strings[key] }
+        set { strings[key] = newValue }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DynamicCodingKey.self)
+        var strings: [String: String] = [:]
+        var fields: [String: HollerKitFieldValue]?
+        var durationMs: Double?
+        var startOffsetSeconds: Double?
+
+        for key in container.allKeys {
+            if key.stringValue == "fields" {
+                fields = try? container.decode([String: HollerKitFieldValue].self, forKey: key)
+            } else if key.stringValue == "durationMs" {
+                durationMs = try? container.decode(Double.self, forKey: key)
+            } else if key.stringValue == "startOffsetSeconds" {
+                startOffsetSeconds = try? container.decode(Double.self, forKey: key)
+            } else if let str = try? container.decode(String.self, forKey: key) {
+                strings[key.stringValue] = str
+            }
+        }
+        self.strings = strings
+        self.fields = fields
+        self.durationMs = durationMs
+        self.startOffsetSeconds = startOffsetSeconds
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: DynamicCodingKey.self)
+        for (k, v) in strings {
+            if let key = DynamicCodingKey(stringValue: k) {
+                try container.encode(v, forKey: key)
+            }
+        }
+        if let fields, !fields.isEmpty, let key = DynamicCodingKey(stringValue: "fields") {
+            try container.encode(fields, forKey: key)
+        }
+        if let durationMs, let key = DynamicCodingKey(stringValue: "durationMs") {
+            try container.encode(durationMs, forKey: key)
+        }
+        if let startOffsetSeconds, let key = DynamicCodingKey(stringValue: "startOffsetSeconds") {
+            try container.encode(startOffsetSeconds, forKey: key)
+        }
+    }
+
+    public mutating func clampToSize(maxBytes: Int = 2048) {
+        var iterations = 0
+        while iterations < 10, let data = try? JSONEncoder().encode(self), data.count > maxBytes {
+            iterations += 1
+            let overhead = data.count - maxBytes
+            var trimmedSomething = false
+
+            if let longest = strings.max(by: { $0.value.count < $1.value.count }), longest.value.count > 16 {
+                let trim = min(longest.value.count - 16, max(32, overhead + 24))
+                let newLen = max(16, longest.value.count - trim)
+                strings[longest.key] = String(longest.value.prefix(newLen)) + "...[truncated]"
+                trimmedSomething = true
+            }
+
+            if let curFields = fields {
+                var longestFieldKey: String?
+                var longestFieldCount = 0
+                for (k, val) in curFields {
+                    if case .string(let s) = val, s.count > longestFieldCount {
+                        longestFieldKey = k
+                        longestFieldCount = s.count
+                    }
+                }
+                if let k = longestFieldKey, longestFieldCount > 16 {
+                    let trim = min(longestFieldCount - 16, max(32, overhead + 24))
+                    let newLen = max(16, longestFieldCount - trim)
+                    if case .string(let s) = curFields[k] {
+                        var updated = curFields
+                        updated[k] = .string(String(s.prefix(newLen)) + "...[truncated]")
+                        fields = updated
+                        trimmedSomething = true
+                    }
+                }
+            }
+
+            if !trimmedSomething {
+                break
+            }
+        }
+    }
+}
+
 public struct FeedbackEventInput: Codable, Equatable, Sendable {
     public var offsetSeconds: Double
     public var kind: String
-    public var payload: [String: String]
+    public var payload: FeedbackEventPayload
 
-    public init(offsetSeconds: Double = 0, kind: String, payload: [String: String] = [:]) {
+    public init(offsetSeconds: Double = 0, kind: String, payload: FeedbackEventPayload = FeedbackEventPayload()) {
         self.offsetSeconds = offsetSeconds
         self.kind = kind
         self.payload = payload
+        self.payload.clampToSize(maxBytes: 2048)
+    }
+
+    public init(offsetSeconds: Double = 0, kind: String, payload: [String: String]) {
+        self.offsetSeconds = offsetSeconds
+        self.kind = kind
+        self.payload = FeedbackEventPayload(strings: payload)
+        self.payload.clampToSize(maxBytes: 2048)
     }
 }
 

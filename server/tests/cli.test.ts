@@ -130,6 +130,81 @@ test('CLI: quests validate succeeds on valid manifest and fails on invalid manif
     assert.ok(demoOut.some((line) => line.startsWith('checkout-promo-math\t')))
     assert.ok(demoOut.some((line) => line.startsWith('profile-avatar-upload\t')))
 
+    // Valid manifest with quest captures
+    const capturePath = join(tempDir, 'capture-quests.json')
+    await writeFile(
+      capturePath,
+      JSON.stringify(
+        {
+          version: 1,
+          quests: [
+            {
+              id: 'share-time-to-send',
+              title: 'Measure first video share',
+              area: 'share',
+              steps: ['Tap share'],
+              expect: ['Share sheet ready'],
+              capture: [
+                {
+                  event: 'share.render',
+                  value: 'durationMs',
+                  unit: 'ms',
+                  label: 'First render',
+                  where: { cached: false },
+                  min: 10,
+                  max: 5000,
+                },
+              ],
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    )
+    const captureOut: string[] = []
+    const captureCode = await runCli(['quests', 'validate', capturePath], {
+      stdout: (l) => captureOut.push(l),
+      stderr: (l) => assert.fail(`Unexpected stderr: ${l}`),
+    })
+    assert.equal(captureCode, 0)
+    assert.ok(captureOut.some((l) => l.startsWith('share-time-to-send\t')))
+
+    // Invalid manifest (capture min > max)
+    const badRangePath = join(tempDir, 'bad-range-quests.json')
+    await writeFile(
+      badRangePath,
+      JSON.stringify({
+        version: 1,
+        quests: [
+          {
+            id: 'bad-range-quest',
+            title: 'Bad Range',
+            area: 'share',
+            steps: ['Step 1'],
+            expect: ['Expect 1'],
+            capture: [
+              {
+                event: 'render',
+                value: 'durationMs',
+                unit: 'ms',
+                label: 'Bad',
+                min: 500,
+                max: 100,
+              },
+            ],
+          },
+        ],
+      }),
+    )
+    const errBadRange: string[] = []
+    const badRangeCode = await runCli(['quests', 'validate', badRangePath], {
+      stdout: () => {},
+      stderr: (l) => errBadRange.push(l),
+    })
+    assert.equal(badRangeCode, 1)
+    assert.ok(errBadRange.some((l) => l.includes('cannot exceed max')))
+
     // Invalid manifest (missing expect array)
     const invalidPath = join(tempDir, 'invalid-quests.json')
     await writeFile(
@@ -399,6 +474,106 @@ test('CLI: quests sync, conformance --server, keys create/revoke, and migrations
     assert.deepEqual(updatedDetail?.feedback.links, [
       'https://github.com/Liampronan/HollerKit/issues/88',
     ])
+
+    // 6. hollerkit values
+    await store.syncQuests({
+      version: 1,
+      quests: [
+        {
+          id: 'cli-quest-values',
+          title: 'CLI Values Quest',
+          area: 'cli',
+          steps: ['Run command'],
+          expect: ['Output matches'],
+          capture: [
+            {
+              event: 'cli.exec',
+              value: 'durationMs',
+              unit: 'ms',
+              label: 'Execution time',
+            },
+          ],
+        },
+      ],
+    })
+    await store.createFeedback({
+      id: '22222222-3333-4444-8555-666666666666',
+      kind: 'quest_run',
+      questId: 'cli-quest-values',
+      questVersion: 1,
+      result: 'pass',
+      build: 'cli-build-1',
+      submitterId: 'tester-cli',
+      events: [
+        {
+          kind: 'breadcrumb',
+          offsetSeconds: 0.5,
+          payload: { message: 'cli.exec', durationMs: 120 },
+        },
+      ],
+    })
+
+    const valuesJsonOut: string[] = []
+    const valuesJsonCode = await runCli(
+      [
+        'values',
+        '--server',
+        httpServer.baseUrl,
+        '--key',
+        agentKey,
+        '--quest',
+        'cli-quest-values',
+        '--label',
+        'Execution time',
+        '--groupBy',
+        'build',
+        '--json',
+      ],
+      {
+        stdout: (l) => valuesJsonOut.push(l),
+        stderr: (l) => assert.fail(`Unexpected stderr: ${l}`),
+        fetchImpl: fetch,
+      },
+    )
+    assert.equal(valuesJsonCode, 0)
+    const valuesParsed = JSON.parse(valuesJsonOut.join('\n'))
+    assert.equal(valuesParsed.ok, true)
+    assert.equal(valuesParsed.n, 1)
+    assert.equal(valuesParsed.median, 120)
+    assert.equal(valuesParsed.unit, 'ms')
+
+    const valuesTextOut: string[] = []
+    const valuesTextCode = await runCli(
+      [
+        'values',
+        '--server',
+        httpServer.baseUrl,
+        '--key',
+        agentKey,
+        '--quest',
+        'cli-quest-values',
+      ],
+      {
+        stdout: (l) => valuesTextOut.push(l),
+        stderr: (l) => assert.fail(`Unexpected stderr: ${l}`),
+        fetchImpl: fetch,
+      },
+    )
+    assert.equal(valuesTextCode, 0)
+    assert.ok(valuesTextOut.some((l) => l.includes('Quest: cli-quest-values')))
+    assert.ok(valuesTextOut.some((l) => l.includes('n: 1')))
+
+    const valuesDbOut: string[] = []
+    const valuesDbCode = await runCli(
+      ['values', '--db', 'postgres://mock/db', '--quest', 'cli-quest-values'],
+      {
+        stdout: (l) => valuesDbOut.push(l),
+        stderr: (l) => assert.fail(`Unexpected stderr: ${l}`),
+        storeFactory: () => store,
+      },
+    )
+    assert.equal(valuesDbCode, 0)
+    assert.ok(valuesDbOut.some((l) => l.includes('Quest: cli-quest-values')))
   } finally {
     await httpServer.close()
     await rm(tempDir, { recursive: true, force: true })

@@ -32,12 +32,18 @@ import {
   type FeedbackEventInput,
   type FeedbackKind,
   type HollerKitStore,
+  type QueryValuesFilter,
+  type QuestCapture,
+  type QuestCaptureUnit,
   type QuestDefinitionInput,
+  type QuestFieldScalar,
   type QuestRecordMode,
   type QuestResult,
   type QuestStatus,
   type Scope,
   type TriageStatus,
+  type ValueGroupBy,
+  type ValueSource,
 } from './store.js'
 
 export {
@@ -139,6 +145,10 @@ const VALID_FEEDBACK_KINDS = new Set<FeedbackKind>(['report', 'quest_run'])
 const VALID_QUEST_RESULTS = new Set<QuestResult>(['pass', 'fail', 'unsure', 'abandoned'])
 const VALID_TRIAGE_STATUSES = new Set<TriageStatus>(['new', 'triaged', 'resolved', 'wontfix', 'duplicate'])
 const VALID_ATTACHMENT_KINDS = new Set<AttachmentKind>(['image', 'audio', 'video', 'keyframe', 'mark'])
+const VALID_CAPTURE_UNITS = new Set<QuestCaptureUnit>(['ms', 's', 'bytes', 'count', 'percent', 'none'])
+const VALID_CAPTURE_KEYS = new Set<string>(['event', 'value', 'unit', 'label', 'where', 'min', 'max'])
+const VALID_VALUE_SOURCES = new Set<ValueSource>(['capture', 'answer'])
+const VALID_VALUE_GROUP_BY = new Set<ValueGroupBy>(['build', 'appVersion', 'device', 'os', 'version', 'label'])
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
@@ -449,6 +459,7 @@ export function createHollerKitServer(
           events: detail.events,
           triage: detail.triage,
           attachments: signedAttachments,
+          captures: detail.captures ?? [],
         })
       }
 
@@ -557,6 +568,66 @@ export function createHollerKitServer(
         throw new HollerKitError(405, 'method_not_allowed', 'Expected GET or PUT.')
       }
 
+      // 9. GET /v1/values
+      if (routePath === '/v1/values') {
+        if (method !== 'GET') {
+          throw new HollerKitError(405, 'method_not_allowed', 'Expected GET.')
+        }
+        await requireAuth(request, authenticators, ['agent:read'])
+        const questParam = url.searchParams.get('quest') ?? url.searchParams.get('questId')
+        const quest = questParam && questParam.trim().length > 0 ? questParam.trim() : undefined
+        const version = parseOptionalNullableInteger(url.searchParams.get('version'), 'version') ?? undefined
+        const labelParam = url.searchParams.get('label')
+        const label = labelParam && labelParam.trim().length > 0 ? labelParam.trim() : undefined
+        const buildParam = url.searchParams.get('build')
+        const build = buildParam && buildParam.trim().length > 0 ? buildParam.trim() : undefined
+        const appVersionParam = url.searchParams.get('appVersion')
+        const appVersion = appVersionParam && appVersionParam.trim().length > 0 ? appVersionParam.trim() : undefined
+        const deviceParam = url.searchParams.get('device')
+        const device = deviceParam && deviceParam.trim().length > 0 ? deviceParam.trim() : undefined
+        const osParam = url.searchParams.get('os')
+        const os = osParam && osParam.trim().length > 0 ? osParam.trim() : undefined
+        const sourceParam = url.searchParams.get('source')
+        let source: ValueSource | undefined
+        if (sourceParam !== null && sourceParam !== '') {
+          if (!VALID_VALUE_SOURCES.has(sourceParam as ValueSource)) {
+            throw new HollerKitError(400, 'invalid_filter', `Invalid source filter: ${sourceParam}.`)
+          }
+          source = sourceParam as ValueSource
+        }
+        const sinceParam = url.searchParams.get('since')
+        const since = sinceParam && sinceParam.trim().length > 0 ? sinceParam.trim() : undefined
+        const groupByParam = url.searchParams.get('groupBy')
+        let groupBy: ValueGroupBy | undefined
+        if (groupByParam !== null && groupByParam !== '') {
+          if (!VALID_VALUE_GROUP_BY.has(groupByParam as ValueGroupBy)) {
+            throw new HollerKitError(400, 'invalid_filter', `Invalid groupBy filter: ${groupByParam}.`)
+          }
+          groupBy = groupByParam as ValueGroupBy
+        }
+        const limitParam = url.searchParams.get('limit')
+        const limit = parseOptionalNullableInteger(limitParam, 'limit') ?? undefined
+
+        const result = await options.store.queryValues({
+          quest,
+          version,
+          label,
+          build,
+          appVersion,
+          device,
+          os,
+          source,
+          since,
+          groupBy,
+          limit,
+        })
+
+        return protocolJsonResponse({
+          ok: true,
+          ...result,
+        })
+      }
+
       // 10. POST /v1/webhooks/github
       if (routePath === '/v1/webhooks/github') {
         if (!gitHubWebhookHandler) {
@@ -586,7 +657,7 @@ function normalizeV1Path(pathname: string, basePath?: string): string | null {
     }
   }
   const routeMatch = cleaned.match(
-    /\/v1(?=\/(?:builds|uploads|feedback|quests|webhooks)(?:\/|$)|$).*$/,
+    /\/v1(?=\/(?:builds|uploads|feedback|quests|webhooks|values)(?:\/|$)|$).*$/,
   )
   if (routeMatch) {
     return routeMatch[0]
@@ -843,6 +914,13 @@ function parseFeedbackCreateBody(body: Record<string, unknown>, limits: V1LimitC
                 throw new HollerKitError(400, 'invalid_events', `events[${i}].payload must be an object.`)
               })()
           : {}
+      if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > limits.maxEventPayloadBytes) {
+        throw new HollerKitError(
+          413,
+          'payload_too_large',
+          `events[${i}].payload exceeds maximum size of ${limits.maxEventPayloadBytes} bytes.`,
+        )
+      }
       events.push({
         kind: item.kind.trim(),
         offsetSeconds,
@@ -905,6 +983,15 @@ function parseFeedbackCreateBody(body: Record<string, unknown>, limits: V1LimitC
   const markAttachmentsCount = attachments.filter((a) => a.kind === 'mark').length
   if (markEventsCount > limits.maxMarks || markAttachmentsCount > limits.maxMarks) {
     throw new HollerKitError(413, 'too_many_marks', `Mark count exceeds limit (${limits.maxMarks}).`)
+  }
+
+  const breadcrumbCount = events.filter((e) => e.kind === 'breadcrumb').length
+  if (breadcrumbCount > limits.maxBreadcrumbs) {
+    throw new HollerKitError(
+      413,
+      'too_many_breadcrumbs',
+      `Breadcrumb count (${breadcrumbCount}) exceeds limit (${limits.maxBreadcrumbs}).`,
+    )
   }
 
   return {
@@ -1063,6 +1150,84 @@ export function parseQuestDefinitionArray(value: unknown, field: string): QuestD
       }
     }
 
+    let capture: QuestCapture[] | undefined
+    if (item.capture !== undefined && item.capture !== null) {
+      if (!Array.isArray(item.capture)) {
+        throw new HollerKitError(400, 'invalid_capture', `${field}[${idx}].capture must be an array.`)
+      }
+      capture = item.capture.map((c, cIdx) => {
+        const cPath = `${field}[${idx}].capture[${cIdx}]`
+        if (!isPlainObject(c)) {
+          throw new HollerKitError(400, 'invalid_capture', `${cPath} must be an object.`)
+        }
+        for (const k of Object.keys(c)) {
+          if (!VALID_CAPTURE_KEYS.has(k)) {
+            throw new HollerKitError(400, 'invalid_capture', `${cPath} has unknown key: "${k}".`)
+          }
+        }
+        const event = parseRequiredString(c.event, `${cPath}.event`)
+        const label = parseRequiredString(c.label, `${cPath}.label`)
+        const value = parseRequiredString(c.value, `${cPath}.value`)
+        let unit: QuestCaptureUnit = 'none'
+        if (c.unit !== undefined && c.unit !== null) {
+          if (typeof c.unit !== 'string' || !VALID_CAPTURE_UNITS.has(c.unit as QuestCaptureUnit)) {
+            throw new HollerKitError(
+              400,
+              'invalid_capture_unit',
+              `${cPath}.unit must be one of ${Array.from(VALID_CAPTURE_UNITS).join(', ')}.`,
+            )
+          }
+          unit = c.unit as QuestCaptureUnit
+        }
+
+        let where: Record<string, QuestFieldScalar> | null = null
+        if (c.where !== undefined && c.where !== null) {
+          if (!isPlainObject(c.where)) {
+            throw new HollerKitError(400, 'invalid_capture_where', `${cPath}.where must be an object.`)
+          }
+          where = {}
+          for (const [wK, wV] of Object.entries(c.where)) {
+            if (typeof wV !== 'string' && typeof wV !== 'number' && typeof wV !== 'boolean') {
+              throw new HollerKitError(
+                400,
+                'invalid_capture_where',
+                `${cPath}.where.${wK} must be a string, number, or boolean.`,
+              )
+            }
+            where[wK] = wV
+          }
+        }
+
+        let min: number | null = null
+        if (c.min !== undefined && c.min !== null) {
+          min = parseFiniteNumber(c.min, `${cPath}.min`)
+        }
+
+        let max: number | null = null
+        if (c.max !== undefined && c.max !== null) {
+          max = parseFiniteNumber(c.max, `${cPath}.max`)
+        }
+
+        if (min !== null && max !== null && min > max) {
+          throw new HollerKitError(
+            400,
+            'invalid_capture_range',
+            `${cPath}.min (${min}) cannot exceed max (${max}).`,
+          )
+        }
+
+        return {
+          event,
+          value,
+          unit,
+          label,
+          where,
+          min,
+          max,
+        }
+      })
+    }
+
     return {
       id,
       contentHash,
@@ -1074,6 +1239,7 @@ export function parseQuestDefinitionArray(value: unknown, field: string): QuestD
       needs,
       record,
       start,
+      capture,
       source,
     }
   })

@@ -953,5 +953,265 @@ export async function runConformanceSuite(
     assert.equal(unsureAfterTriage.latestRun.triageStatus, 'wontfix')
   })
 
+  // 12. Quest captures and measured values across runs and builds
+  await step(
+    'quest captures match breadcrumbs, persist to values, query via GET /v1/values with groupBy, and enforce payload cap/breadcrumbs limits',
+    async () => {
+      const questWithCapture: QuestDefinitionInput = {
+        id: 'share-video-time-to-send',
+        title: 'Time to send first video share',
+        area: 'share',
+        steps: ['Tap share', 'Wait for video render'],
+        expect: ['Share sheet ready'],
+        capture: [
+          {
+            event: 'share.render',
+            value: 'durationMs',
+            unit: 'ms',
+            label: 'First render',
+            where: { cached: false },
+            min: 10,
+            max: 5000,
+          },
+          {
+            event: 'share.encode',
+            value: 'bytes',
+            unit: 'bytes',
+            label: 'Video payload size',
+          },
+        ],
+      }
+
+      // Sync quest with capture definition
+      const syncRes = await requestJson('/v1/quests', {
+        method: 'PUT',
+        token: options.questsWriteKey,
+        body: {
+          version: 1,
+          quests: [questWithCapture],
+        },
+      })
+      assert.equal(syncRes.status, 200)
+
+      // Test validation: invalid capture unit rejected with 400
+      const invalidUnitRes = await requestJson('/v1/quests', {
+        method: 'PUT',
+        token: options.questsWriteKey,
+        body: {
+          version: 1,
+          quests: [
+            {
+              ...questWithCapture,
+              id: 'invalid-unit-quest',
+              capture: [
+                {
+                  event: 'share.render',
+                  value: 'durationMs',
+                  unit: 'lightyears',
+                  label: 'Bad unit',
+                },
+              ],
+            },
+          ],
+        },
+      })
+      assert.equal(invalidUnitRes.status, 400)
+      assert.equal(invalidUnitRes.body.error?.code, 'invalid_capture_unit')
+
+      // Test validation: min > max rejected with 400
+      const invalidRangeRes = await requestJson('/v1/quests', {
+        method: 'PUT',
+        token: options.questsWriteKey,
+        body: {
+          version: 1,
+          quests: [
+            {
+              ...questWithCapture,
+              id: 'invalid-range-quest',
+              capture: [
+                {
+                  event: 'share.render',
+                  value: 'durationMs',
+                  unit: 'ms',
+                  label: 'Bad range',
+                  min: 500,
+                  max: 100,
+                },
+              ],
+            },
+          ],
+        },
+      })
+      assert.equal(invalidRangeRes.status, 400)
+      assert.equal(invalidRangeRes.body.error?.code, 'invalid_capture_range')
+
+      // Run 1: build-101 (render: 250ms, encode: 102400 bytes)
+      const runId1 = randomUUID()
+      const submitRes1 = await requestJson('/v1/feedback', {
+        method: 'POST',
+        token: options.testerToken,
+        body: {
+          id: runId1,
+          kind: 'quest_run',
+          questId: questWithCapture.id,
+          questVersion: 1,
+          result: 'pass',
+          build: 'build-101',
+          appVersion: '1.0.1',
+          device: 'iPhone16,1',
+          os: 'iOS 18.2',
+          events: [
+            {
+              kind: 'breadcrumb',
+              offsetSeconds: 1.2,
+              payload: {
+                message: 'share.render',
+                durationMs: 250,
+                fields: { cached: false },
+              },
+            },
+            {
+              kind: 'breadcrumb',
+              offsetSeconds: 2.5,
+              payload: {
+                message: 'share.encode',
+                fields: { bytes: 102400 },
+              },
+            },
+          ],
+        },
+      })
+      assert.equal(submitRes1.status, 201)
+
+      // Run 2: build-102 (render: 150ms)
+      const runId2 = randomUUID()
+      const submitRes2 = await requestJson('/v1/feedback', {
+        method: 'POST',
+        token: options.testerToken,
+        body: {
+          id: runId2,
+          kind: 'quest_run',
+          questId: questWithCapture.id,
+          questVersion: 1,
+          result: 'pass',
+          build: 'build-102',
+          appVersion: '1.0.2',
+          device: 'iPhone16,2',
+          os: 'iOS 18.2',
+          events: [
+            {
+              kind: 'breadcrumb',
+              offsetSeconds: 0.8,
+              payload: {
+                message: 'share.render',
+                durationMs: 150,
+                fields: { cached: false },
+              },
+            },
+          ],
+        },
+      })
+      assert.equal(submitRes2.status, 201)
+
+      // Feedback detail includes evaluated captures with flags
+      const detailRes = await requestJson(`/v1/feedback/${runId1}`, {
+        method: 'GET',
+        token: options.agentKey,
+      })
+      assert.equal(detailRes.status, 200)
+      assert.ok(Array.isArray(detailRes.body.captures))
+      assert.equal(detailRes.body.captures.length, 2)
+      const firstRender = detailRes.body.captures.find((c: any) => c.label === 'First render')
+      assert.ok(firstRender)
+      assert.equal(firstRender.value, 250)
+      assert.equal(firstRender.unit, 'ms')
+      assert.equal(firstRender.matched, true)
+      assert.deepEqual(firstRender.flags, [])
+
+      // Missing capture on Run 2 flagged as missing
+      const detailRes2 = await requestJson(`/v1/feedback/${runId2}`, {
+        method: 'GET',
+        token: options.agentKey,
+      })
+      assert.equal(detailRes2.status, 200)
+      const encodeCapture = detailRes2.body.captures.find((c: any) => c.label === 'Video payload size')
+      assert.ok(encodeCapture)
+      assert.equal(encodeCapture.matched, false)
+      assert.deepEqual(encodeCapture.flags, ['missing'])
+
+      // GET /v1/values returns n, median, p90, min, max, summary, and grouped statistics
+      const valuesRes = await requestJson(
+        `/v1/values?quest=${questWithCapture.id}&label=First render&groupBy=build`,
+        {
+          method: 'GET',
+          token: options.agentKey,
+        },
+      )
+      assert.equal(valuesRes.status, 200)
+      assert.equal(valuesRes.body.ok, true)
+      assert.equal(valuesRes.body.quest, questWithCapture.id)
+      assert.equal(valuesRes.body.label, 'First render')
+      assert.equal(valuesRes.body.n, 2)
+      assert.equal(valuesRes.body.min, 150)
+      assert.equal(valuesRes.body.max, 250)
+      assert.equal(valuesRes.body.median, 200)
+      assert.equal(valuesRes.body.unit, 'ms')
+      assert.equal(valuesRes.body.groups.length, 2)
+      const g101 = valuesRes.body.groups.find((g: any) => g.build === 'build-101')
+      const g102 = valuesRes.body.groups.find((g: any) => g.build === 'build-102')
+      assert.equal(g101?.n, 1)
+      assert.equal(g101?.median, 250)
+      assert.equal(g102?.n, 1)
+      assert.equal(g102?.median, 150)
+
+      // Test limits: maxEventPayloadBytes rejected with 413 payload_too_large
+      const oversizedPayloadRes = await requestJson('/v1/feedback', {
+        method: 'POST',
+        token: options.testerToken,
+        body: {
+          id: randomUUID(),
+          kind: 'report',
+          build: 'build-101',
+          events: [
+            {
+              kind: 'breadcrumb',
+              offsetSeconds: 0,
+              payload: {
+                message: 'huge.event',
+                fields: {
+                  blob: 'x'.repeat(limits.maxEventPayloadBytes + 100),
+                },
+              },
+            },
+          ],
+        },
+      })
+      assert.equal(oversizedPayloadRes.status, 413)
+      assert.equal(oversizedPayloadRes.body.error?.code, 'payload_too_large')
+
+      // Test limits: maxBreadcrumbs rejected with 413 too_many_breadcrumbs
+      const excessiveBreadcrumbs: any[] = []
+      for (let i = 0; i < limits.maxBreadcrumbs + 1; i++) {
+        excessiveBreadcrumbs.push({
+          kind: 'breadcrumb',
+          offsetSeconds: i * 0.1,
+          payload: { message: `crumb-${i}` },
+        })
+      }
+      const tooManyBreadcrumbsRes = await requestJson('/v1/feedback', {
+        method: 'POST',
+        token: options.testerToken,
+        body: {
+          id: randomUUID(),
+          kind: 'report',
+          build: 'build-101',
+          events: excessiveBreadcrumbs,
+        },
+      })
+      assert.equal(tooManyBreadcrumbsRes.status, 413)
+      assert.equal(tooManyBreadcrumbsRes.body.error?.code, 'too_many_breadcrumbs')
+    },
+  )
+
   return { ok: true, steps }
 }

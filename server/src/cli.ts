@@ -361,6 +361,108 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
       return 1
     }
 
+    if (group === 'values') {
+      const allArgs = subcommand ? [subcommand, ...rest] : rest
+      const { flags } = parseFlags(allArgs)
+      const serverUrl = flags.get('server') ?? process.env.HOLLERKIT_SERVER_URL ?? process.env.HOLLERKIT_SERVER
+      const apiKey = flags.get('key') ?? process.env.HOLLERKIT_API_KEY ?? process.env.HOLLERKIT_KEY
+      const dbUrl = flags.get('db') ?? process.env.DATABASE_URL ?? process.env.HOLLERKIT_DB_POOLER_URL
+      const quest = flags.get('quest') ?? flags.get('questId')
+      const label = flags.get('label')
+      const groupBy = flags.get('groupBy') as any
+      const build = flags.get('build')
+      const appVersion = flags.get('appVersion')
+      const device = flags.get('device')
+      const os = flags.get('os')
+      const source = flags.get('source') as any
+      const since = flags.get('since')
+      const versionRaw = flags.get('version')
+      const version = versionRaw ? Number(versionRaw) : undefined
+      const limitRaw = flags.get('limit')
+      const limit = limitRaw ? Number(limitRaw) : undefined
+      const isJson = flags.has('json')
+
+      let queryResult: any
+      if (serverUrl) {
+        const url = new URL(`${serverUrl.replace(/\/+$/, '')}/v1/values`)
+        if (quest) url.searchParams.set('quest', quest)
+        if (label) url.searchParams.set('label', label)
+        if (groupBy) url.searchParams.set('groupBy', groupBy)
+        if (build) url.searchParams.set('build', build)
+        if (appVersion) url.searchParams.set('appVersion', appVersion)
+        if (device) url.searchParams.set('device', device)
+        if (os) url.searchParams.set('os', os)
+        if (source) url.searchParams.set('source', source)
+        if (since) url.searchParams.set('since', since)
+        if (version !== undefined) url.searchParams.set('version', String(version))
+        if (limit !== undefined) url.searchParams.set('limit', String(limit))
+
+        const headers: Record<string, string> = {
+          'hollerkit-protocol': '1',
+        }
+        if (apiKey) {
+          headers['authorization'] = `Bearer ${apiKey}`
+        }
+        const resp = await fetchFn(url.toString(), {
+          method: 'GET',
+          headers,
+        })
+        if (!resp.ok) {
+          const errBody = await resp.text()
+          stderr(`Error (${resp.status}): ${errBody}`)
+          return 1
+        }
+        queryResult = await resp.json()
+      } else if (dbUrl) {
+        const store = createStore(dbUrl)
+        try {
+          queryResult = await store.queryValues({
+            quest,
+            version,
+            label,
+            build,
+            appVersion,
+            device,
+            os,
+            source,
+            since,
+            groupBy,
+            limit,
+          })
+        } finally {
+          await store.close?.()
+        }
+      } else {
+        stderr(
+          'Error: Usage: hollerkit values [--server <url> --key <key>] or [--db <url>] [--quest <id>] [--label <label>] [--groupBy <group>] [--build <build>] [--json]',
+        )
+        return 1
+      }
+
+      if (isJson) {
+        stdout(JSON.stringify(queryResult, null, 2))
+        return 0
+      }
+
+      const summary = queryResult.summary ?? queryResult
+      stdout(
+        `Quest: ${queryResult.quest ?? 'all'}\tLabel: ${queryResult.label ?? 'all'}\tUnit: ${summary.unit ?? 'none'}`,
+      )
+      stdout(
+        `n: ${summary.n}\tmedian: ${summary.median ?? '-'}\tp90: ${summary.p90 ?? '-'}\tmin: ${summary.min ?? '-'}\tmax: ${summary.max ?? '-'}`,
+      )
+
+      if (queryResult.groups && queryResult.groups.length > 0) {
+        stdout(`\nGrouped by ${queryResult.groupBy}:`)
+        for (const g of queryResult.groups) {
+          stdout(
+            `  ${g.key}:\tn=${g.n}\tmedian=${g.median ?? '-'}\tp90=${g.p90 ?? '-'}\tmin=${g.min ?? '-'}\tmax=${g.max ?? '-'}`,
+          )
+        }
+      }
+      return 0
+    }
+
     stderr(`Error: Unknown command "${group}". Run "hollerkit --help" for usage.`)
     return 1
   } catch (error) {
@@ -412,6 +514,7 @@ function printUsage(stdout: (line: string) => void): void {
 Usage:
   hollerkit quests validate <file>
   hollerkit quests sync <file> --server <url> --key <key> [--sha <sha>] [--pr <pr>]
+  hollerkit values [--server <url>] [--key <key>] [--db <url>] [--quest <id>] [--label <label>] [--groupBy <group>] [--build <build>] [--json]
   hollerkit keys create --db <url> --scopes <comma-separated-scopes> [--label <label>]
   hollerkit keys revoke --db <url> <key-prefix-or-hash-or-label>
   hollerkit conformance --server <url> [--tester-token <tok>] [--quests-key <key>] [--agent-key <key>]

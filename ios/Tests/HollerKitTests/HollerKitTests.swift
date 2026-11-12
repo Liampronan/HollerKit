@@ -100,7 +100,87 @@ final class HollerKitTests: XCTestCase {
         store.append(.init(message: "two"))
         store.append(.init(message: "three"))
 
-        XCTAssertEqual(store.snapshot().map(\.message), ["two", "three"])
+        XCTAssertEqual(store.snapshot().map(\.message), ["breadcrumbs.truncated", "two", "three"])
+        XCTAssertEqual(store.truncatedCount, 1)
+
+        store.append(.init(message: "four"))
+        XCTAssertEqual(store.snapshot().map(\.message), ["breadcrumbs.truncated", "three", "four"])
+        XCTAssertEqual(store.truncatedCount, 2)
+    }
+
+    func testBreadcrumbStoreTypedFieldsAndPayloadCap() {
+        var store = BreadcrumbStore(capacity: 10)
+        let crumb = HollerKitBreadcrumb(
+            message: "share.render",
+            fields: [
+                "cached": false,
+                "retryCount": 2,
+                "ratio": 0.85,
+                "format": "mp4",
+            ],
+            durationMs: 142.5
+        )
+        store.append(crumb)
+
+        let snapshot = store.snapshot()
+        XCTAssertEqual(snapshot.count, 1)
+        XCTAssertEqual(snapshot[0].fields["cached"], .bool(false))
+        XCTAssertEqual(snapshot[0].fields["retryCount"], .int(2))
+        XCTAssertEqual(snapshot[0].fields["ratio"], .double(0.85))
+        XCTAssertEqual(snapshot[0].fields["format"], .string("mp4"))
+        XCTAssertEqual(snapshot[0].durationMs, 142.5)
+
+        let events = store.questEvents(since: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].payload.fields?["cached"], .bool(false))
+        XCTAssertEqual(events[0].payload.durationMs, 142.5)
+
+        var largePayload = FeedbackEventPayload(
+            strings: ["huge": String(repeating: "A", count: 3000)],
+            fields: ["data": .string(String(repeating: "B", count: 3000))]
+        )
+        largePayload.clampToSize(maxBytes: 2048)
+        let encodedData = try! JSONEncoder().encode(largePayload)
+        XCTAssertLessThanOrEqual(encodedData.count, 2048)
+    }
+
+    @MainActor
+    func testHollerKitSpanRecordsDurationMsAndFields() {
+        let serverURL = URL(string: "http://127.0.0.1:8080")!
+        HollerKit.configure(
+            server: serverURL,
+            auth: { "token" },
+            isEnabled: { true },
+            captureBreadcrumbs: true
+        )
+
+        let t0 = Date()
+        let span = HollerKit.begin("share.render", fields: ["cached": false], startDate: t0)
+        let t1 = t0.addingTimeInterval(0.25)
+        span.end(fields: ["items": 3], endDate: t1)
+
+        let snapshot = HollerKit.currentBreadcrumbs.snapshot()
+        let spanCrumb = snapshot.first { $0.message == "share.render" }
+        XCTAssertNotNil(spanCrumb)
+        XCTAssertEqual(spanCrumb?.fields["cached"], .bool(false))
+        XCTAssertEqual(spanCrumb?.fields["items"], .int(3))
+        XCTAssertEqual(spanCrumb?.durationMs ?? 0, 250, accuracy: 1.0)
+    }
+
+    @MainActor
+    func testHollerKitSpanGatingWhenDisabled() {
+        let serverURL = URL(string: "http://127.0.0.1:8080")!
+        HollerKit.configure(
+            server: serverURL,
+            auth: { "token" },
+            isEnabled: { false }
+        )
+
+        let span = HollerKit.begin("dormant.span", fields: ["ignored": true])
+        span.end(fields: ["still_ignored": true])
+
+        let snapshot = HollerKit.currentBreadcrumbs.snapshot()
+        XCTAssertFalse(snapshot.contains { $0.message == "dormant.span" })
     }
 
     func testBreadcrumbStoreTracksOffsetSecondsDuringActiveQuest() {

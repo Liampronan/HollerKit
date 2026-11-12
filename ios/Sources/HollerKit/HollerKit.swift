@@ -37,6 +37,7 @@ public enum HollerKit {
         metadata: @escaping @Sendable () -> [String: String] = { [:] },
         initialImages: @escaping @Sendable () -> [HollerKitAttachment] = { [] },
         captureBreadcrumbs: Bool = true,
+        maxBreadcrumbs: Int = 500,
         quests: HollerKitQuestsConfiguration? = nil
     ) {
         configure(HollerKitConfiguration(
@@ -51,6 +52,7 @@ public enum HollerKit {
             metadata: metadata,
             initialImages: initialImages,
             captureBreadcrumbs: captureBreadcrumbs,
+            maxBreadcrumbs: maxBreadcrumbs,
             quests: quests
         ))
     }
@@ -58,6 +60,7 @@ public enum HollerKit {
     /// Configures HollerKit with an explicit `HollerKitConfiguration` value and reconciles enablement.
     public static func configure(_ configuration: HollerKitConfiguration) {
         state.configuration = configuration
+        state.breadcrumbs.capacity = configuration.maxBreadcrumbs
         state.invocationOverride = nil
         state.invocationProvider = configuration.invocationProvider
         presenterState.currentInvocation = configuration.invocation
@@ -166,10 +169,58 @@ public enum HollerKit {
         reconcileEnablement()
     }
 
+    /// Begins a timed span for measuring an operation or render step.
+    ///
+    /// Spans are gated by `isEnabled()`. When the returned span is ended via `span.end(...)`,
+    /// one breadcrumb event is recorded with the elapsed duration in milliseconds (`durationMs`).
+    @discardableResult
+    public static func begin(
+        _ name: String,
+        category: String? = nil,
+        fields: [String: HollerKitFieldValue] = [:],
+        metadata: [String: String] = [:],
+        startDate: Date = Date()
+    ) -> HollerKitSpan {
+        let enabled = reconcileEnablement() && state.configuration?.captureBreadcrumbs == true
+        return HollerKitSpan(
+            name: name,
+            category: category,
+            fields: fields,
+            metadata: metadata,
+            startDate: startDate,
+            isEnabled: enabled
+        )
+    }
+
+    static func recordSpanBreadcrumb(
+        name: String,
+        category: String?,
+        fields: [String: HollerKitFieldValue],
+        metadata: [String: String],
+        durationMs: Double,
+        startDate: Date,
+        endDate: Date
+    ) {
+        guard reconcileEnablement(), state.configuration?.captureBreadcrumbs == true else { return }
+        state.breadcrumbs.append(.init(
+            timestamp: endDate,
+            category: category,
+            message: name,
+            fields: fields,
+            metadata: metadata,
+            durationMs: durationMs,
+            startDate: startDate
+        ))
+    }
+
+    /// Records a structured log event with typed fields, string metadata, and optional timing.
     public static func breadcrumb(
         _ message: String,
         category: String? = nil,
+        fields: [String: HollerKitFieldValue] = [:],
         metadata: [String: String] = [:],
+        durationMs: Double? = nil,
+        startOffsetSeconds: Double? = nil,
         date: Date = Date()
     ) {
         guard reconcileEnablement(), state.configuration?.captureBreadcrumbs == true else { return }
@@ -177,8 +228,29 @@ public enum HollerKit {
             timestamp: date,
             category: category,
             message: message,
-            metadata: metadata
+            fields: fields,
+            metadata: metadata,
+            durationMs: durationMs,
+            startOffsetSeconds: startOffsetSeconds
         ))
+    }
+
+    /// Records a simple point breadcrumb with string metadata.
+    public static func breadcrumb(
+        _ message: String,
+        category: String? = nil,
+        metadata: [String: String] = [:],
+        date: Date = Date()
+    ) {
+        breadcrumb(
+            message,
+            category: category,
+            fields: [:],
+            metadata: metadata,
+            durationMs: nil,
+            startOffsetSeconds: nil,
+            date: date
+        )
     }
 
     public static func presentationView() -> some View {

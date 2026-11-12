@@ -138,6 +138,21 @@ export interface FeedbackInboxOutput {
   nextCursor: string | null
 }
 
+export type CaptureFlag = 'missing' | 'out_of_range' | 'below_min' | 'above_max'
+
+export interface FeedbackCaptureView {
+  label: string
+  event: string
+  value: number | null
+  unit: string
+  where?: Record<string, string | number | boolean> | null | undefined
+  min?: number | null | undefined
+  max?: number | null | undefined
+  matched: boolean
+  offsetSeconds?: number | null | undefined
+  flags: CaptureFlag[]
+}
+
 export interface FeedbackGetInput {
   id: string
 }
@@ -149,6 +164,7 @@ export interface FeedbackGetOutput {
   events: FeedbackEventView[]
   triage: TriageEntry[]
   attachments: FeedbackAttachmentView[]
+  captures?: FeedbackCaptureView[] | undefined
 }
 
 export interface FeedbackTriageInput {
@@ -191,6 +207,73 @@ export type HollerKitToolName =
   | 'feedback_triage'
   | 'quests_pending'
   | 'quests_retirable'
+  | 'values_query'
+
+export type ValueGroupBy = 'build' | 'appVersion' | 'device' | 'os' | 'version' | 'label'
+
+export interface ValuesQueryInput {
+  quest?: string | undefined
+  questId?: string | undefined
+  version?: number | undefined
+  label?: string | undefined
+  build?: string | undefined
+  appVersion?: string | undefined
+  device?: string | undefined
+  os?: string | undefined
+  source?: 'capture' | 'answer' | undefined
+  since?: string | undefined
+  groupBy?: ValueGroupBy | undefined
+  limit?: number | undefined
+}
+
+export interface ValueStats {
+  n: number
+  median: number | null
+  p90: number | null
+  min: number | null
+  max: number | null
+  unit: string | null
+}
+
+export interface ValueGroupSummary extends ValueStats {
+  key: string
+  quest?: string | null | undefined
+  label?: string | null | undefined
+  build?: string | undefined
+  version?: number | undefined
+  appVersion?: string | null | undefined
+  device?: string | null | undefined
+  os?: string | null | undefined
+}
+
+export interface ValuesQueryResult extends ValueStats {
+  ok: true
+  quest: string | null
+  label: string | null
+  groupBy: ValueGroupBy | null
+  summary: ValueStats
+  groups: ValueGroupSummary[]
+  values: Array<{
+    id: number
+    feedbackId: string
+    questId: string
+    questVersion: number
+    source: 'capture' | 'answer'
+    label: string
+    value: number | null
+    unit: string
+    event: string | null
+    offsetSeconds: number | null
+    min: number | null
+    max: number | null
+    flags: CaptureFlag[]
+    build: string
+    appVersion: string | null
+    device: string | null
+    os: string | null
+    createdAt: string
+  }>
+}
 
 export interface McpToolDefinition {
   name: HollerKitToolName
