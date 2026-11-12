@@ -564,6 +564,8 @@ public final class HollerKitQuestState: ObservableObject {
         result: QuestResult,
         comment: String?,
         transcript: HollerKitTranscript?,
+        additionalAttachments: [HollerKitAttachment] = [],
+        additionalOutboxAttachments: [OutboxAttachmentPayload] = [],
         endedAt: Date = Date(),
         clearActiveSessionImmediately: Bool = true,
         onProgress: (@Sendable (SubmissionProgressStage) async -> Void)? = nil
@@ -590,7 +592,7 @@ public final class HollerKitQuestState: ObservableObject {
         }
         events.sort { $0.offsetSeconds < $1.offsetSeconds }
 
-        let attachments: [OutboxAttachmentPayload] = session.marks.compactMap { mark in
+        var attachments: [OutboxAttachmentPayload] = session.marks.compactMap { mark in
             guard !mark.imageData.isEmpty else { return nil }
             return OutboxAttachmentPayload(
                 kind: "mark",
@@ -599,6 +601,14 @@ public final class HollerKitQuestState: ObservableObject {
                 offsetSeconds: mark.offsetSeconds
             )
         }
+        for attachment in additionalAttachments {
+            attachments.append(OutboxAttachmentPayload(
+                kind: "image",
+                mimeType: attachment.mimeType,
+                data: attachment.data
+            ))
+        }
+        attachments.append(contentsOf: additionalOutboxAttachments)
 
         let isoFormatter = ISO8601DateFormatter()
         let trimmedComment = comment?.trimmingCharacters(in: .whitespacesAndNewlines)

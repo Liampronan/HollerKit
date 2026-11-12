@@ -1010,6 +1010,29 @@ test('githubIssuesSink formats quest runs & bug reports, deduplicates retries vi
   assert.deepEqual(failBody.feedback.links, ['https://github.com/Liampronan/HollerKit/issues/101'])
   assert.equal(failBody.feedback.triageStatus, 'new')
 
+  // Verify GET /v1/feedback/{id} returns the attached photo for quest_run
+  const failDetailRes = await handler(
+    new Request(`http://hollerkit.local/v1/feedback/${failedFeedbackId}`, {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${agentKey}`,
+      },
+    }),
+  )
+  assert.equal(failDetailRes.status, 200)
+  const failDetail = (await failDetailRes.json()) as {
+    feedback: { kind: string }
+    quest: { id: string }
+    attachments: Array<{ kind: string; url: string; mimeType: string; offsetSeconds?: number }>
+  }
+  assert.equal(failDetail.feedback.kind, 'quest_run')
+  assert.equal(failDetail.quest.id, 'camera-flip')
+  assert.equal(failDetail.attachments.length, 1)
+  assert.equal(failDetail.attachments[0]?.kind, 'image')
+  assert.equal(failDetail.attachments[0]?.mimeType, 'image/png')
+  assert.equal(failDetail.attachments[0]?.offsetSeconds, 3.4)
+  assert.ok(failDetail.attachments[0]?.url.startsWith('https://storage.hollerkit.test/read/'))
+
   // Verify the outgoing GitHub Issues API request
   assert.equal(githubCalls.length, 1)
   const issueCall = githubCalls[0]!
