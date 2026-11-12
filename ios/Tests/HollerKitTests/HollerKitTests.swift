@@ -3622,4 +3622,62 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(payload.strings["fields"], "not-a-dict")
         XCTAssertEqual(payload.strings["startOffsetSeconds"], "zero")
     }
+
+    func testFeedbackEventPayloadClampingAndNonFiniteValidation() throws {
+        var payload = FeedbackEventPayload()
+        payload["message"] = "test message"
+        payload.durationMs = Double.nan
+        payload.startOffsetSeconds = Double.infinity
+        payload.fields = [
+            "valid": .double(42.0),
+            "invalid": .double(Double.nan)
+        ]
+
+        payload.clampToSize(maxBytes: 2048)
+
+        XCTAssertNil(payload.durationMs)
+        XCTAssertNil(payload.startOffsetSeconds)
+        XCTAssertEqual(payload.fields?["valid"], .double(42.0))
+        XCTAssertNil(payload.fields?["invalid"])
+
+        let encoded = try JSONEncoder().encode(payload)
+        XCTAssertLessThanOrEqual(encoded.count, 2048)
+
+        // Huge payload that exceeds 2048 bytes even with many keys
+        var hugePayload = FeedbackEventPayload()
+        hugePayload["message"] = String(repeating: "M", count: 3000)
+        var fields: [String: HollerKitFieldValue] = [:]
+        for i in 0..<100 {
+            fields["key_\(i)"] = .string(String(repeating: "F", count: 50))
+        }
+        hugePayload.fields = fields
+
+        hugePayload.clampToSize(maxBytes: 2048)
+        let hugeEncoded = try JSONEncoder().encode(hugePayload)
+        XCTAssertLessThanOrEqual(hugeEncoded.count, 2048)
+
+        let input = FeedbackEventInput(offsetSeconds: Double.nan, kind: "breadcrumb", payload: payload)
+        XCTAssertEqual(input.offsetSeconds, 0)
+    }
+
+    func testFeedbackSubmissionRequestBudgetClamping() throws {
+        var events: [FeedbackEventInput] = []
+        for i in 0..<100 {
+            var p = FeedbackEventPayload()
+            p["message"] = "event_\(i)_\(String(repeating: "x", count: 1500))"
+            events.append(FeedbackEventInput(offsetSeconds: Double(i), kind: "breadcrumb", payload: p))
+        }
+
+        var request = FeedbackSubmissionRequest(
+            id: UUID(),
+            kind: "report",
+            build: "100",
+            events: events
+        )
+
+        request.clampToBudget(maxBytes: 20 * 1024)
+        let data = try JSONEncoder().encode(request)
+        XCTAssertLessThanOrEqual(data.count, 20 * 1024)
+        XCTAssertEqual(request.events.first?.payload["message"], "breadcrumbs.truncated")
+    }
 }
