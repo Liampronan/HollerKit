@@ -212,10 +212,17 @@ final class BugReportDraft {
         try? FileManager.default.removeItem(at: tempDirectoryURL)
     }
 
+    private func isDraftOwned(_ url: URL) -> Bool {
+        let basePath = tempDirectoryURL.standardizedFileURL.resolvingSymlinksInPath().path
+        let targetPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+        let prefix = basePath.hasSuffix("/") ? basePath : (basePath + "/")
+        return targetPath.hasPrefix(prefix)
+    }
+
     /// Removes all temporary video files created for this draft.
     func cleanupTempFiles() {
         for attachment in images {
-            if let fileURL = attachment.videoFileURL {
+            if let fileURL = attachment.videoFileURL, isDraftOwned(fileURL) {
                 try? FileManager.default.removeItem(at: fileURL)
             }
         }
@@ -316,12 +323,12 @@ final class BugReportDraft {
         speechCapture.cancelCapture()
     }
 
-    /// Removes the attached item with `id` from the draft and cleans up its temporary file if it is a video.
+    /// Removes the attached item with `id` from the draft and cleans up its temporary file if it is a video owned by the draft.
     func removeImage(id: UUID) {
         let removed = images.filter { $0.id == id }
         images.removeAll { $0.id == id }
         for item in removed {
-            if let fileURL = item.videoFileURL {
+            if let fileURL = item.videoFileURL, isDraftOwned(fileURL) {
                 try? FileManager.default.removeItem(at: fileURL)
             }
         }
@@ -398,6 +405,7 @@ final class BugReportDraft {
     ///    Under-size clips are kept untouched; over-size clips are transcoded via `AVAssetExportSession` and rejected only if still over the limit.
     @discardableResult
     func addVideo(from sourceURL: URL, title: String? = nil) async -> Bool {
+        let generation = photoLoadGeneration
         guard canAddMoreImages else {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
             return false
@@ -418,7 +426,11 @@ final class BugReportDraft {
         do {
             durationSeconds = try await videoDurationInspector(sourceURL)
         } catch {
+            guard photoLoadGeneration == generation else { return false }
             attachmentStatusMessage = "Could not load the selected video."
+            return false
+        }
+        guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
             return false
         }
         guard durationSeconds.isFinite, durationSeconds > 0 else {
@@ -460,6 +472,10 @@ final class BugReportDraft {
                 if transcodedURL.standardizedFileURL != workingURL.standardizedFileURL {
                     try? FileManager.default.removeItem(at: workingURL)
                 }
+                guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                    try? FileManager.default.removeItem(at: transcodedURL)
+                    return false
+                }
                 guard let transcodedAttrs = try? FileManager.default.attributesOfItem(atPath: transcodedURL.path),
                       let transcodedSize = (transcodedAttrs[.size] as? NSNumber)?.intValue,
                       transcodedSize > 0 else {
@@ -476,12 +492,28 @@ final class BugReportDraft {
                 finalSize = transcodedSize
             } catch {
                 try? FileManager.default.removeItem(at: workingURL)
+                guard photoLoadGeneration == generation else { return false }
                 attachmentStatusMessage = "Could not compress the selected video."
                 return false
             }
         }
 
         let thumbnail = await videoThumbnailGenerator(finalURL) ?? BugReportAttachment.placeholderVideoThumbnail()
+        guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+            try? FileManager.default.removeItem(at: finalURL)
+            return false
+        }
+        guard canAddMoreImages else {
+            try? FileManager.default.removeItem(at: finalURL)
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
+            return false
+        }
+        guard canAddMoreVideos else {
+            try? FileManager.default.removeItem(at: finalURL)
+            attachmentStatusMessage = "You can attach up to \(Self.maxVideoAttachments) videos per report."
+            return false
+        }
+
         let resolvedTitle: String
         if let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
             resolvedTitle = trimmed
@@ -582,6 +614,14 @@ final class BugReportDraft {
             return 0
         }
 
+        let generation = photoLoadGeneration
+        isLoadingAttachments = true
+        defer {
+            if photoLoadGeneration == generation {
+                isLoadingAttachments = false
+            }
+        }
+
         try? FileManager.default.createDirectory(at: tempDirectoryURL, withIntermediateDirectories: true)
 
         var addedCount = 0
@@ -591,6 +631,9 @@ final class BugReportDraft {
         var lastRejectionStatusMessage: String?
 
         for provider in providers {
+            guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                return addedCount
+            }
             guard canAddMoreImages else {
                 attachmentStatusMessage = "Attached \(addedCount) attachment\(addedCount == 1 ? "" : "s") (maximum \(Self.maxAttachments) per report)."
                 return addedCount
@@ -607,31 +650,54 @@ final class BugReportDraft {
                     into: tempDirectoryURL
                 ) {
                     defer { try? FileManager.default.removeItem(at: tempMovieURL) }
+                    guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                        return addedCount
+                    }
                     let pastedTitle = "Pasted Video \(nextAddedVideoNumber)"
-                    if await addVideo(from: tempMovieURL, title: pastedTitle) {
+                    let didAddVideo = await addVideo(from: tempMovieURL, title: pastedTitle)
+                    guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                        return addedCount
+                    }
+                    if didAddVideo {
                         addedCount += 1
                     } else if let status = attachmentStatusMessage {
                         lastRejectionStatusMessage = status
                     }
                     continue
-                } else if let image = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
-                            ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
-                    let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
-                    if addImage(image, title: pastedTitle) {
-                        addedCount += 1
-                        usedURLOrThumbnailFallback = true
+                } else {
+                    guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                        return addedCount
                     }
-                    continue
+                    let loadedImage = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
+                    guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                        return addedCount
+                    }
+                    if let image = loadedImage ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
+                        let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
+                        if addImage(image, title: pastedTitle) {
+                            addedCount += 1
+                            usedURLOrThumbnailFallback = true
+                        }
+                        continue
+                    }
                 }
             }
 
             if let urlTypeId {
-                if let loadedURL = await Self.loadURL(from: provider, typeIdentifier: urlTypeId),
+                let loadedURL = await Self.loadURL(from: provider, typeIdentifier: urlTypeId)
+                guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                    return addedCount
+                }
+                if let loadedURL,
                    loadedURL.isFileURL,
                    FileManager.default.fileExists(atPath: loadedURL.path),
                    Self.isMovieFileURL(loadedURL) {
                     let pastedTitle = "Pasted Video \(nextAddedVideoNumber)"
-                    if await addVideo(from: loadedURL, title: pastedTitle) {
+                    let didAddVideo = await addVideo(from: loadedURL, title: pastedTitle)
+                    guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                        return addedCount
+                    }
+                    if didAddVideo {
                         addedCount += 1
                     } else if let status = attachmentStatusMessage {
                         lastRejectionStatusMessage = status
@@ -639,8 +705,11 @@ final class BugReportDraft {
                     continue
                 }
 
-                if let image = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
-                    ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
+                let loadedImage = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
+                guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                    return addedCount
+                }
+                if let image = loadedImage ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
                     let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
                     if addImage(image, title: pastedTitle) {
                         addedCount += 1
@@ -653,8 +722,11 @@ final class BugReportDraft {
             }
 
             if imageTypeId != nil || provider.canLoadObject(ofClass: UIImage.self) {
-                if let image = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
-                    ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
+                let loadedImage = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
+                guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+                    return addedCount
+                }
+                if let image = loadedImage ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
                     let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
                     if addImage(image, title: pastedTitle) {
                         addedCount += 1
@@ -662,6 +734,10 @@ final class BugReportDraft {
                 }
                 continue
             }
+        }
+
+        guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
+            return addedCount
         }
 
         if addedCount == 0, let fallbackImages, !fallbackImages.isEmpty {
@@ -1401,14 +1477,12 @@ public struct BugReportSheet: View {
             hasClipboardImage = true
             return
         }
-        hasClipboardImage = pasteboard.itemProviders.contains { provider in
-            provider.registeredTypeIdentifiers.contains { identifier in
-                guard let utType = UTType(identifier) else { return false }
-                return utType.conforms(to: .movie)
-                    || utType.conforms(to: .video)
-                    || utType.conforms(to: .image)
-                    || utType.conforms(to: .url)
-            }
+        hasClipboardImage = pasteboard.types.contains { identifier in
+            guard let utType = UTType(identifier) else { return false }
+            return utType.conforms(to: .movie)
+                || utType.conforms(to: .video)
+                || utType.conforms(to: .image)
+                || utType.conforms(to: .url)
         }
         #else
         hasClipboardImage = false
@@ -1818,7 +1892,6 @@ struct BugReportAttachment: Identifiable, Hashable {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = fileType
         exportSession.shouldOptimizeForNetworkUse = true
-        exportSession.fileLengthLimit = Int64(maxBytes)
 
         let box = UncheckedSendableBox(value: exportSession)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in

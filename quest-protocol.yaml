@@ -323,6 +323,27 @@ components:
             - $ref: "#/components/schemas/QuestLatestRun"
             - type: "null"
 
+    ServerAttachmentLimits:
+      type: object
+      required:
+        - maxImageBytes
+        - maxAudioBytes
+        - maxVideoBytes
+        - maxImages
+      properties:
+        maxImageBytes:
+          type: integer
+          minimum: 1
+        maxAudioBytes:
+          type: integer
+          minimum: 1
+        maxVideoBytes:
+          type: integer
+          minimum: 1
+        maxImages:
+          type: integer
+          minimum: 1
+
     UploadRequest:
       type: object
       required: [feedbackId, kind, mimeType, size]
@@ -714,7 +735,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [ok, build, pendingCount, quests]
+                required: [ok, build, pendingCount, quests, limits]
                 properties:
                   ok:
                     type: boolean
@@ -727,6 +748,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/BuildManifestQuestStatus"
+                  limits:
+                    $ref: "#/components/schemas/ServerAttachmentLimits"
         "400":
           description: Invalid manifest or unsupported protocol version
           content:
@@ -1337,7 +1360,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [ok, build, pendingCount, quests]
+                required: [ok, build, pendingCount, quests, limits]
                 properties:
                   ok:
                     type: boolean
@@ -1350,6 +1373,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/QuestVersionRecord"
+                  limits:
+                    $ref: "#/components/schemas/ServerAttachmentLimits"
 
   /v1/webhooks/github:
     post:

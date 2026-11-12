@@ -210,6 +210,13 @@ actor OutboxDirectoryEngine {
         normalizedRequest.id = feedbackId.uuidString.lowercased()
         normalizedRequest.clampToBudget()
 
+        for attachment in attachments {
+            if let sourceURL = attachment.fileURL,
+               !FileManager.default.fileExists(atPath: sourceURL.path) {
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: sourceURL.path])
+            }
+        }
+
         let itemDirectoryURL = directoryURL(for: feedbackId)
         if FileManager.default.fileExists(atPath: itemDirectoryURL.path) {
             if let existingFiles = try? FileManager.default.contentsOfDirectory(
@@ -235,8 +242,10 @@ actor OutboxDirectoryEngine {
             let fileName = "\(index).\(ext)"
             let fileURL = itemDirectoryURL.appendingPathComponent(fileName, isDirectory: false)
             let attachmentSize: Int
-            if let sourceURL = attachment.fileURL,
-               FileManager.default.fileExists(atPath: sourceURL.path) {
+            if let sourceURL = attachment.fileURL {
+                guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+                    throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: sourceURL.path])
+                }
                 if FileManager.default.fileExists(atPath: fileURL.path) {
                     try? FileManager.default.removeItem(at: fileURL)
                 }

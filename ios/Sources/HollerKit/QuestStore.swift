@@ -386,9 +386,14 @@ public struct QuestStore: Sendable {
         isSimulator: Bool = Self.isRunningOnSimulator,
         persistToCache: Bool = false
     ) async throws -> [QuestBoardItem] {
-        let pendingItems = try await client.fetchPendingQuests(build: build)
+        let response = try await client.fetchPendingQuestsResponse(build: build)
+        if let maxVideoBytes = response.limits?.maxVideoBytes, maxVideoBytes > 0 {
+            await MainActor.run {
+                HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+            }
+        }
         let items = boardItems(
-            from: pendingItems,
+            from: response.quests,
             definitions: definitions,
             isSimulator: isSimulator
         )

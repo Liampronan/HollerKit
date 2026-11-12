@@ -4398,6 +4398,15 @@ final class HollerKitTests: XCTestCase {
         )
         let manifestResponse = try await client.syncBuildManifest(build: "100", appVersion: "1.0", quests: [])
         XCTAssertEqual(manifestResponse.limits?.maxVideoBytes, 100_000)
+        XCTAssertNil(HollerKit.quests.serverMaxVideoBytes, "APIClient should not mutate HollerKit.quests directly")
+        let questStore = QuestStore(cacheDirectoryURL: tempDir.appendingPathComponent("quest-cache", isDirectory: true))
+        _ = try await questStore.syncWithServer(
+            definitions: [],
+            build: "100",
+            appVersion: "1.0",
+            client: client,
+            persistToCache: false
+        )
         XCTAssertEqual(HollerKit.quests.serverMaxVideoBytes, 100_000)
 
         let draft = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft", isDirectory: true))
@@ -4706,6 +4715,58 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(submittedAttachments.first?["kind"] as? String, "video")
         XCTAssertEqual(submittedAttachments.first?["mimeType"] as? String, "video/quicktime")
         XCTAssertEqual(submittedAttachments.first?["size"] as? Int, expectedVideoBytes.count)
+
+        // Verify caller-owned video files passed via HollerKitAttachment(fileURL:) are preserved on removeImage and cleanupTempFiles
+        let callerVideoURL = tempDir.appendingPathComponent("caller-owned.mov", isDirectory: false)
+        try expectedVideoBytes.write(to: callerVideoURL)
+        let callerAttachment = HollerKitAttachment(
+            filename: "Host Recording.mov",
+            mimeType: "video/quicktime",
+            fileURL: callerVideoURL,
+            kind: "video",
+            durationSeconds: 2.0
+        )
+        let callerDraft = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("caller-draft", isDirectory: true))
+        callerDraft.loadInitialImagesIfNeeded(
+            configuration: config,
+            invocationAttachments: [callerAttachment]
+        )
+        XCTAssertEqual(callerDraft.images.count, 1)
+        let callerItemId = try XCTUnwrap(callerDraft.images.first?.id)
+        callerDraft.removeImage(id: callerItemId)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: callerVideoURL.path),
+            "removeImage must not delete caller-owned video files outside tempDirectoryURL"
+        )
+        callerDraft.resetForAnotherReport(
+            configuration: config,
+            invocationAttachments: [callerAttachment]
+        )
+        callerDraft.cleanupTempFiles()
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: callerVideoURL.path),
+            "cleanupTempFiles must not delete caller-owned video files outside tempDirectoryURL"
+        )
+
+        // Verify OutboxStore.enqueue throws when a supplied attachment fileURL does not exist on disk
+        let missingFileURL = tempDir.appendingPathComponent("missing-video.mp4", isDirectory: false)
+        do {
+            _ = try await outboxStore.enqueue(
+                request: FeedbackSubmissionRequest(id: UUID(), kind: "report", build: "1"),
+                attachments: [
+                    OutboxAttachmentPayload(
+                        kind: "video",
+                        mimeType: "video/mp4",
+                        fileURL: missingFileURL
+                    )
+                ]
+            )
+            XCTFail("Expected enqueue to throw when supplied attachment fileURL is missing")
+        } catch {
+            // Expected error; verify no item was committed to the outbox
+            let queuedCount = await outboxStore.pendingCount()
+            XCTAssertEqual(queuedCount, 0)
+        }
     }
     #endif
 }
