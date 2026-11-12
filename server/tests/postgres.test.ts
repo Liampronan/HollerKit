@@ -312,6 +312,39 @@ test('runs full v1 conformance suite and Postgres-specific invariants against po
     assert.notEqual(resA.idempotent, resB.idempotent, 'Exactly one concurrent call creates and the other is idempotent')
     assert.equal(resA.feedback.area, null, 'Non-string metadata.area must resolve to null')
     assert.equal(resB.feedback.area, null, 'Non-string metadata.area must resolve to null')
+
+    // Verify defensive UUID checks on direct store calls never trigger PostgreSQL 22P02 errors
+    assert.equal(await store.getFeedbackById('not-a-valid-uuid'), null)
+    await assert.rejects(
+      () =>
+        store.triageFeedback({
+          feedbackId: 'not-a-valid-uuid',
+          status: 'triaged',
+          summary: 'Direct store invalid UUID check',
+        }),
+      (err: any) => err?.code === 'invalid_uuid' && err?.status === 400,
+    )
+    await assert.rejects(
+      () => store.listFeedback({ cursor: 'not-a-valid-cursor!' }),
+      (err: any) => err?.code === 'invalid_cursor' && err?.status === 400,
+    )
+
+    // Verify markOutboxFailed does not overwrite an already-delivered outbox row
+    const outboxRow = await store.enqueueOutbox({
+      feedbackId: concurrentFeedbackId,
+      sink: 'github',
+    })
+    const deliveredRow = await store.markOutboxDelivered({
+      id: outboxRow.id,
+      link: 'https://github.com/Liampronan/HollerKit/issues/1',
+    })
+    assert.ok(deliveredRow?.deliveredAt)
+    const lateFailureResult = await store.markOutboxFailed({
+      id: outboxRow.id,
+      error: 'late error after delivery',
+      nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    assert.equal(lateFailureResult, null)
   } finally {
     await secondStore.close()
     await store.close()

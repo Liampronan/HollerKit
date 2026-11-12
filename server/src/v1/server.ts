@@ -424,7 +424,7 @@ export function createHollerKitServer(
           throw new HollerKitError(405, 'method_not_allowed', 'Expected GET.')
         }
         await requireAuth(request, authenticators, ['agent:read'])
-        const feedbackId = decodePathSegment(feedbackDetailMatch[1]!).trim().toLowerCase()
+        const feedbackId = parseRequiredUuid(decodePathSegment(feedbackDetailMatch[1]!), 'id')
         const detail = await options.store.getFeedbackById(feedbackId)
         if (!detail) {
           throw new HollerKitError(404, 'not_found', `Feedback not found: ${feedbackId}.`)
@@ -470,7 +470,7 @@ export function createHollerKitServer(
           throw new HollerKitError(405, 'method_not_allowed', 'Expected PUT.')
         }
         const principal = await requireAuth(request, authenticators, ['agent:triage'])
-        const feedbackId = decodePathSegment(feedbackTriageMatch[1]!).trim().toLowerCase()
+        const feedbackId = parseRequiredUuid(decodePathSegment(feedbackTriageMatch[1]!), 'id')
         const body = await readJsonObject(request, limits)
 
         const status = parseTriageStatus(body.status, 'status')
@@ -655,18 +655,26 @@ export function createHollerKitServer(
 function normalizeV1Path(pathname: string, basePath?: string): string | null {
   let cleaned = pathname.replace(/\/+$/, '') || '/'
   if (basePath) {
-    const normalizedBase = ('/' + basePath.replace(/^\/+|\/+$/g, '')).replace(/\/+$/, '')
-    if (normalizedBase !== '/' && cleaned.startsWith(normalizedBase + '/')) {
-      cleaned = cleaned.slice(normalizedBase.length)
-    } else if (normalizedBase !== '/' && cleaned === normalizedBase) {
-      cleaned = '/'
+    const normalizedBase = ('/' + basePath.replace(/^\/+|\/+$/g, '')).replace(/\/+$/, '') || '/'
+    if (normalizedBase !== '/') {
+      if (cleaned.startsWith(normalizedBase + '/')) {
+        cleaned = cleaned.slice(normalizedBase.length)
+      } else if (cleaned === normalizedBase) {
+        cleaned = '/'
+      } else {
+        return null
+      }
+      if (cleaned === '/v1' || cleaned.startsWith('/v1/')) {
+        return cleaned
+      }
+      return null
     }
   }
   const routeMatch = cleaned.match(
-    /\/v1(?=\/(?:builds|uploads|feedback|quests|webhooks|values)(?:\/|$)|$).*$/,
+    /^.*(\/v1(?=\/(?:builds|uploads|feedback|quests|webhooks|values)(?:\/|$)|$).*)$/,
   )
-  if (routeMatch) {
-    return routeMatch[0]
+  if (routeMatch && routeMatch[1]) {
+    return routeMatch[1]
   }
   if (cleaned === '/v1' || cleaned.startsWith('/v1/')) {
     return cleaned
@@ -960,6 +968,16 @@ function parseFeedbackCreateBody(body: Record<string, unknown>, limits: V1LimitC
           throw new HollerKitError(413, 'image_too_large', 'Image attachment exceeds maximum byte limit.')
         }
       }
+      if (size !== undefined && attKind === 'audio') {
+        if (size > limits.maxAudioBytes) {
+          throw new HollerKitError(413, 'audio_too_large', 'Audio attachment exceeds maximum byte limit.')
+        }
+      }
+      if (size !== undefined && attKind === 'video') {
+        if (limits.maxVideoBytes !== undefined && size > limits.maxVideoBytes) {
+          throw new HollerKitError(413, 'video_too_large', 'Video attachment exceeds maximum byte limit.')
+        }
+      }
       const offsetSeconds =
         item.offsetSeconds !== undefined && item.offsetSeconds !== null
           ? parseFiniteNumber(item.offsetSeconds, `attachments[${i}].offsetSeconds`)
@@ -997,6 +1015,14 @@ function parseFeedbackCreateBody(body: Record<string, unknown>, limits: V1LimitC
       413,
       'too_many_breadcrumbs',
       `Breadcrumb count (${breadcrumbCount}) exceeds limit (${limits.maxBreadcrumbs}).`,
+    )
+  }
+
+  if (events.length > limits.maxEvents) {
+    throw new HollerKitError(
+      400,
+      'too_many_events',
+      `A feedback submission may include at most ${limits.maxEvents} events.`,
     )
   }
 
@@ -1064,7 +1090,11 @@ function parseListFeedbackQuery(params: URLSearchParams) {
   }
   const build = params.get('build') || undefined
   const questId = params.get('questId') || undefined
-  const cursor = params.get('cursor') || undefined
+  const cursorRaw = params.get('cursor')
+  let cursor: string | undefined
+  if (cursorRaw !== null && cursorRaw.trim() !== '') {
+    cursor = validateAndNormalizeCursor(cursorRaw.trim())
+  }
 
   const limitParam = params.get('limit')
   let limit: number | undefined
@@ -1393,6 +1423,33 @@ function parseTriageStatus(value: unknown, field: string): TriageStatus {
 }
 
 /**
+ * Validates a `GET /v1/feedback` pagination `cursor` (either a raw UUID or base64url `{ createdAt?, id }` JSON token).
+ */
+function validateAndNormalizeCursor(rawCursor: string): string {
+  if (UUID_REGEX.test(rawCursor)) {
+    return rawCursor.toLowerCase()
+  }
+  if (/^[A-Za-z0-9_-]+={0,2}$/.test(rawCursor)) {
+    try {
+      const decodedText = Buffer.from(rawCursor, 'base64url').toString('utf8')
+      const parsed = JSON.parse(decodedText)
+      if (
+        isPlainObject(parsed) &&
+        typeof parsed.id === 'string' &&
+        UUID_REGEX.test(parsed.id.trim()) &&
+        (parsed.createdAt === undefined ||
+          (typeof parsed.createdAt === 'string' && !Number.isNaN(Date.parse(parsed.createdAt))))
+      ) {
+        return rawCursor
+      }
+    } catch {
+      // Fall through to throw invalid_cursor
+    }
+  }
+  throw new HollerKitError(400, 'invalid_cursor', 'cursor must be a valid cursor token or UUID.')
+}
+
+/**
  * Maps a MIME type and attachment kind to a canonical file extension.
  */
 function extensionForMimeType(mimeType: string, kind: AttachmentKind): string {
@@ -1402,6 +1459,8 @@ function extensionForMimeType(mimeType: string, kind: AttachmentKind): string {
   if (lower.includes('heic')) return 'heic'
   if (lower.includes('heif')) return 'heif'
   if (lower.includes('webp')) return 'webp'
+  if (lower.includes('mpeg') || lower.includes('mp3')) return 'mp3'
+  if (lower.includes('wav')) return 'wav'
   if (lower.includes('m4a') || lower.includes('aac')) return 'm4a'
   if (lower.includes('mp4')) return kind === 'audio' ? 'm4a' : 'mp4'
   if (lower.includes('quicktime')) return 'mov'
@@ -1415,15 +1474,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+const PROTOCOL_HEADERS: Record<string, string> = {
+  'hollerkit-protocol': '1',
+  'cache-control': 'no-store',
+  'x-content-type-options': 'nosniff',
+}
+
 /**
  * Builds a JSON `Response` with the `hollerkit-protocol: 1` header.
  */
 function protocolJsonResponse(data: unknown, status = 200): Response {
   return Response.json(data, {
     status,
-    headers: {
-      'hollerkit-protocol': '1',
-    },
+    headers: PROTOCOL_HEADERS,
   })
 }
 
@@ -1436,9 +1499,7 @@ function protocolErrorResponse(error: unknown): Response {
       { ok: false, error: { code: error.code, message: error.message } },
       {
         status: error.status,
-        headers: {
-          'hollerkit-protocol': '1',
-        },
+        headers: PROTOCOL_HEADERS,
       },
     )
   }
@@ -1449,9 +1510,7 @@ function protocolErrorResponse(error: unknown): Response {
     { ok: false, error: { code: 'internal_error', message: 'Unexpected server error.' } },
     {
       status: 500,
-      headers: {
-        'hollerkit-protocol': '1',
-      },
+      headers: PROTOCOL_HEADERS,
     },
   )
 }

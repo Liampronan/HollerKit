@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
@@ -3679,5 +3680,303 @@ final class HollerKitTests: XCTestCase {
         let data = try JSONEncoder().encode(request)
         XCTAssertLessThanOrEqual(data.count, 20 * 1024)
         XCTAssertEqual(request.events.first?.payload["message"], "breadcrumbs.truncated")
+    }
+
+    @MainActor
+    func testObservableStateTrackingForQuestStateAndBugReportDraft() throws {
+        let questState = HollerKitQuestState()
+        let questChangeFired = LockedBox(false)
+        withObservationTracking {
+            _ = questState.quests
+            _ = questState.activeQuest
+        } onChange: {
+            questChangeFired.withLock { $0 = true }
+        }
+
+        let definition = QuestDefinition(
+            id: "obs.quest",
+            title: "Observable Quest",
+            area: "ui",
+            steps: ["Verify Observation tracking"],
+            expect: ["onChange fires"]
+        )
+        questState.configure(
+            questsConfiguration: .definitions([definition]),
+            build: "100"
+        )
+        XCTAssertTrue(questChangeFired.withLock { $0 })
+
+        let draft = BugReportDraft()
+        let draftChangeFired = LockedBox(false)
+        withObservationTracking {
+            _ = draft.comment
+            _ = draft.isSubmitting
+        } onChange: {
+            draftChangeFired.withLock { $0 = true }
+        }
+
+        draft.comment = "Updated via @Observable"
+        XCTAssertTrue(draftChangeFired.withLock { $0 })
+
+        let speechChangeFired = LockedBox(false)
+        withObservationTracking {
+            _ = draft.speechCapture.partialTranscript
+        } onChange: {
+            speechChangeFired.withLock { $0 = true }
+        }
+
+        draft.speechCapture.isCapturing = true
+        draft.speechCapture.capture.updatePartialTranscriptForTesting("Live reactive transcript")
+        XCTAssertTrue(speechChangeFired.withLock { $0 })
+        XCTAssertEqual(draft.speechCapture.partialTranscript, "Live reactive transcript")
+    }
+
+    @MainActor
+    func testAudioOnlyInputModeEnablesVoiceCaptureAndRespectsMaxDuration() throws {
+        var config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            inputMode: .audioOnly(presentation: .fullScreen, maxDuration: 18),
+            audio: .off
+        )
+
+        switch config.effectiveAudioConfiguration {
+        case .transcriptOnly(let maxDuration, let requireOnDevice):
+            XCTAssertEqual(maxDuration, 18)
+            XCTAssertFalse(requireOnDevice)
+        default:
+            XCTFail("Expected .audioOnly input mode to resolve effectiveAudioConfiguration to .transcriptOnly")
+        }
+
+        var onDeviceConfig = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            inputMode: .audioOnly(presentation: .fullScreen, maxDuration: 42),
+            audio: .transcriptOnly(maxDuration: 10, requireOnDeviceTranscription: true)
+        )
+        switch onDeviceConfig.effectiveAudioConfiguration {
+        case .transcriptOnly(let maxDuration, let requireOnDevice):
+            XCTAssertEqual(maxDuration, 42)
+            XCTAssertTrue(requireOnDevice)
+        default:
+            XCTFail("Expected .audioOnly input mode to preserve requireOnDeviceTranscription and override maxDuration")
+        }
+
+        onDeviceConfig.inputMode = HollerKitInputMode.textOnly
+        if case .off = onDeviceConfig.effectiveAudioConfiguration {
+            // expected
+        } else {
+            XCTFail("Expected .textOnly to resolve effectiveAudioConfiguration to .off")
+        }
+
+        config.inputMode = HollerKitInputMode.audioOnly(presentation: .fullScreen, maxDuration: 18)
+        let sheet = BugReportSheet(configuration: config, breadcrumbs: BreadcrumbStore())
+        _ = sheet.body
+        let pillView = AudioOnlyCaptureView()
+        _ = pillView.body
+    }
+
+    @MainActor
+    func testBugReportToQuestBoardSheetPresentationCoordination() throws {
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true }
+        )
+        HollerKit.configure(config)
+
+        HollerKit.present()
+        XCTAssertTrue(HollerKit.presenterState.isPresented)
+        XCTAssertFalse(HollerKit.presenterState.isQuestsPresented)
+
+        HollerKit.requestQuestsAfterBugReportDismiss()
+        XCTAssertTrue(HollerKit.presenterState.presentQuestsAfterBugReportDismiss)
+        XCTAssertFalse(HollerKit.presenterState.isQuestsPresented)
+
+        HollerKit.presenterState.isPresented = false
+        HollerKit.clearPresentationAttachments()
+        XCTAssertFalse(HollerKit.presenterState.isPresented)
+        XCTAssertFalse(HollerKit.presenterState.presentQuestsAfterBugReportDismiss)
+        XCTAssertTrue(HollerKit.presenterState.isQuestsPresented)
+    }
+
+    @MainActor
+    func testQuestSubmissionIncludesTranscriptMetadataAndRollbacksRejectedOutboxRun() async throws {
+        let outboxDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitQuestRollbackTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: outboxDirectory) }
+
+        let capturedSubmissions = LockedBox<[FeedbackSubmissionRequest]>([])
+        let shouldRejectFlush = LockedBox(false)
+
+        StubURLProtocol.setHandler { request, bodyData in
+            let url = try XCTUnwrap(request.url)
+            if request.httpMethod == "POST", url.path == "/v1/feedback" {
+                if let bodyData,
+                   let decoded = try? JSONDecoder().decode(FeedbackSubmissionRequest.self, from: bodyData) {
+                    capturedSubmissions.withLock { $0.append(decoded) }
+                }
+                if shouldRejectFlush.withLock({ $0 }) {
+                    let response = HTTPURLResponse(
+                        url: url,
+                        statusCode: 422,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "application/json"]
+                    )!
+                    return (response, Data(#"{"error":{"code":"invalid_quest","message":"Unprocessable quest run"}}"#.utf8))
+                }
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 503,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )!
+                return (response, Data(#"{"error":{"code":"unavailable","message":"Offline queue test"}}"#.utf8))
+            }
+            let manifestJSON = """
+            {
+              "ok": true,
+              "build": "200",
+              "pendingCount": 1,
+              "quests": [
+                {
+                  "id": "checkout.quest",
+                  "version": 1,
+                  "contentHash": "hash1",
+                  "questStatus": "active",
+                  "boardStatus": "pending",
+                  "title": "Checkout Quest",
+                  "area": "checkout",
+                  "setup": [],
+                  "steps": ["Complete checkout"],
+                  "expect": ["Order succeeds"],
+                  "needs": [],
+                  "record": "optional"
+                }
+              ]
+            }
+            """
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data(manifestJSON.utf8))
+        }
+        defer { StubURLProtocol.setHandler(nil) }
+
+        let session = makeStubSession()
+        let questDef = QuestDefinition(
+            id: "checkout.quest",
+            title: "Checkout Quest",
+            area: "checkout",
+            steps: ["Complete checkout"],
+            expect: ["Order succeeds"]
+        )
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            metadata: { ["build": "200"] },
+            quests: .definitions([questDef]),
+            urlSession: session,
+            outboxDirectoryURL: outboxDirectory
+        )
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
+        HollerKit.configure(config)
+        XCTAssertEqual(HollerKit.quests.quests.first?.status, .pending)
+
+        let questItem = try XCTUnwrap(HollerKit.quests.quests.first)
+        HollerKit.quests.startQuest(questItem)
+        let transcript = HollerKitTranscript(
+            text: "Voice note for quest run",
+            locale: "en-US",
+            engine: .appleOnDevice,
+            confidence: 0.91,
+            durationSeconds: 5.5
+        )
+
+        let queuedOutcome = try await HollerKit.quests.submitActiveQuest(
+            result: .fail,
+            comment: "Voice note for quest run",
+            transcript: transcript
+        )
+        if case .queued(let queuedId) = queuedOutcome {
+            XCTAssertNotNil(queuedId)
+        } else {
+            XCTFail("Expected quest run to be queued offline on HTTP 503")
+        }
+
+        // Optimistic board status is updated to .failed while queued in the outbox
+        XCTAssertEqual(HollerKit.quests.quests.first?.status, .failed)
+        XCTAssertEqual(HollerKit.quests.quests.first?.latestRun?.result, .fail)
+
+        let firstSubmission = try XCTUnwrap(capturedSubmissions.withLock { $0.first })
+        XCTAssertEqual(firstSubmission.metadata["transcriptLocale"], "en-US")
+        XCTAssertEqual(firstSubmission.metadata["transcriptEngine"], "apple-on-device")
+        XCTAssertEqual(firstSubmission.metadata["transcriptConfidence"], "0.91")
+        XCTAssertEqual(firstSubmission.metadata["transcriptDurationSeconds"], "5.5")
+
+        // Now flush the outbox when the server permanently rejects the queued item with HTTP 422
+        shouldRejectFlush.withLock { $0 = true }
+        let flushResult = await HollerKit.flushOutbox()
+        XCTAssertEqual(flushResult.rejectedErrors.count, 1)
+
+        // Optimistic status override should be rolled back to .pending
+        XCTAssertEqual(HollerKit.quests.quests.first?.status, .pending)
+        XCTAssertNil(HollerKit.quests.quests.first?.latestRun)
+    }
+
+    func testPendingQuestItemPreservesBoardStatusAndLatestRun() throws {
+        let json = """
+        {
+          "ok": true,
+          "build": "200",
+          "pendingCount": 1,
+          "quests": [
+            {
+              "id": "sync.quest",
+              "version": 1,
+              "contentHash": "abc123",
+              "title": "Sync Quest",
+              "area": "sync",
+              "setup": [],
+              "steps": ["Step 1"],
+              "expect": ["Synced"],
+              "needs": [],
+              "record": "optional",
+              "status": "active",
+              "boardStatus": "failed",
+              "createdAt": "2026-11-11T12:00:00Z",
+              "counts": {
+                "pass": 0,
+                "fail": 1,
+                "unsure": 0,
+                "abandoned": 0
+              },
+              "latestRun": {
+                "id": "11111111-2222-3333-4444-555555555555",
+                "build": "200",
+                "result": "fail",
+                "submitterId": "tester-1",
+                "comment": "Broken button",
+                "createdAt": "2026-11-11T12:00:00Z"
+              }
+            }
+          ]
+        }
+        """
+        let response = try JSONDecoder().decode(PendingQuestsResponse.self, from: Data(json.utf8))
+        let store = QuestStore()
+        let items = store.boardItems(from: response.quests, definitions: [], isSimulator: true)
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.status, .failed)
+        XCTAssertEqual(items.first?.latestRun?.result, .fail)
+        XCTAssertEqual(items.first?.latestRun?.comment, "Broken button")
     }
 }

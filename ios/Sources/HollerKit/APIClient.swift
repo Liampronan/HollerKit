@@ -611,9 +611,11 @@ public struct PendingQuestItem: Codable, Equatable, Sendable {
     public var start: String?
     public var source: QuestManifestSource?
     public var status: String
+    public var boardStatus: String?
     public var createdAt: String
     public var retiredAt: String?
     public var counts: QuestResultCounts?
+    public var latestRun: QuestLatestRun?
     public var passedOnCurrentVersion: Bool?
 }
 
@@ -728,6 +730,7 @@ public struct APIClient: Sendable {
     ) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
+        request.timeoutInterval = 45
         request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
         request.setValue(String(data.count), forHTTPHeaderField: "Content-Length")
         request.httpBody = data
@@ -807,6 +810,7 @@ public struct APIClient: Sendable {
         let url = try endpointURL(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.timeoutInterval = 20
         request.setValue(Self.protocolVersion, forHTTPHeaderField: "hollerkit-protocol")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

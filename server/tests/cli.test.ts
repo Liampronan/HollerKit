@@ -429,7 +429,19 @@ test('CLI: quests sync, conformance --server, keys create/revoke, and migrations
     assert.equal(migDuplicateCode, 1)
     assert.ok(migErr.some((l) => l.includes('already exists at destination')))
 
-    // 5. hollerkit outbox flush
+    // 5. hollerkit outbox flush (including S3 storage flags and non-JSON error handling on quests sync)
+    const nonJsonErr: string[] = []
+    const nonJsonSyncCode = await runCli(
+      ['quests', 'sync', manifestPath, '--server', 'http://bad-gateway.local', '--key', questsWriteKey],
+      {
+        stdout: () => {},
+        stderr: (l) => nonJsonErr.push(l),
+        fetchImpl: async () => new Response('<html>502 Bad Gateway</html>', { status: 502 }),
+      },
+    )
+    assert.equal(nonJsonSyncCode, 1)
+    assert.ok(nonJsonErr.some((l) => l.includes('HTTP 502') && l.includes('502 Bad Gateway')))
+
     const outboxFeedback = await store.createFeedback({
       id: '11111111-2222-4333-8444-555555555555',
       kind: 'report',
@@ -451,6 +463,16 @@ test('CLI: quests sync, conformance --server, keys create/revoke, and migrations
         'Liampronan/HollerKit',
         '--github-token',
         'ghp_cli_token',
+        '--s3-endpoint',
+        'https://s3.us-east-1.amazonaws.com',
+        '--s3-bucket',
+        'hollerkit-bucket',
+        '--s3-region',
+        'us-east-1',
+        '--s3-access-key-id',
+        'AKIAIOSFODNN7EXAMPLE',
+        '--s3-secret-access-key',
+        'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
         '--limit',
         '10',
       ],

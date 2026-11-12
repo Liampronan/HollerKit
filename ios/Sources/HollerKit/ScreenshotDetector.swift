@@ -50,16 +50,26 @@ final class ScreenshotDetectorViewController: UIViewController {
 enum HollerKitScreenCapture {
     @MainActor
     static func currentScreenshotAttachment() -> HollerKitAttachment? {
-        var keyWindow: UIWindow?
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else { continue }
-            if let window = windowScene.windows.first(where: { $0.isKeyWindow }) {
-                keyWindow = window
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let orderedScenes = scenes.filter { $0.activationState == .foregroundActive }
+            + scenes.filter { $0.activationState != .foregroundActive }
+
+        var targetWindow: UIWindow?
+        for windowScene in orderedScenes {
+            let eligibleWindows = windowScene.windows.filter { window in
+                !(window is PassthroughOverlayWindow) && !window.isHidden && window.alpha > 0.01
+            }
+            if let keyWindow = eligibleWindows.first(where: \.isKeyWindow) {
+                targetWindow = keyWindow
+                break
+            }
+            if let normalWindow = eligibleWindows.first(where: { $0.windowLevel == .normal }) ?? eligibleWindows.first {
+                targetWindow = normalWindow
                 break
             }
         }
 
-        guard let window = keyWindow else { return nil }
+        guard let window = targetWindow else { return nil }
 
         let format = UIGraphicsImageRendererFormat()
         format.scale = window.screen.scale

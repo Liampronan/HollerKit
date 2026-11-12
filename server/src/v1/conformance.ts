@@ -77,7 +77,15 @@ export async function runConformanceSuite(
     }
 
     const response = await fetchFn(`${baseUrl}${path}`, requestInit)
-    const json = await response.json()
+    const rawText = await response.text()
+    let json: any
+    try {
+      json = JSON.parse(rawText)
+    } catch {
+      throw new Error(
+        `Expected JSON response from ${init.method ?? 'GET'} ${path} (HTTP ${response.status}), got: ${rawText.slice(0, 200)}`,
+      )
+    }
     return { status: response.status, headers: response.headers, body: json }
   }
 
@@ -679,6 +687,43 @@ export async function runConformanceSuite(
     assert.equal(detailAfterTriage.body.triage.length, 2)
     assert.equal(detailAfterTriage.body.triage[0].status, 'triaged')
     assert.equal(detailAfterTriage.body.triage[1].status, 'resolved')
+
+    // Malformed UUIDs on GET /v1/feedback/{id}, PUT /v1/feedback/{id}/triage, and GET /v1/feedback?cursor=... return 400
+    const badGetId = await requestJson('/v1/feedback/not-a-uuid', {
+      method: 'GET',
+      token: options.agentKey,
+    })
+    assert.equal(badGetId.status, 400)
+    assert.equal(badGetId.body.error.code, 'invalid_uuid')
+
+    const badTriageId = await requestJson('/v1/feedback/not-a-uuid/triage', {
+      method: 'PUT',
+      token: options.agentKey,
+      body: {
+        status: 'triaged',
+        summary: 'Should reject invalid UUID',
+      },
+    })
+    assert.equal(badTriageId.status, 400)
+    assert.equal(badTriageId.body.error.code, 'invalid_uuid')
+
+    const badRawCursor = await requestJson('/v1/feedback?cursor=not-a-valid-cursor!', {
+      method: 'GET',
+      token: options.agentKey,
+    })
+    assert.equal(badRawCursor.status, 400)
+    assert.equal(badRawCursor.body.error.code, 'invalid_cursor')
+
+    const badDecodedCursor = Buffer.from(
+      JSON.stringify({ createdAt: '2026-11-08T00:00:00.000Z', id: 'not-a-uuid' }),
+      'utf8',
+    ).toString('base64url')
+    const badB64CursorRes = await requestJson(`/v1/feedback?cursor=${badDecodedCursor}`, {
+      method: 'GET',
+      token: options.agentKey,
+    })
+    assert.equal(badB64CursorRes.status, 400)
+    assert.equal(badB64CursorRes.body.error.code, 'invalid_cursor')
   })
 
   // 9. GET /v1/quests retirable filter
@@ -796,6 +841,24 @@ export async function runConformanceSuite(
     })
     assert.equal(tooManyMarksRes.status, 413)
     assert.equal(tooManyMarksRes.body.error.code, 'too_many_marks')
+
+    // > maxEvents events on feedback
+    const tooManyEventsRes = await requestJson('/v1/feedback', {
+      method: 'POST',
+      token: options.testerToken,
+      body: {
+        id: randomUUID(),
+        kind: 'report',
+        build: '100',
+        events: Array.from({ length: limits.maxEvents + 1 }, (_, idx) => ({
+          offsetSeconds: idx * 0.1,
+          kind: 'navigation',
+          payload: { screen: `s-${idx}` },
+        })),
+      },
+    })
+    assert.equal(tooManyEventsRes.status, 400)
+    assert.equal(tooManyEventsRes.body.error.code, 'too_many_events')
   })
 
   // 11. Board status separates unsure from failed, orders untried ahead of needs-attention, and clears on triage

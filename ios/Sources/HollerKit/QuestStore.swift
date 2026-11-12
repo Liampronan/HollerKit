@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Observation
 import SwiftUI
 
 public enum QuestStoreError: Error, LocalizedError, Sendable, Equatable {
@@ -237,6 +238,85 @@ public struct QuestStore: Sendable {
         return items
     }
 
+    public func boardItems(
+        from pendingItems: [PendingQuestItem],
+        definitions: [QuestDefinition] = [],
+        isSimulator: Bool = Self.isRunningOnSimulator
+    ) -> [QuestBoardItem] {
+        let definitionsById = Dictionary(
+            definitions.map { ($0.id.jsTrimmed, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        return pendingItems.map { serverItem in
+            let normalizedServerId = serverItem.id.jsTrimmed
+            let definition = definitionsById[normalizedServerId] ?? QuestDefinition(
+                id: normalizedServerId,
+                title: serverItem.title,
+                area: serverItem.area,
+                setup: serverItem.setup,
+                steps: serverItem.steps,
+                expect: serverItem.expect,
+                needs: serverItem.needs,
+                record: QuestRecordMode(rawValue: serverItem.record) ?? .optional,
+                start: serverItem.start,
+                source: serverItem.source
+            )
+            let warnings = Self.evaluateNeedWarnings(
+                for: definition.needs,
+                isSimulator: isSimulator,
+                isBackendReachable: true
+            )
+            let counts = serverItem.counts ?? QuestResultCounts()
+            var status: QuestStatus
+            if let rawBoardStatus = serverItem.boardStatus,
+               let parsed = QuestStatus(rawValue: rawBoardStatus) {
+                status = parsed
+            } else if serverItem.passedOnCurrentVersion == true {
+                status = .passed
+            } else if counts.fail > 0 {
+                status = .failed
+            } else if counts.unsure > 0 {
+                status = .unsure
+            } else {
+                status = .pending
+            }
+            if status == .failed, counts.fail == 0, counts.unsure > 0 {
+                status = .unsure
+            }
+            return QuestBoardItem(
+                id: normalizedServerId,
+                version: serverItem.version,
+                isVersionConfirmed: true,
+                contentHash: serverItem.contentHash,
+                definition: definition,
+                status: status,
+                questStatus: serverItem.status,
+                counts: counts,
+                latestRun: serverItem.latestRun,
+                needWarnings: warnings
+            )
+        }
+    }
+
+    public func fetchPendingBoardItems(
+        build: String,
+        client: APIClient,
+        definitions: [QuestDefinition] = [],
+        isSimulator: Bool = Self.isRunningOnSimulator,
+        persistToCache: Bool = false
+    ) async throws -> [QuestBoardItem] {
+        let pendingItems = try await client.fetchPendingQuests(build: build)
+        let items = boardItems(
+            from: pendingItems,
+            definitions: definitions,
+            isSimulator: isSimulator
+        )
+        if persistToCache {
+            saveCachedBoardItems(items, forBuild: build)
+        }
+        return items
+    }
+
     public func saveCachedBoardItems(_ items: [QuestBoardItem], forBuild build: String) {
         try? FileManager.default.createDirectory(
             at: cacheDirectoryURL,
@@ -282,19 +362,36 @@ public struct QuestStore: Sendable {
     }
 }
 
+@Observable
 @MainActor
-public final class HollerKitQuestState: ObservableObject {
-    @Published public private(set) var pendingCount: Int = 0
-    @Published public private(set) var quests: [QuestBoardItem] = []
-    @Published public private(set) var activeQuest: ActiveQuestSession?
-    @Published public private(set) var isSyncing: Bool = false
-    @Published public private(set) var isBackendReachable: Bool = true
-    @Published public private(set) var lastSyncError: String?
+public final class HollerKitQuestState {
+    public private(set) var pendingCount: Int = 0
+    public private(set) var quests: [QuestBoardItem] = []
+    public private(set) var activeQuest: ActiveQuestSession?
+    public private(set) var isSyncing: Bool = false
+    public private(set) var isBackendReachable: Bool = true
+    public private(set) var lastSyncError: String?
 
+    private struct OptimisticRunSnapshot {
+        var build: String
+        var key: String
+        var questId: String
+        var previousItem: QuestBoardItem
+        var previousStatusOverride: QuestStatus?
+        var previousLatestRunOverride: QuestLatestRun?
+    }
+
+    @ObservationIgnored
     private var definitions: [QuestDefinition] = []
+    @ObservationIgnored
     private var store = QuestStore()
+    @ObservationIgnored
     private var localStatusOverrides: [String: QuestStatus] = [:]
+    @ObservationIgnored
     private var localLatestRunOverrides: [String: QuestLatestRun] = [:]
+    @ObservationIgnored
+    private var optimisticSnapshotsByFeedbackId: [UUID: OptimisticRunSnapshot] = [:]
+    @ObservationIgnored
     private var configurationGeneration: UInt64 = 0
 
     public init() {}
@@ -331,6 +428,7 @@ public final class HollerKitQuestState: ObservableObject {
         definitions = []
         localStatusOverrides = [:]
         localLatestRunOverrides = [:]
+        optimisticSnapshotsByFeedbackId = [:]
         QuestOverlayWindowManager.shared.hide()
     }
 
@@ -347,6 +445,7 @@ public final class HollerKitQuestState: ObservableObject {
         )
         self.localStatusOverrides = [:]
         self.localLatestRunOverrides = [:]
+        self.optimisticSnapshotsByFeedbackId = [:]
         guard let questsConfiguration else {
             reset()
             return
@@ -576,7 +675,17 @@ public final class HollerKitQuestState: ObservableObject {
             throw HollerKitAPIError.missingAuthToken
         }
 
-        let metadata = MetadataCollector.collect(extra: config.metadata())
+        var metadata = MetadataCollector.collect(extra: config.metadata())
+        if let transcript {
+            metadata["transcriptLocale"] = transcript.locale
+            metadata["transcriptEngine"] = transcript.engine.rawValue
+            if let confidence = transcript.confidence {
+                metadata["transcriptConfidence"] = String(confidence)
+            }
+            if let durationSeconds = transcript.durationSeconds {
+                metadata["transcriptDurationSeconds"] = String(durationSeconds)
+            }
+        }
         let build = MetadataCollector.currentBuild(from: metadata)
         let appVersion = MetadataCollector.currentAppVersion(from: metadata)
         let device = metadata["deviceModel"]
@@ -652,7 +761,8 @@ public final class HollerKitQuestState: ObservableObject {
             contentHash: session.quest.contentHash,
             build: build,
             comment: request.comment ?? request.transcript,
-            endedAt: endedAt
+            endedAt: endedAt,
+            feedbackId: session.id
         )
         HollerKit.endQuestBreadcrumbs()
         if clearActiveSessionImmediately {
@@ -680,13 +790,25 @@ public final class HollerKitQuestState: ObservableObject {
         contentHash: String? = nil,
         build: String,
         comment: String? = nil,
-        endedAt: Date = Date()
+        endedAt: Date = Date(),
+        feedbackId: UUID? = nil
     ) {
         let normalizedId = questId.jsTrimmed
         guard let index = quests.firstIndex(where: { $0.id == normalizedId }) else { return }
         var item = quests[index]
         if let contentHash, item.contentHash != contentHash {
             return
+        }
+        let key = "\(build):\(item.id):\(item.contentHash)"
+        if let feedbackId {
+            optimisticSnapshotsByFeedbackId[feedbackId] = OptimisticRunSnapshot(
+                build: build,
+                key: key,
+                questId: item.id,
+                previousItem: item,
+                previousStatusOverride: localStatusOverrides[key],
+                previousLatestRunOverride: localLatestRunOverrides[key]
+            )
         }
         switch result {
         case .pass:
@@ -705,10 +827,10 @@ public final class HollerKitQuestState: ObservableObject {
         case .abandoned:
             item.counts.abandoned += 1
         }
-        let key = "\(build):\(item.id):\(item.contentHash)"
         if result != .abandoned {
             let isoFormatter = ISO8601DateFormatter()
             let latestRun = QuestLatestRun(
+                id: feedbackId?.uuidString.lowercased(),
                 result: result,
                 build: build,
                 createdAt: isoFormatter.string(from: endedAt),
@@ -723,6 +845,36 @@ public final class HollerKitQuestState: ObservableObject {
         }
         quests[index] = item
         applyBoardItems(quests, build: build)
+    }
+
+    /// Rolls back optimistic local quest board overrides whose queued outbox submissions were permanently rejected.
+    public func rollbackRejectedFeedbackIds(_ rejectedIds: Set<UUID>) {
+        guard !rejectedIds.isEmpty else { return }
+        var affectedBuilds: Set<String> = []
+        for feedbackId in rejectedIds {
+            guard let snapshot = optimisticSnapshotsByFeedbackId.removeValue(forKey: feedbackId) else {
+                continue
+            }
+            if let prevStatus = snapshot.previousStatusOverride {
+                localStatusOverrides[snapshot.key] = prevStatus
+            } else {
+                localStatusOverrides.removeValue(forKey: snapshot.key)
+            }
+            if let prevRun = snapshot.previousLatestRunOverride {
+                localLatestRunOverrides[snapshot.key] = prevRun
+            } else {
+                localLatestRunOverrides.removeValue(forKey: snapshot.key)
+            }
+            if let index = quests.firstIndex(where: {
+                $0.id == snapshot.questId && $0.contentHash == snapshot.previousItem.contentHash
+            }) {
+                quests[index] = snapshot.previousItem
+            }
+            affectedBuilds.insert(snapshot.build)
+        }
+        for build in affectedBuilds {
+            applyBoardItems(quests, build: build)
+        }
     }
 
     /// Merges server/cached board items with any newer local overrides and persists the board cache.

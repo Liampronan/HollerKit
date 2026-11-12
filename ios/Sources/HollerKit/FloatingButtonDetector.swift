@@ -9,6 +9,7 @@ final class HollerKitFloatingButtonView: UIView {
 
     private let button = UIButton(type: .system)
     private var panGesture: UIPanGestureRecognizer?
+    private var boundsObservation: NSKeyValueObservation?
     private let buttonSize: CGFloat = 46.0
 
     override init(frame: CGRect) {
@@ -19,6 +20,26 @@ final class HollerKitFloatingButtonView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        boundsObservation?.invalidate()
+        boundsObservation = nil
+        guard let superview else { return }
+        clampCenterToSafeArea(in: superview)
+        boundsObservation = superview.observe(\.bounds, options: [.new]) { [weak self] container, _ in
+            MainActor.assumeIsolated {
+                self?.clampCenterToSafeArea(in: container)
+            }
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let superview, panGesture?.state != .changed && panGesture?.state != .began {
+            clampCenterToSafeArea(in: superview)
+        }
     }
 
     private func setupView() {
@@ -70,12 +91,27 @@ final class HollerKitFloatingButtonView: UIView {
         }
     }
 
+    func clampCenterToSafeArea(in container: UIView) {
+        guard container.bounds.width > 0, container.bounds.height > 0 else { return }
+        let safeArea = container.safeAreaInsets
+        let minX = safeArea.left + (buttonSize / 2.0) + 8
+        let maxX = max(minX, container.bounds.width - safeArea.right - (buttonSize / 2.0) - 8)
+        let minY = safeArea.top + (buttonSize / 2.0) + 8
+        let maxY = max(minY, container.bounds.height - safeArea.bottom - (buttonSize / 2.0) - 8)
+
+        let clampedX = min(max(center.x, minX), maxX)
+        let clampedY = min(max(center.y, minY), maxY)
+        if center.x != clampedX || center.y != clampedY {
+            center = CGPoint(x: clampedX, y: clampedY)
+        }
+    }
+
     private func snapToNearestEdge(in container: UIView) {
         let safeArea = container.safeAreaInsets
         let minX = safeArea.left + (buttonSize / 2.0) + 8
-        let maxX = container.bounds.width - safeArea.right - (buttonSize / 2.0) - 8
+        let maxX = max(minX, container.bounds.width - safeArea.right - (buttonSize / 2.0) - 8)
         let minY = safeArea.top + (buttonSize / 2.0) + 8
-        let maxY = container.bounds.height - safeArea.bottom - (buttonSize / 2.0) - 8
+        let maxY = max(minY, container.bounds.height - safeArea.bottom - (buttonSize / 2.0) - 8)
 
         let targetX = (center.x < container.bounds.midX) ? minX : maxX
         let clampedY = min(max(center.y, minY), maxY)

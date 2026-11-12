@@ -513,9 +513,9 @@ actor OutboxDirectoryEngine {
             }
 
             markInFlight(feedbackId)
+            defer { unmarkInFlight(feedbackId) }
             do {
                 let response = try await flushSingleItem(item, token: token, using: client)
-                unmarkInFlight(feedbackId)
                 do {
                     try FileManager.default.removeItem(at: item.directoryURL)
                 } catch {
@@ -527,7 +527,6 @@ actor OutboxDirectoryEngine {
                 result.responses[feedbackId] = response
                 result.flushedRevisions[feedbackId] = revision
             } catch {
-                unmarkInFlight(feedbackId)
                 result.lastError = error.localizedDescription
                 if let apiError = error as? HollerKitAPIError {
                     if apiError.isAuthenticationError {
@@ -831,10 +830,13 @@ final class OutboxLifecycleMonitor {
 
         let trigger = onTriggerFlush
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { path in
+        monitor.pathUpdateHandler = { [weak self] path in
             let isSatisfied = (path.status == .satisfied)
-            Task { @MainActor in
-                if isSatisfied {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let transitionedToSatisfied = !self.wasNetworkSatisfied && isSatisfied
+                self.wasNetworkSatisfied = isSatisfied
+                if transitionedToSatisfied {
                     trigger()
                 }
             }

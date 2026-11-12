@@ -1,6 +1,7 @@
 export interface V1LimitConfig {
   maxJsonBytes: number
   maxTextChars: number
+  maxEvents: number
   maxImages: number
   maxImageBytes: number
   maxAudioBytes: number
@@ -18,6 +19,7 @@ export interface V1LimitConfig {
 export const defaultV1Limits: V1LimitConfig = {
   maxJsonBytes: 256 * 1024, // 256 KB (262,144 bytes)
   maxTextChars: 20_000, // 20,000 characters
+  maxEvents: 200, // 200 events per submission
   maxImages: 12, // 12 images per item
   maxImageBytes: 10 * 1024 * 1024, // 10 MB (10,485,760 bytes)
   maxAudioBytes: 10 * 1024 * 1024, // 10 MB (10,485,760 bytes)
@@ -39,6 +41,7 @@ export function resolveV1Limits(overrides: Partial<V1LimitConfig> = {}): V1Limit
   return {
     ...defaultV1Limits,
     ...overrides,
+    maxEvents: overrides.maxEvents ?? defaultV1Limits.maxEvents,
     acceptedImageMimeTypes:
       overrides.acceptedImageMimeTypes ?? defaultV1Limits.acceptedImageMimeTypes,
     acceptedAudioMimeTypes:

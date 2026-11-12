@@ -1,4 +1,5 @@
 import ImageIO
+import Observation
 import SwiftUI
 
 #if canImport(PhotosUI)
@@ -53,31 +54,38 @@ enum SubmissionHaptics {
 }
 
 /// Holds the mutable form state and submission lifecycle for a bug report presentation.
+@Observable
 @MainActor
-final class BugReportDraft: ObservableObject {
+final class BugReportDraft {
     nonisolated static let maxAttachments = 12
     nonisolated static let maxAttachmentBytes = 10 * 1024 * 1024
     nonisolated static let preferredPNGMaxBytes = 2 * 1024 * 1024
     nonisolated static let maxPixelDimension: CGFloat = 2400
 
     let id = UUID()
-    @Published var comment = ""
-    @Published var images: [BugReportImage] = []
-    @Published var selectedImage: BugReportImage?
-    @Published var isLoadingAttachments = false
-    @Published var attachmentStatusMessage: String?
-    @Published var isSubmitting = false
-    @Published var submissionStage: SubmissionProgressStage?
-    @Published var submissionError: String?
-    @Published var submissionOutcome: OutboxSubmissionOutcome?
+    var comment = ""
+    var images: [BugReportImage] = []
+    var selectedImage: BugReportImage?
+    var isLoadingAttachments = false
+    var attachmentStatusMessage: String?
+    var isSubmitting = false
+    var submissionStage: SubmissionProgressStage?
+    var submissionError: String?
+    var submissionOutcome: OutboxSubmissionOutcome?
 
+    @ObservationIgnored
     var invokingTrigger: String = "manual"
     let speechCapture = SpeechCaptureController()
+    @ObservationIgnored
     var autoDismissDelaySeconds: TimeInterval? = nil
+    @ObservationIgnored
     private(set) var photoLoadGeneration: UInt64 = 0
 
+    @ObservationIgnored
     private var didLoadInitialImages = false
+    @ObservationIgnored
     private var nextAddedImageNumber = 1
+    @ObservationIgnored
     private var autoDismissTask: Task<Void, Never>?
 
     /// Returns `true` when additional image attachments can be added to the draft.
@@ -454,20 +462,25 @@ final class BugReportDraft: ObservableObject {
     }
 }
 
+@MainActor
 public struct BugReportSheet: View {
     private let configuration: HollerKitConfiguration?
     private let breadcrumbs: BreadcrumbStore
     private let outboxStore: OutboxStore
     private let invocationAttachments: [HollerKitAttachment]
     private let presentationId: UUID
-    @ObservedObject private var questState = HollerKit.quests
-    @ObservedObject private var draft: BugReportDraft
-    @ObservedObject private var speechCapture: SpeechCaptureController
+    private let externalDraft: BugReportDraft?
+    private let questState = HollerKit.quests
+    @State private var draft: BugReportDraft
     @Environment(\.dismiss) private var dismiss
     #if canImport(PhotosUI)
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     #endif
     @State private var hasClipboardImage = false
+
+    private var speechCapture: SpeechCaptureController {
+        draft.speechCapture
+    }
 
     init(
         configuration: HollerKitConfiguration?,
@@ -482,12 +495,12 @@ public struct BugReportSheet: View {
         self.outboxStore = outboxStore ?? OutboxStore(rootDirectoryURL: configuration?.outboxDirectoryURL)
         self.invocationAttachments = invocationAttachments
         self.presentationId = presentationId
+        self.externalDraft = draft
         let resolvedDraft = draft ?? BugReportDraft(
             configuration: configuration,
             invocationAttachments: invocationAttachments
         )
-        self.draft = resolvedDraft
-        self.speechCapture = resolvedDraft.speechCapture
+        self._draft = State(initialValue: resolvedDraft)
     }
 
     public var body: some View {
@@ -498,10 +511,8 @@ public struct BugReportSheet: View {
                         Section {
                             Button {
                                 draft.cancelCapture()
+                                HollerKit.requestQuestsAfterBugReportDismiss()
                                 dismiss()
-                                Task { @MainActor in
-                                    HollerKit.presentQuests()
-                                }
                             } label: {
                                 HStack {
                                     Label("Quests (\(questState.pendingCount))", systemImage: "flag.checkered")
@@ -603,7 +614,7 @@ public struct BugReportSheet: View {
                         }
                     }
 
-                    if configuration?.audio.isEnabled == true {
+                    if effectiveAudioConfiguration.isEnabled {
                         Section("Voice Note") {
                             Button {
                                 Task {
@@ -746,6 +757,9 @@ public struct BugReportSheet: View {
         }
         .onChange(of: presentationId) { _, _ in
             refreshClipboardImageAvailability()
+            if let externalDraft {
+                draft = externalDraft
+            }
             draft.resetForAnotherReport(
                 configuration: configuration,
                 invocationAttachments: invocationAttachments
@@ -792,6 +806,10 @@ public struct BugReportSheet: View {
         BugReportDraft.isAudioOnly(configuration: configuration)
     }
 
+    private var effectiveAudioConfiguration: HollerKitAudioConfiguration {
+        configuration?.effectiveAudioConfiguration ?? .off
+    }
+
     /// Resets the draft and dismisses the bug report sheet.
     @MainActor
     private func finishAndDismiss() {
@@ -821,15 +839,15 @@ public struct BugReportSheet: View {
     /// Toggles voice dictation for the bug report.
     @MainActor
     private func toggleSpeechCapture() async {
-        guard let configuration else { return }
-        await speechCapture.toggle(configuration: configuration.audio)
+        guard effectiveAudioConfiguration.isEnabled else { return }
+        await speechCapture.toggle(configuration: effectiveAudioConfiguration)
     }
 
     /// Retries voice dictation after an error.
     @MainActor
     private func retrySpeechCapture() async {
-        guard let configuration else { return }
-        await speechCapture.retry(configuration: configuration.audio)
+        guard effectiveAudioConfiguration.isEnabled else { return }
+        await speechCapture.retry(configuration: effectiveAudioConfiguration)
     }
 
     /// Updates `hasClipboardImage` from the system pasteboard without reading image data until tapped.
@@ -1187,21 +1205,32 @@ struct BugReportImage: Identifiable, Hashable {
 }
 
 /// Coordinates live voice dictation for bug report and quest result sheets.
+@Observable
 @MainActor
-final class SpeechCaptureController: ObservableObject {
+final class SpeechCaptureController {
     static let maxCommentCharacters = 20_000
 
-    @Published var isCapturing = false
-    @Published var isStopping = false
-    @Published var transcript: HollerKitTranscript?
-    @Published var errorMessage: String?
-    @Published var partialTranscript = ""
+    var isCapturing = false
+    var isStopping = false
+    var transcript: HollerKitTranscript?
+    var errorMessage: String?
+    var partialTranscript = ""
 
     let capture = SpeechNoteCapture()
+    @ObservationIgnored
     private var autoStopTask: Task<Void, Never>?
+    @ObservationIgnored
     private var activeStopTask: Task<Void, Never>?
+    @ObservationIgnored
     private var startGeneration: UInt64 = 0
+    @ObservationIgnored
     private var consumedTranscriptForCommentMerge: HollerKitTranscript?
+
+    init() {
+        capture.onStateChange = { [weak self] in
+            self?.handleCaptureStateChange()
+        }
+    }
 
     /// Merges `transcriptText` into `existingComment` while respecting the 20,000 UTF-16 unit server limit.
     static func mergeTranscript(_ transcriptText: String, into existingComment: String) -> String {
@@ -1293,7 +1322,7 @@ final class SpeechCaptureController: ObservableObject {
             }
             isStopping = false
             isCapturing = true
-            bindPartialTranscript()
+            handleCaptureStateChange()
             scheduleAutoStop(after: configuration.maxDuration)
         } catch is CancellationError {
             isStopping = false
@@ -1365,26 +1394,24 @@ final class SpeechCaptureController: ObservableObject {
         }
     }
 
-    /// Polls partial transcription updates and mid-capture errors while recording is active.
-    private func bindPartialTranscript() {
-        Task { @MainActor [weak self] in
-            while let self, self.capture.isCapturing || self.capture.lastError != nil {
-                if let failure = self.capture.lastError, !self.capture.isCapturing {
-                    self.autoStopTask?.cancel()
-                    self.autoStopTask = nil
-                    if !self.capture.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.partialTranscript = self.capture.transcriptText
-                    } else {
-                        self.partialTranscript = ""
-                    }
-                    self.isStopping = false
-                    self.isCapturing = false
-                    self.recordErrorMessage(failure)
-                    break
-                }
-                self.partialTranscript = self.capture.transcriptText
-                try? await Task.sleep(for: .milliseconds(250))
+    /// Synchronizes partial transcription updates and mid-capture errors reactively from `capture`.
+    private func handleCaptureStateChange() {
+        guard isCapturing || isStopping else { return }
+        if let failure = capture.lastError, !capture.isCapturing {
+            autoStopTask?.cancel()
+            autoStopTask = nil
+            if !capture.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                partialTranscript = capture.transcriptText
+            } else {
+                partialTranscript = ""
             }
+            isStopping = false
+            isCapturing = false
+            recordErrorMessage(failure)
+            return
+        }
+        if capture.isCapturing {
+            partialTranscript = capture.transcriptText
         }
     }
 

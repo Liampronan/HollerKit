@@ -20,6 +20,8 @@ import type {
 } from './types.js'
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const VALID_FEEDBACK_KINDS = new Set<FeedbackKind>(['report', 'quest_run'])
 const VALID_QUEST_RESULTS = new Set<QuestResult>(['pass', 'fail', 'unsure', 'abandoned'])
@@ -101,6 +103,7 @@ export interface ResolvedHollerKitMcpConfig {
   fetchFn: FetchLike
   protocolVersion: string
   timeoutMs: number
+  maxResponseBytes: number
 }
 
 /**
@@ -162,6 +165,19 @@ export function resolveHollerKitMcpConfig(config: HollerKitMcpConfig = {}): Reso
     )
   }
 
+  const maxResponseBytes = config.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES
+  if (
+    typeof maxResponseBytes !== 'number' ||
+    !Number.isFinite(maxResponseBytes) ||
+    maxResponseBytes <= 0
+  ) {
+    throw new HollerKitMcpError(
+      400,
+      'invalid_configuration',
+      'maxResponseBytes must be a positive finite number.',
+    )
+  }
+
   // Strip trailing slashes and an optional trailing `/v1` segment so appending `/v1/...` is always canonical.
   const basePath = parsedBase.pathname.replace(/\/+$/, '').replace(/\/v1$/, '')
   const baseUrl = `${parsedBase.origin}${basePath}`
@@ -173,6 +189,7 @@ export function resolveHollerKitMcpConfig(config: HollerKitMcpConfig = {}): Reso
     fetchFn,
     protocolVersion,
     timeoutMs,
+    maxResponseBytes,
   }
 }
 
@@ -256,7 +273,7 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
       const fetchAndRead = (async () => {
         try {
           response = await resolved.fetchFn(url.toString(), init)
-          return await response.text()
+          return await readBoundedResponseText(response, resolved.maxResponseBytes)
         } catch (error) {
           if (timedOut || controller.signal.aborted) {
             throw new HollerKitMcpError(
@@ -375,7 +392,7 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
       }
 
       const area = requireOptionalString(normalized.area, 'area')
-      const since = requireOptionalString(normalized.since, 'since')
+      const since = requireOptionalIsoTimestamp(normalized.since, 'since')
       const build = requireOptionalString(normalized.build, 'build')
       const questId = requireOptionalString(normalized.questId, 'questId')
       const cursor = requireOptionalString(normalized.cursor, 'cursor')
@@ -430,7 +447,7 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
      */
     async feedbackGet(input: FeedbackGetInput): Promise<FeedbackGetOutput> {
       const normalized = requireArgumentObject(input, 'feedback_get', FEEDBACK_GET_ALLOWED_KEYS)
-      const id = requireNonEmptyString(normalized.id, 'id')
+      const id = requireUuid(normalized.id, 'id')
       const raw = await requestJson('GET', `/v1/feedback/${encodeURIComponent(id)}`)
 
       if (
@@ -466,7 +483,7 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
         'feedback_triage',
         FEEDBACK_TRIAGE_ALLOWED_KEYS,
       )
-      const id = requireNonEmptyString(normalized.id, 'id')
+      const id = requireUuid(normalized.id, 'id')
       const status = requireTriageStatus(normalized.status, 'status')
       const summary = requireNonEmptyString(normalized.summary, 'summary')
 
@@ -477,14 +494,21 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
       if (normalized.links !== undefined) {
         if (
           !Array.isArray(normalized.links) ||
-          !normalized.links.every((item) => typeof item === 'string')
+          !normalized.links.every((item) => typeof item === 'string' && item.trim().length > 0)
         ) {
-          throw new HollerKitMcpError(400, 'invalid_arguments', 'links must be an array of strings.')
+          throw new HollerKitMcpError(
+            400,
+            'invalid_arguments',
+            'links must be an array of non-empty strings.',
+          )
         }
-        body.links = normalized.links
+        body.links = normalized.links.map((item) => item.trim())
       }
       if (normalized.actor !== undefined && normalized.actor !== null) {
-        body.actor = requireNonEmptyString(normalized.actor, 'actor')
+        const actor = requireOptionalString(normalized.actor, 'actor')
+        if (actor !== undefined) {
+          body.actor = actor
+        }
       }
 
       const raw = await requestJson('PUT', `/v1/feedback/${encodeURIComponent(id)}/triage`, {
@@ -570,7 +594,7 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
       const appVersion = requireOptionalString(normalized.appVersion, 'appVersion')
       const device = requireOptionalString(normalized.device, 'device')
       const os = requireOptionalString(normalized.os, 'os')
-      const since = requireOptionalString(normalized.since, 'since')
+      const since = requireOptionalIsoTimestamp(normalized.since, 'since')
 
       let source: 'capture' | 'answer' | undefined
       if (normalized.source !== undefined) {
@@ -632,6 +656,88 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
       return raw as unknown as ValuesQueryResult
     },
   }
+}
+
+/**
+ * Reads an HTTP response body as UTF-8 text while enforcing a maximum byte limit.
+ */
+async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+  const contentLengthHeader = response.headers.get('content-length')
+  if (contentLengthHeader !== null) {
+    const declaredLength = Number(contentLengthHeader)
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      if (response.body) {
+        await response.body.cancel().catch(() => {})
+      }
+      throw new HollerKitMcpError(
+        502,
+        'response_too_large',
+        'HollerKit server response exceeded maximum byte limit.',
+      )
+    }
+  }
+
+  if (!response.body) {
+    const text = await response.text()
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+      throw new HollerKitMcpError(
+        502,
+        'response_too_large',
+        'HollerKit server response exceeded maximum byte limit.',
+      )
+    }
+    return text
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value) {
+      totalBytes += value.byteLength
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => {})
+        throw new HollerKitMcpError(
+          502,
+          'response_too_large',
+          'HollerKit server response exceeded maximum byte limit.',
+        )
+      }
+      chunks.push(value)
+    }
+  }
+
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+/**
+ * Validates that a required field is a valid UUID string and returns its trimmed value.
+ */
+function requireUuid(value: unknown, field: string): string {
+  const trimmed = requireNonEmptyString(value, field)
+  if (!UUID_REGEX.test(trimmed)) {
+    throw new HollerKitMcpError(400, 'invalid_arguments', `${field} must be a valid UUID.`)
+  }
+  return trimmed
+}
+
+/**
+ * Validates that an optional field, when provided, is a valid ISO-8601 date/time string.
+ */
+function requireOptionalIsoTimestamp(value: unknown, field: string): string | undefined {
+  const trimmed = requireOptionalString(value, field)
+  if (trimmed === undefined) return undefined
+  if (Number.isNaN(Date.parse(trimmed))) {
+    throw new HollerKitMcpError(
+      400,
+      'invalid_arguments',
+      `${field} must be a valid ISO-8601 timestamp.`,
+    )
+  }
+  return trimmed
 }
 
 /**

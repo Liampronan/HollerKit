@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
 import AVFoundation
@@ -151,28 +152,43 @@ final class LiveRecognitionState: @unchecked Sendable {
 }
 
 /// Captures live microphone audio and transcribes it using Apple's Speech framework.
+@Observable
 @MainActor
-public final class SpeechNoteCapture: ObservableObject {
-    @Published public private(set) var isCapturing = false
-    @Published public private(set) var isStopping = false
-    @Published public private(set) var transcriptText = ""
-    @Published public private(set) var lastError: String?
+public final class SpeechNoteCapture {
+    public private(set) var isCapturing = false
+    public private(set) var isStopping = false
+    public private(set) var transcriptText = ""
+    public private(set) var lastError: String?
 
     #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
+    @ObservationIgnored
     private var audioEngine: AVAudioEngine?
+    @ObservationIgnored
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    @ObservationIgnored
     private var recognitionTask: SFSpeechRecognitionTask?
     #endif
+    @ObservationIgnored
     private var liveState = LiveRecognitionState()
+    @ObservationIgnored
     private var options = SpeechTranscriberOptions()
+    @ObservationIgnored
     private var resolvedLocaleIdentifier: String = Locale.current.identifier
+    @ObservationIgnored
     private var startedAt: Date?
+    @ObservationIgnored
     private var confidence: Double?
+    @ObservationIgnored
     private var resolvedEngine: HollerKitTranscript.Engine = .appleNetwork
+    @ObservationIgnored
     private var startGeneration: UInt64 = 0
 
+    @ObservationIgnored
     var speechAuthorizationProvider: (() async -> SpeechTranscriberAuthorizationStatus)?
+    @ObservationIgnored
     var microphonePermissionProvider: (() async -> Bool)?
+    @ObservationIgnored
+    var onStateChange: (@MainActor () -> Void)?
 
     /// Creates a new live speech note capture coordinator.
     public init() {}
@@ -291,6 +307,7 @@ public final class SpeechNoteCapture: ObservableObject {
                         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             self.transcriptText = text
                             self.confidence = confidence
+                            self.onStateChange?()
                         }
                     }
                 }
@@ -386,6 +403,13 @@ public final class SpeechNoteCapture: ObservableObject {
         self.isCapturing = true
     }
 
+    /// Internal test hook to simulate a live partial transcript update and notify observers.
+    func updatePartialTranscriptForTesting(_ text: String) {
+        self.isCapturing = true
+        self.transcriptText = text
+        self.onStateChange?()
+    }
+
     #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
     /// Handles an unexpected recognition failure during active capture by stopping audio while preserving any partial text.
     func handleRecognitionCallbackError(for state: LiveRecognitionState) {
@@ -402,6 +426,7 @@ public final class SpeechNoteCapture: ObservableObject {
             self.confidence = preservedConfidence
         }
         self.lastError = SpeechNoteCaptureError.recognitionFailed(errorDescription).errorDescription
+        self.onStateChange?()
     }
 
     /// Selects an available `SFSpeechRecognizer` for `locale`, falling back to the default recognizer only if its language matches.

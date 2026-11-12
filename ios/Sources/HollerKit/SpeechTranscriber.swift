@@ -109,27 +109,46 @@ public actor SpeechTranscriber {
         let options = self.options
         let resolvedLocaleIdentifier = recognizer.locale.identifier
 
-        return try await withCheckedThrowingContinuation { continuation in
-            let state = RecognitionState()
-            state.task = recognizer.recognitionTask(with: request) { result, error in
-                if let error {
+        let state = RecognitionState()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled {
                     state.resumeOnce {
-                        continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
-                            SpeechNoteCaptureError.describeError(error)
-                        ))
+                        continuation.resume(throwing: CancellationError())
                     }
                     return
                 }
+                let task = recognizer.recognitionTask(with: request) { result, error in
+                    if let error {
+                        state.resumeOnce {
+                            continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
+                                SpeechNoteCaptureError.describeError(error)
+                            ))
+                        }
+                        return
+                    }
 
-                guard let result, result.isFinal else { return }
-                state.resumeOnce {
-                    continuation.resume(returning: Self.transcript(
-                        from: result,
-                        localeIdentifier: resolvedLocaleIdentifier,
-                        requireOnDeviceRecognition: options.requireOnDeviceRecognition
-                    ))
+                    if let result {
+                        guard result.isFinal else { return }
+                        state.resumeOnce {
+                            continuation.resume(returning: Self.transcript(
+                                from: result,
+                                localeIdentifier: resolvedLocaleIdentifier,
+                                requireOnDeviceRecognition: options.requireOnDeviceRecognition
+                            ))
+                        }
+                    } else {
+                        state.resumeOnce {
+                            continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
+                                SpeechNoteCaptureError.noTranscript.errorDescription ?? "No speech was detected."
+                            ))
+                        }
+                    }
                 }
+                state.setTask(task)
             }
+        } onCancel: {
+            state.cancelTask()
         }
         #else
         throw SpeechTranscriberError.unavailable
@@ -182,14 +201,41 @@ private extension SpeechTranscriberAuthorizationStatus {
 private final class RecognitionState: @unchecked Sendable {
     private let lock = NSLock()
     private var didResume = false
-    var task: SFSpeechRecognitionTask?
+    private var isCancelled = false
+    private var task: SFSpeechRecognitionTask?
+
+    func setTask(_ newTask: SFSpeechRecognitionTask) {
+        lock.lock()
+        let shouldCancelImmediately = isCancelled || didResume
+        if !shouldCancelImmediately {
+            task = newTask
+        }
+        lock.unlock()
+        if shouldCancelImmediately {
+            newTask.cancel()
+        }
+    }
+
+    func cancelTask() {
+        lock.lock()
+        isCancelled = true
+        let currentTask = task
+        task = nil
+        lock.unlock()
+        currentTask?.cancel()
+    }
 
     func resumeOnce(_ body: () -> Void) {
         lock.lock()
-        defer { lock.unlock() }
-        guard !didResume else { return }
+        guard !didResume else {
+            lock.unlock()
+            return
+        }
         didResume = true
-        task?.cancel()
+        let currentTask = task
+        task = nil
+        lock.unlock()
+        currentTask?.cancel()
         body()
     }
 }

@@ -108,6 +108,7 @@ function nodeSigV4Expected(params: {
 test('defaultV1Limits matches Stage 2 spec constants and upload route enforces maxVideoBytes', async () => {
   assert.equal(defaultV1Limits.maxJsonBytes, 262_144)
   assert.equal(defaultV1Limits.maxTextChars, 20_000)
+  assert.equal(defaultV1Limits.maxEvents, 200)
   assert.equal(defaultV1Limits.maxImages, 12)
   assert.equal(defaultV1Limits.maxImageBytes, 10_485_760)
   assert.equal(defaultV1Limits.maxVideoBytes, 52_428_800)
@@ -143,8 +144,63 @@ test('defaultV1Limits matches Stage 2 spec constants and upload route enforces m
     }),
   )
   assert.equal(oversizedVideo.status, 413)
+  assert.equal(oversizedVideo.headers.get('cache-control'), 'no-store')
+  assert.equal(oversizedVideo.headers.get('x-content-type-options'), 'nosniff')
   const body = (await oversizedVideo.json()) as { error: { code: string } }
   assert.equal(body.error.code, 'video_too_large')
+
+  // Verify .mp3 and .wav audio upload grant extensions
+  const mp3Upload = await handler(
+    new Request('http://hollerkit.local/v1/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        feedbackId: randomUUID(),
+        kind: 'audio',
+        mimeType: 'audio/mpeg',
+        size: 1024,
+      }),
+    }),
+  )
+  assert.equal(mp3Upload.status, 200)
+  const mp3Body = (await mp3Upload.json()) as { key: string }
+  assert.ok(mp3Body.key.endsWith('.mp3'), `Expected .mp3 extension, got ${mp3Body.key}`)
+
+  const wavUpload = await handler(
+    new Request('http://hollerkit.local/v1/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        feedbackId: randomUUID(),
+        kind: 'audio',
+        mimeType: 'audio/wav',
+        size: 1024,
+      }),
+    }),
+  )
+  assert.equal(wavUpload.status, 200)
+  const wavBody = (await wavUpload.json()) as { key: string }
+  assert.ok(wavBody.key.endsWith('.wav'), `Expected .wav extension, got ${wavBody.key}`)
+})
+
+test('getApiKeyPrefix preserves random suffix entropy for long custom prefixes', () => {
+  const keyA = generateApiKey('production_environment')
+  const keyB = generateApiKey('production_environment')
+  const prefixA = getApiKeyPrefix(keyA)
+  const prefixB = getApiKeyPrefix(keyB)
+  assert.ok(prefixA.startsWith('hk_production_environment_'))
+  assert.ok(prefixB.startsWith('hk_production_environment_'))
+  assert.equal(prefixA.length, 'hk_production_environment_'.length + 8)
+  assert.notEqual(prefixA, prefixB)
+
+  const defaultKey = generateApiKey()
+  assert.equal(getApiKeyPrefix(defaultKey).length, 12)
 })
 
 test('supabaseStorage presignUpload and signReadUrl hit expected endpoints, enforce lifetime, and propagate HollerKitError', async () => {

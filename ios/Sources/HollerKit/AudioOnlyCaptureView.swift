@@ -1,7 +1,7 @@
 import SwiftUI
 
 public struct AudioOnlyCaptureView: View {
-    @StateObject private var capture = SpeechNoteCapture()
+    @State private var capture = SpeechNoteCapture()
     @State private var transcript: HollerKitTranscript?
     @State private var errorMessage: String?
 

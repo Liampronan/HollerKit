@@ -1,5 +1,5 @@
-import Combine
 import ImageIO
+import Observation
 import SwiftUI
 
 #if canImport(PhotosUI)
@@ -11,32 +11,36 @@ import UIKit
 #endif
 
 /// Holds the mutable form state and submission lifecycle for completing an active quest run.
+@Observable
 @MainActor
-final class QuestResultDraft: ObservableObject {
+final class QuestResultDraft {
     nonisolated static let maxAttachments = BugReportDraft.maxAttachments
     nonisolated static let maxAttachmentBytes = BugReportDraft.maxAttachmentBytes
     nonisolated static let preferredPNGMaxBytes = BugReportDraft.preferredPNGMaxBytes
     nonisolated static let maxPixelDimension: CGFloat = BugReportDraft.maxPixelDimension
 
     let id = UUID()
-    @Published var selectedResult: QuestResult = .pass
-    @Published var comment: String = ""
-    @Published var images: [BugReportImage] = []
-    @Published var selectedImage: BugReportImage?
-    @Published var isLoadingAttachments = false
-    @Published var attachmentStatusMessage: String?
-    @Published var isSubmitting = false
-    @Published var submissionStage: SubmissionProgressStage?
-    @Published var submissionError: String?
-    @Published var submissionOutcome: OutboxSubmissionOutcome?
-    @Published var submittedSessionId: UUID?
+    var selectedResult: QuestResult = .pass
+    var comment: String = ""
+    var images: [BugReportImage] = []
+    var selectedImage: BugReportImage?
+    var isLoadingAttachments = false
+    var attachmentStatusMessage: String?
+    var isSubmitting = false
+    var submissionStage: SubmissionProgressStage?
+    var submissionError: String?
+    var submissionOutcome: OutboxSubmissionOutcome?
+    var submittedSessionId: UUID?
 
     let speechCapture = SpeechCaptureController()
+    @ObservationIgnored
     var autoDismissDelaySeconds: TimeInterval? = 1.2
+    @ObservationIgnored
     private(set) var photoLoadGeneration: UInt64 = 0
+    @ObservationIgnored
     private var nextAddedImageNumber = 1
+    @ObservationIgnored
     private var autoDismissTask: Task<Void, Never>?
-    private var speechCancellable: AnyCancellable?
 
     /// Returns `true` when additional image attachments can be added to the draft.
     var canAddMoreImages: Bool {
@@ -55,9 +59,6 @@ final class QuestResultDraft: ObservableObject {
     ) {
         self.selectedResult = initialResult
         self.comment = initialComment
-        self.speechCancellable = speechCapture.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
     }
 
     /// Clears draft inputs after successful submission.
@@ -273,10 +274,10 @@ final class QuestResultDraft: ObservableObject {
     }
 }
 
+@MainActor
 public struct QuestResultSheet: View {
-    @ObservedObject private var questState: HollerKitQuestState
-    @StateObject private var draft: QuestResultDraft
-    @ObservedObject private var speechCapture: SpeechCaptureController
+    private let questState: HollerKitQuestState
+    @State private var draft: QuestResultDraft
     @Environment(\.dismiss) private var dismiss
     @State private var activeAnnotationTarget: ActiveAnnotationTarget?
     #if canImport(PhotosUI)
@@ -291,8 +292,7 @@ public struct QuestResultSheet: View {
     public init(questState: HollerKitQuestState = HollerKit.quests) {
         let defaultDraft = QuestResultDraft()
         self.questState = questState
-        self._draft = StateObject(wrappedValue: defaultDraft)
-        self.speechCapture = defaultDraft.speechCapture
+        self._draft = State(initialValue: defaultDraft)
     }
 
     init(
@@ -300,8 +300,7 @@ public struct QuestResultSheet: View {
         draft: QuestResultDraft
     ) {
         self.questState = questState
-        self._draft = StateObject(wrappedValue: draft)
-        self.speechCapture = draft.speechCapture
+        self._draft = State(initialValue: draft)
     }
 
     public var body: some View {
@@ -426,7 +425,7 @@ public struct QuestResultSheet: View {
                                 .accessibilityIdentifier("HollerKitQuestResultCommentEditor")
                         }
 
-                        if let audioConfig = HollerKit.currentConfiguration?.audio, audioConfig.isEnabled {
+                        if let audioConfig = HollerKit.currentConfiguration?.effectiveAudioConfiguration, audioConfig.isEnabled {
                             Button {
                                 Task {
                                     await draft.speechCapture.toggle(configuration: audioConfig)
