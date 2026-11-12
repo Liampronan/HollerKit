@@ -33,6 +33,7 @@ public enum HollerKit {
             maxDuration: 60,
             requireOnDeviceTranscription: false
         ),
+        afterSend: HollerKitAfterSendBehavior = .stayOpen,
         metadata: @escaping @Sendable () -> [String: String] = { [:] },
         initialImages: @escaping @Sendable () -> [HollerKitAttachment] = { [] },
         captureBreadcrumbs: Bool = true,
@@ -46,6 +47,7 @@ public enum HollerKit {
             invocationProvider: invocationProvider,
             inputMode: inputMode,
             audio: audio,
+            afterSend: afterSend,
             metadata: metadata,
             initialImages: initialImages,
             captureBreadcrumbs: captureBreadcrumbs,

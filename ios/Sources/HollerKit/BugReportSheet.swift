@@ -73,7 +73,7 @@ final class BugReportDraft: ObservableObject {
 
     var invokingTrigger: String = "manual"
     let speechCapture = SpeechCaptureController()
-    var autoDismissDelaySeconds: TimeInterval = 1.2
+    var autoDismissDelaySeconds: TimeInterval? = nil
     private(set) var photoLoadGeneration: UInt64 = 0
 
     private var didLoadInitialImages = false
@@ -305,7 +305,8 @@ final class BugReportDraft: ObservableObject {
         breadcrumbs: BreadcrumbStore,
         outboxStore: OutboxStore,
         onDisabled: (() -> Void)? = nil,
-        onAutoDismiss: (() -> Void)? = nil
+        onAutoDismiss: (() -> Void)? = nil,
+        onAutoReset: (() -> Void)? = nil
     ) async {
         guard !isSubmitting else { return }
         guard let configuration else {
@@ -389,12 +390,43 @@ final class BugReportDraft: ObservableObject {
             submissionOutcome = outcome
             SubmissionHaptics.notify(for: outcome)
 
-            if case .sent = outcome, autoDismissDelaySeconds > 0, let onAutoDismiss {
-                let delayNanoseconds = UInt64(autoDismissDelaySeconds * 1_000_000_000)
-                autoDismissTask = Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: delayNanoseconds)
-                    guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
-                    onAutoDismiss()
+            if case .sent = outcome {
+                let afterSend = configuration.afterSend
+                let executeAfterSendAction = { [weak self] in
+                    guard let self else { return }
+                    switch afterSend {
+                    case .stayOpen:
+                        self.resetForAnotherReport(
+                            configuration: configuration,
+                            invocationAttachments: []
+                        )
+                        onAutoReset?()
+                    case .close:
+                        onAutoDismiss?()
+                    }
+                }
+
+                if let override = autoDismissDelaySeconds {
+                    // Internal testing override: delay <= 0 completely disables auto-dismiss/reset
+                    // so tests can inspect .sent outcome synchronously without background tasks.
+                    if override > 0 {
+                        let delayNanoseconds = UInt64(override * 1_000_000_000)
+                        autoDismissTask = Task { @MainActor [weak self] in
+                            try? await Task.sleep(nanoseconds: delayNanoseconds)
+                            guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
+                            executeAfterSendAction()
+                        }
+                    }
+                } else if afterSend.delay <= 0 {
+                    // Configured with zero delay: perform reset or dismissal immediately.
+                    executeAfterSendAction()
+                } else {
+                    let delayNanoseconds = UInt64(afterSend.delay * 1_000_000_000)
+                    autoDismissTask = Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: delayNanoseconds)
+                        guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
+                        executeAfterSendAction()
+                    }
                 }
             }
         } catch {
@@ -661,6 +693,14 @@ public struct BugReportSheet: View {
             }
             .navigationTitle("Report a Bug")
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        draft.cancelCapture()
+                        finishAndDismiss()
+                    }
+                    .disabled(draft.isSubmitting)
+                    .accessibilityIdentifier("HollerKitToolbarCloseButton")
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     if draft.submissionOutcome != nil {
                         Button("Done") {
