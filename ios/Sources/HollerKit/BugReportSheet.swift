@@ -1,6 +1,8 @@
+import AVFoundation
 import ImageIO
 import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 
 #if canImport(PhotosUI)
 import PhotosUI
@@ -14,6 +16,7 @@ import UIKit
 public enum SubmissionProgressStage: Equatable, Sendable {
     case preparing
     case uploadingAttachments(count: Int)
+    case uploadingAttachment(index: Int, total: Int, progress: Double)
     case sending
 
     /// Human-readable headline for the current submission stage.
@@ -23,8 +26,27 @@ public enum SubmissionProgressStage: Equatable, Sendable {
             return "Preparing feedback..."
         case .uploadingAttachments(let count):
             return count == 1 ? "Uploading 1 attachment..." : "Uploading \(count) attachments..."
+        case .uploadingAttachment(let index, let total, let progress):
+            let percent = Int((min(1.0, max(0.0, progress)) * 100).rounded())
+            if total <= 1 {
+                return "Uploading attachment (\(percent)%)..."
+            }
+            return "Uploading attachment \(index) of \(total) (\(percent)%)..."
         case .sending:
             return "Sending to server..."
+        }
+    }
+
+    /// Fractional upload progress (`0.0 ... 1.0`) when actively uploading an attachment, or `nil` for indeterminate stages.
+    public var progress: Double? {
+        switch self {
+        case .uploadingAttachment(let index, let total, let itemProgress):
+            let clampedItem = min(1.0, max(0.0, itemProgress))
+            guard total > 0 else { return clampedItem }
+            let completed = Double(max(0, index - 1))
+            return min(1.0, max(0.0, (completed + clampedItem) / Double(total)))
+        case .preparing, .uploadingAttachments, .sending:
+            return nil
         }
     }
 }
@@ -58,14 +80,23 @@ enum SubmissionHaptics {
 @MainActor
 final class BugReportDraft {
     nonisolated static let maxAttachments = 12
+    nonisolated static let maxVideoAttachments = 3
     nonisolated static let maxAttachmentBytes = 10 * 1024 * 1024
+    nonisolated static let defaultMaxVideoBytes = 50 * 1024 * 1024
+    nonisolated static let maxVideoDurationSeconds: TimeInterval = 60
     nonisolated static let preferredPNGMaxBytes = 2 * 1024 * 1024
     nonisolated static let maxPixelDimension: CGFloat = 2400
 
     let id = UUID()
     var comment = ""
-    var images: [BugReportImage] = []
-    var selectedImage: BugReportImage?
+    var images: [BugReportAttachment] = []
+    var selectedImage: BugReportAttachment? {
+        didSet {
+            if selectedImage?.isVideo == true {
+                selectedImage = nil
+            }
+        }
+    }
     var isLoadingAttachments = false
     var attachmentStatusMessage: String?
     var isSubmitting = false
@@ -79,16 +110,43 @@ final class BugReportDraft {
     @ObservationIgnored
     var autoDismissDelaySeconds: TimeInterval? = nil
     @ObservationIgnored
+    var maxVideoBytesOverride: Int? = nil
+    @ObservationIgnored
     private(set) var photoLoadGeneration: UInt64 = 0
+    @ObservationIgnored
+    private(set) var transcodeInvocationCount: Int = 0
+    @ObservationIgnored
+    let tempDirectoryURL: URL
+
+    @ObservationIgnored
+    var videoDurationInspector: @Sendable (URL) async throws -> TimeInterval = { url in
+        try await BugReportAttachment.inspectVideoDurationSeconds(at: url)
+    }
+    @ObservationIgnored
+    var videoTranscoder: @Sendable (URL, URL, Int) async throws -> URL = { sourceURL, outputDir, maxBytes in
+        try await BugReportAttachment.transcodeVideo(
+            sourceURL: sourceURL,
+            outputDirectoryURL: outputDir,
+            maxBytes: maxBytes
+        )
+    }
+    #if canImport(UIKit)
+    @ObservationIgnored
+    var videoThumbnailGenerator: @Sendable (URL) async -> UIImage? = { url in
+        await BugReportAttachment.generateVideoThumbnail(for: url)
+    }
+    #endif
 
     @ObservationIgnored
     private var didLoadInitialImages = false
     @ObservationIgnored
     private var nextAddedImageNumber = 1
     @ObservationIgnored
+    private var nextAddedVideoNumber = 1
+    @ObservationIgnored
     private var autoDismissTask: Task<Void, Never>?
 
-    /// Returns `true` when additional image attachments can be added to the draft.
+    /// Returns `true` when additional attachments can be added to the draft.
     var canAddMoreImages: Bool {
         images.count < Self.maxAttachments
     }
@@ -98,19 +156,70 @@ final class BugReportDraft {
         max(0, Self.maxAttachments - images.count)
     }
 
-    /// Creates a new bug report draft optionally preloaded with initial images.
+    /// Returns the number of video attachments currently in the draft.
+    var videoCount: Int {
+        images.filter(\.isVideo).count
+    }
+
+    /// Returns `true` when additional video attachments can be added (fewer than 3 videos and fewer than 12 total attachments).
+    var canAddMoreVideos: Bool {
+        canAddMoreImages && videoCount < Self.maxVideoAttachments
+    }
+
+    /// Returns the number of remaining video attachment slots before hitting `maxVideoAttachments` or `maxAttachments`.
+    var remainingVideoSlots: Int {
+        min(remainingImageSlots, max(0, Self.maxVideoAttachments - videoCount))
+    }
+
+    /// Returns the effective maximum video size in bytes, preferring any test override or server-reported limit before falling back to 50 MB.
+    var effectiveMaxVideoBytes: Int {
+        if let override = maxVideoBytesOverride, override > 0 {
+            return override
+        }
+        if let serverLimit = HollerKit.quests.serverMaxVideoBytes, serverLimit > 0 {
+            return serverLimit
+        }
+        return Self.defaultMaxVideoBytes
+    }
+
+    #if canImport(PhotosUI)
+    /// Filter used by `PhotosPicker`: allows both images and videos until 3 videos are attached, then limits selection to images.
+    var pickerFilter: PHPickerFilter {
+        canAddMoreVideos ? .any(of: [.images, .videos]) : .images
+    }
+    #endif
+
+    /// Creates a new bug report draft optionally preloaded with initial attachments.
     init(
         configuration: HollerKitConfiguration? = nil,
         invocationAttachments: [HollerKitAttachment] = [],
-        invokingTrigger: String = "manual"
+        invokingTrigger: String = "manual",
+        tempDirectoryURL: URL? = nil
     ) {
         self.invokingTrigger = invokingTrigger
+        self.tempDirectoryURL = tempDirectoryURL ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitDrafts", isDirectory: true)
+            .appendingPathComponent(id.uuidString.lowercased(), isDirectory: true)
         if configuration != nil || !invocationAttachments.isEmpty {
             loadInitialImagesIfNeeded(
                 configuration: configuration,
                 invocationAttachments: invocationAttachments
             )
         }
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: tempDirectoryURL)
+    }
+
+    /// Removes all temporary video files created for this draft.
+    func cleanupTempFiles() {
+        for attachment in images {
+            if let fileURL = attachment.videoFileURL {
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+        }
+        try? FileManager.default.removeItem(at: tempDirectoryURL)
     }
 
     /// Loads initial attachments once for the current draft when not in audio-only mode.
@@ -163,9 +272,11 @@ final class BugReportDraft {
         attachmentStatusMessage = nil
         speechCapture.reset()
         comment = ""
+        cleanupTempFiles()
         images = []
         selectedImage = nil
         nextAddedImageNumber = 1
+        nextAddedVideoNumber = 1
     }
 
     /// Resets the draft to a clean state so the tester can file another report immediately.
@@ -180,9 +291,11 @@ final class BugReportDraft {
         attachmentStatusMessage = nil
         speechCapture.reset()
         comment = ""
+        cleanupTempFiles()
         images = []
         selectedImage = nil
         nextAddedImageNumber = 1
+        nextAddedVideoNumber = 1
         isSubmitting = false
         submissionStage = nil
         submissionError = nil
@@ -203,9 +316,15 @@ final class BugReportDraft {
         speechCapture.cancelCapture()
     }
 
-    /// Removes the attached image with `id` from the draft.
+    /// Removes the attached item with `id` from the draft and cleans up its temporary file if it is a video.
     func removeImage(id: UUID) {
+        let removed = images.filter { $0.id == id }
         images.removeAll { $0.id == id }
+        for item in removed {
+            if let fileURL = item.videoFileURL {
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+        }
         if selectedImage?.id == id {
             selectedImage = nil
         }
@@ -215,17 +334,18 @@ final class BugReportDraft {
     }
 
     #if canImport(UIKit)
-    /// Replaces an annotated attachment image in the draft.
+    /// Replaces an annotated attachment image in the draft (no-op for video attachments).
     func replaceImage(id: UUID, with renderedImage: UIImage) {
-        guard let index = images.firstIndex(where: { $0.id == id }) else { return }
-        images[index].image = BugReportImage.normalizedImage(renderedImage)
+        guard let index = images.firstIndex(where: { $0.id == id }),
+              !images[index].isVideo else { return }
+        images[index].image = BugReportAttachment.normalizedImage(renderedImage)
     }
 
     /// Normalizes and appends `image` to the draft if the attachment cap has not been reached.
     @discardableResult
     func addImage(_ image: UIImage, title: String? = nil) -> Bool {
         guard canAddMoreImages else {
-            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per report."
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
             return false
         }
         let resolvedTitle: String
@@ -235,7 +355,7 @@ final class BugReportDraft {
             resolvedTitle = "Photo \(nextAddedImageNumber)"
         }
         nextAddedImageNumber += 1
-        images.append(BugReportImage(title: resolvedTitle, image: image))
+        images.append(BugReportAttachment(title: resolvedTitle, image: image))
         attachmentStatusMessage = nil
         return true
     }
@@ -243,7 +363,7 @@ final class BugReportDraft {
     /// Downsamples `data` into a `UIImage` within `maxPixelDimension` and appends it to the draft.
     @discardableResult
     func addImageData(_ data: Data, title: String? = nil) -> Bool {
-        guard let decoded = BugReportImage.downsampledImage(from: data) else {
+        guard let decoded = BugReportAttachment.downsampledImage(from: data) else {
             attachmentStatusMessage = "Could not load the selected image."
             return false
         }
@@ -254,19 +374,134 @@ final class BugReportDraft {
     @discardableResult
     func addImageDataOffMainActor(_ data: Data, title: String? = nil) async -> Bool {
         guard canAddMoreImages else {
-            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per report."
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
             return false
         }
         let generation = photoLoadGeneration
         let maxDimension = Self.maxPixelDimension
         let cgImage = await Task.detached(priority: .userInitiated) {
-            BugReportImage.downsampledCGImage(from: data, maxPixelDimension: maxDimension)
+            BugReportAttachment.downsampledCGImage(from: data, maxPixelDimension: maxDimension)
         }.value
         guard photoLoadGeneration == generation else { return false }
         if let cgImage {
             return addImage(UIImage(cgImage: cgImage, scale: 1.0, orientation: .up), title: title)
         }
         return addImageData(data, title: title)
+    }
+
+    /// Validates, optionally transcodes, generates a thumbnail for, and appends a video file at `sourceURL` to the draft.
+    ///
+    /// Validation order:
+    /// 1. Total attachment cap (`12`) and per-report video cap (`3`).
+    /// 2. Video duration (`<= 60` seconds) is checked **before** any transcoding.
+    /// 3. File size is checked against `effectiveMaxVideoBytes` (server `maxVideoBytes` or 50 MB fallback).
+    ///    Under-size clips are kept untouched; over-size clips are transcoded via `AVAssetExportSession` and rejected only if still over the limit.
+    @discardableResult
+    func addVideo(from sourceURL: URL, title: String? = nil) async -> Bool {
+        guard canAddMoreImages else {
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
+            return false
+        }
+        guard canAddMoreVideos else {
+            attachmentStatusMessage = "You can attach up to \(Self.maxVideoAttachments) videos per report."
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: sourceURL.path),
+              let sourceAttrs = try? FileManager.default.attributesOfItem(atPath: sourceURL.path),
+              let initialSize = (sourceAttrs[.size] as? NSNumber)?.intValue,
+              initialSize > 0 else {
+            attachmentStatusMessage = "Could not load the selected video."
+            return false
+        }
+
+        let durationSeconds: TimeInterval
+        do {
+            durationSeconds = try await videoDurationInspector(sourceURL)
+        } catch {
+            attachmentStatusMessage = "Could not load the selected video."
+            return false
+        }
+        guard durationSeconds.isFinite, durationSeconds > 0 else {
+            attachmentStatusMessage = "Could not load the selected video."
+            return false
+        }
+        if durationSeconds > Self.maxVideoDurationSeconds {
+            attachmentStatusMessage = "Videos must be 1 minute or shorter."
+            return false
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: tempDirectoryURL, withIntermediateDirectories: true)
+        } catch {
+            attachmentStatusMessage = "Could not load the selected video."
+            return false
+        }
+
+        let ext = Self.normalizedVideoExtension(for: sourceURL)
+        let workingURL = tempDirectoryURL.appendingPathComponent("video-\(UUID().uuidString).\(ext)", isDirectory: false)
+        do {
+            if FileManager.default.fileExists(atPath: workingURL.path) {
+                try? FileManager.default.removeItem(at: workingURL)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: workingURL)
+        } catch {
+            attachmentStatusMessage = "Could not load the selected video."
+            return false
+        }
+
+        let maxBytes = effectiveMaxVideoBytes
+        var finalURL = workingURL
+        var finalSize = initialSize
+
+        if initialSize > maxBytes {
+            transcodeInvocationCount += 1
+            do {
+                let transcodedURL = try await videoTranscoder(workingURL, tempDirectoryURL, maxBytes)
+                if transcodedURL.standardizedFileURL != workingURL.standardizedFileURL {
+                    try? FileManager.default.removeItem(at: workingURL)
+                }
+                guard let transcodedAttrs = try? FileManager.default.attributesOfItem(atPath: transcodedURL.path),
+                      let transcodedSize = (transcodedAttrs[.size] as? NSNumber)?.intValue,
+                      transcodedSize > 0 else {
+                    try? FileManager.default.removeItem(at: transcodedURL)
+                    attachmentStatusMessage = "Could not compress the selected video."
+                    return false
+                }
+                if transcodedSize > maxBytes {
+                    try? FileManager.default.removeItem(at: transcodedURL)
+                    attachmentStatusMessage = "Video exceeds the maximum size limit even after compression."
+                    return false
+                }
+                finalURL = transcodedURL
+                finalSize = transcodedSize
+            } catch {
+                try? FileManager.default.removeItem(at: workingURL)
+                attachmentStatusMessage = "Could not compress the selected video."
+                return false
+            }
+        }
+
+        let thumbnail = await videoThumbnailGenerator(finalURL) ?? BugReportAttachment.placeholderVideoThumbnail()
+        let resolvedTitle: String
+        if let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty {
+            resolvedTitle = trimmed
+        } else {
+            resolvedTitle = "Video \(nextAddedVideoNumber)"
+        }
+        nextAddedVideoNumber += 1
+
+        let mimeType = Self.mimeTypeForVideoExtension(finalURL.pathExtension)
+        let attachment = BugReportAttachment(
+            title: resolvedTitle,
+            thumbnail: thumbnail,
+            videoFileURL: finalURL,
+            videoMimeType: mimeType,
+            durationSeconds: durationSeconds,
+            fileSize: finalSize
+        )
+        images.append(attachment)
+        attachmentStatusMessage = nil
+        return true
     }
 
     /// Pastes one or more images from the system clipboard (or the supplied `pasteboardImages` in tests) into the draft.
@@ -288,14 +523,14 @@ final class BugReportDraft {
             return 0
         }
         guard canAddMoreImages else {
-            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per report."
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
             return 0
         }
 
         var addedCount = 0
         for image in sourceImages {
             guard canAddMoreImages else {
-                attachmentStatusMessage = "Attached \(addedCount) photo\(addedCount == 1 ? "" : "s") (maximum \(Self.maxAttachments) per report)."
+                attachmentStatusMessage = "Attached \(addedCount) attachment\(addedCount == 1 ? "" : "s") (maximum \(Self.maxAttachments) per report)."
                 return addedCount
             }
             let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
@@ -304,6 +539,309 @@ final class BugReportDraft {
             }
         }
         return addedCount
+    }
+
+    /// Pastes attachments from the supplied `[NSItemProvider]` test seam (and optional `fallbackImages`), branching dynamically between videos and images.
+    @discardableResult
+    func pasteImagesFromClipboard(
+        itemProviders: [NSItemProvider],
+        fallbackImages: [UIImage]? = nil
+    ) async -> Int {
+        await pasteFromClipboard(itemProviders: itemProviders, fallbackImages: fallbackImages)
+    }
+
+    /// Dynamically inspects clipboard `NSItemProvider`s to attach videos (`UTType.movie` / `UTType.video`) and images (`UTType.image`),
+    /// falling back to images when a source only provides a URL or thumbnail.
+    @discardableResult
+    func pasteFromClipboard(
+        itemProviders injectedProviders: [NSItemProvider]? = nil,
+        fallbackImages: [UIImage]? = nil
+    ) async -> Int {
+        let providers: [NSItemProvider]
+        if let injectedProviders {
+            providers = injectedProviders
+        } else if fallbackImages != nil {
+            providers = []
+        } else {
+            providers = UIPasteboard.general.itemProviders
+        }
+
+        if providers.isEmpty {
+            if let fallbackImages {
+                return pasteImagesFromClipboard(images: fallbackImages)
+            }
+            if UIPasteboard.general.hasImages {
+                return pasteImagesFromClipboard()
+            }
+            attachmentStatusMessage = "No image or video found on the clipboard."
+            return 0
+        }
+
+        guard canAddMoreImages else {
+            attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
+            return 0
+        }
+
+        try? FileManager.default.createDirectory(at: tempDirectoryURL, withIntermediateDirectories: true)
+
+        var addedCount = 0
+        var usedURLOrThumbnailFallback = false
+        var sawOnlyURLWithoutMedia = false
+        var fallbackImageIndex = 0
+        var lastRejectionStatusMessage: String?
+
+        for provider in providers {
+            guard canAddMoreImages else {
+                attachmentStatusMessage = "Attached \(addedCount) attachment\(addedCount == 1 ? "" : "s") (maximum \(Self.maxAttachments) per report)."
+                return addedCount
+            }
+
+            let movieTypeId = Self.preferredMovieTypeIdentifier(for: provider)
+            let imageTypeId = Self.preferredImageTypeIdentifier(for: provider)
+            let urlTypeId = Self.preferredURLTypeIdentifier(for: provider)
+
+            if let movieTypeId {
+                if let tempMovieURL = await Self.loadTemporaryFile(
+                    from: provider,
+                    typeIdentifier: movieTypeId,
+                    into: tempDirectoryURL
+                ) {
+                    defer { try? FileManager.default.removeItem(at: tempMovieURL) }
+                    let pastedTitle = "Pasted Video \(nextAddedVideoNumber)"
+                    if await addVideo(from: tempMovieURL, title: pastedTitle) {
+                        addedCount += 1
+                    } else if let status = attachmentStatusMessage {
+                        lastRejectionStatusMessage = status
+                    }
+                    continue
+                } else if let image = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
+                            ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
+                    let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
+                    if addImage(image, title: pastedTitle) {
+                        addedCount += 1
+                        usedURLOrThumbnailFallback = true
+                    }
+                    continue
+                }
+            }
+
+            if let urlTypeId {
+                if let loadedURL = await Self.loadURL(from: provider, typeIdentifier: urlTypeId),
+                   loadedURL.isFileURL,
+                   FileManager.default.fileExists(atPath: loadedURL.path),
+                   Self.isMovieFileURL(loadedURL) {
+                    let pastedTitle = "Pasted Video \(nextAddedVideoNumber)"
+                    if await addVideo(from: loadedURL, title: pastedTitle) {
+                        addedCount += 1
+                    } else if let status = attachmentStatusMessage {
+                        lastRejectionStatusMessage = status
+                    }
+                    continue
+                }
+
+                if let image = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
+                    ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
+                    let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
+                    if addImage(image, title: pastedTitle) {
+                        addedCount += 1
+                        usedURLOrThumbnailFallback = true
+                    }
+                } else {
+                    sawOnlyURLWithoutMedia = true
+                }
+                continue
+            }
+
+            if imageTypeId != nil || provider.canLoadObject(ofClass: UIImage.self) {
+                if let image = await Self.loadImage(from: provider, imageTypeIdentifier: imageTypeId)
+                    ?? Self.nextFallbackImage(from: fallbackImages, index: &fallbackImageIndex) {
+                    let pastedTitle = "Pasted Image \(nextAddedImageNumber)"
+                    if addImage(image, title: pastedTitle) {
+                        addedCount += 1
+                    }
+                }
+                continue
+            }
+        }
+
+        if addedCount == 0, let fallbackImages, !fallbackImages.isEmpty {
+            let count = pasteImagesFromClipboard(images: fallbackImages)
+            if count > 0, sawOnlyURLWithoutMedia {
+                attachmentStatusMessage = "Clipboard only contained a link or thumbnail; attached image preview instead of video."
+            }
+            return count
+        }
+
+        if usedURLOrThumbnailFallback {
+            attachmentStatusMessage = "Clipboard only contained a link or thumbnail; attached image preview instead of video."
+        } else if let lastRejectionStatusMessage {
+            attachmentStatusMessage = lastRejectionStatusMessage
+        } else if addedCount == 0 {
+            if sawOnlyURLWithoutMedia {
+                attachmentStatusMessage = "Clipboard only contained a link, not a video file or image."
+            } else {
+                attachmentStatusMessage = "No image or video found on the clipboard."
+            }
+        }
+
+        return addedCount
+    }
+
+    private nonisolated static func preferredMovieTypeIdentifier(for provider: NSItemProvider) -> String? {
+        for identifier in provider.registeredTypeIdentifiers {
+            if let utType = UTType(identifier),
+               (utType.conforms(to: .movie) || utType.conforms(to: .video) || utType == .mpeg4Movie || utType == .quickTimeMovie) {
+                return identifier
+            }
+        }
+        if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+            return UTType.movie.identifier
+        }
+        if provider.hasItemConformingToTypeIdentifier(UTType.video.identifier) {
+            return UTType.video.identifier
+        }
+        return nil
+    }
+
+    private nonisolated static func preferredImageTypeIdentifier(for provider: NSItemProvider) -> String? {
+        for identifier in provider.registeredTypeIdentifiers {
+            if let utType = UTType(identifier), utType.conforms(to: .image) {
+                return identifier
+            }
+        }
+        if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            return UTType.image.identifier
+        }
+        return nil
+    }
+
+    private nonisolated static func preferredURLTypeIdentifier(for provider: NSItemProvider) -> String? {
+        for identifier in provider.registeredTypeIdentifiers {
+            if let utType = UTType(identifier), (utType.conforms(to: .url) || utType.conforms(to: .fileURL)) {
+                return identifier
+            }
+        }
+        if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+            return UTType.url.identifier
+        }
+        return nil
+    }
+
+    private nonisolated static func isMovieFileURL(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        if ext == "mp4" || ext == "mov" || ext == "m4v" {
+            return true
+        }
+        if let utType = UTType(filenameExtension: ext) {
+            return utType.conforms(to: .movie) || utType.conforms(to: .video)
+        }
+        return false
+    }
+
+    private nonisolated static func normalizedVideoExtension(for url: URL) -> String {
+        let lower = url.pathExtension.lowercased()
+        if lower == "mp4" {
+            return "mp4"
+        }
+        return "mov"
+    }
+
+    private nonisolated static func mimeTypeForVideoExtension(_ ext: String) -> String {
+        let lower = ext.lowercased()
+        if lower == "mp4" {
+            return "video/mp4"
+        }
+        return "video/quicktime"
+    }
+
+    private static func nextFallbackImage(from fallbackImages: [UIImage]?, index: inout Int) -> UIImage? {
+        guard let fallbackImages, index < fallbackImages.count else { return nil }
+        let img = fallbackImages[index]
+        index += 1
+        return img
+    }
+
+    private static func loadTemporaryFile(
+        from provider: NSItemProvider,
+        typeIdentifier: String,
+        into directoryURL: URL
+    ) async -> URL? {
+        await withCheckedContinuation { continuation in
+            provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { fileURL, _ in
+                guard let fileURL else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                do {
+                    try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+                    let ext = fileURL.pathExtension.isEmpty ? "mov" : fileURL.pathExtension
+                    let copiedURL = directoryURL.appendingPathComponent("paste-\(UUID().uuidString).\(ext)", isDirectory: false)
+                    try FileManager.default.copyItem(at: fileURL, to: copiedURL)
+                    continuation.resume(returning: copiedURL)
+                } catch {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
+    private static func loadImage(
+        from provider: NSItemProvider,
+        imageTypeIdentifier: String?
+    ) async -> UIImage? {
+        let typeId = imageTypeIdentifier ?? UTType.image.identifier
+        if provider.hasItemConformingToTypeIdentifier(typeId) {
+            let data: Data? = await withCheckedContinuation { continuation in
+                provider.loadDataRepresentation(forTypeIdentifier: typeId) { data, _ in
+                    continuation.resume(returning: data)
+                }
+            }
+            if let data, let image = BugReportAttachment.downsampledImage(from: data) {
+                return image
+            }
+        }
+        if provider.canLoadObject(ofClass: UIImage.self) {
+            return await withCheckedContinuation { continuation in
+                _ = provider.loadObject(ofClass: UIImage.self) { object, _ in
+                    if let image = object as? UIImage {
+                        continuation.resume(returning: image)
+                    } else {
+                        continuation.resume(returning: nil)
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func loadURL(
+        from provider: NSItemProvider,
+        typeIdentifier: String
+    ) async -> URL? {
+        if provider.hasItemConformingToTypeIdentifier(typeIdentifier) {
+            let data: Data? = await withCheckedContinuation { continuation in
+                provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
+                    continuation.resume(returning: data)
+                }
+            }
+            if let data {
+                if let url = URL(dataRepresentation: data, relativeTo: nil) {
+                    return url
+                }
+                if let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   let url = URL(string: str) {
+                    return url
+                }
+            }
+        }
+        if provider.canLoadObject(ofClass: NSURL.self) {
+            return await withCheckedContinuation { continuation in
+                _ = provider.loadObject(ofClass: NSURL.self) { object, _ in
+                    continuation.resume(returning: (object as? NSURL) as URL?)
+                }
+            }
+        }
+        return nil
     }
     #endif
 
@@ -557,7 +1095,7 @@ public struct BugReportSheet: View {
                                             ImageAttachmentThumbnail(
                                                 image: image,
                                                 isDisabled: draft.isSubmitting,
-                                                onTap: {
+                                                onTap: image.isVideo ? nil : {
                                                     draft.selectedImage = image
                                                 },
                                                 onRemove: {
@@ -574,11 +1112,13 @@ public struct BugReportSheet: View {
                             PhotosPicker(
                                 selection: $selectedPhotoItems,
                                 maxSelectionCount: max(1, draft.remainingImageSlots),
-                                matching: .images
+                                matching: draft.pickerFilter
                             ) {
                                 HStack(spacing: 8) {
                                     Label(
-                                        draft.isLoadingAttachments ? "Adding Photo..." : "Add Photo",
+                                        draft.isLoadingAttachments
+                                            ? "Adding Attachment..."
+                                            : (draft.canAddMoreVideos ? "Add Photo or Video" : "Add Photo"),
                                         systemImage: "photo.badge.plus"
                                     )
                                     if draft.isLoadingAttachments {
@@ -595,10 +1135,12 @@ public struct BugReportSheet: View {
                             #if canImport(UIKit)
                             if hasClipboardImage {
                                 Button {
-                                    _ = draft.pasteImagesFromClipboard()
-                                    refreshClipboardImageAvailability()
+                                    Task { @MainActor in
+                                        _ = await draft.pasteFromClipboard()
+                                        refreshClipboardImageAvailability()
+                                    }
                                 } label: {
-                                    Label("Paste Image", systemImage: "doc.on.clipboard")
+                                    Label("Paste from Clipboard", systemImage: "doc.on.clipboard")
                                 }
                                 .disabled(draft.isSubmitting || draft.isLoadingAttachments || !draft.canAddMoreImages)
                                 .accessibilityIdentifier("HollerKitPasteImageButton")
@@ -850,18 +1392,31 @@ public struct BugReportSheet: View {
         await speechCapture.retry(configuration: effectiveAudioConfiguration)
     }
 
-    /// Updates `hasClipboardImage` from the system pasteboard without reading image data until tapped.
+    /// Updates `hasClipboardImage` from the system pasteboard without reading clipboard item payloads until tapped.
     @MainActor
     private func refreshClipboardImageAvailability() {
         #if canImport(UIKit)
-        hasClipboardImage = UIPasteboard.general.hasImages
+        let pasteboard = UIPasteboard.general
+        if pasteboard.hasImages || pasteboard.hasURLs {
+            hasClipboardImage = true
+            return
+        }
+        hasClipboardImage = pasteboard.itemProviders.contains { provider in
+            provider.registeredTypeIdentifiers.contains { identifier in
+                guard let utType = UTType(identifier) else { return false }
+                return utType.conforms(to: .movie)
+                    || utType.conforms(to: .video)
+                    || utType.conforms(to: .image)
+                    || utType.conforms(to: .url)
+            }
+        }
         #else
         hasClipboardImage = false
         #endif
     }
 
     #if canImport(PhotosUI) && canImport(UIKit)
-    /// Loads and attaches photos selected from the system `PhotosPicker`.
+    /// Loads and attaches photos and videos selected from the system `PhotosPicker`.
     @MainActor
     private func loadSelectedPhotoItems(_ items: [PhotosPickerItem]) async {
         let generation = draft.photoLoadGeneration
@@ -880,11 +1435,43 @@ public struct BugReportSheet: View {
                 return
             }
             guard draft.canAddMoreImages else {
-                draft.attachmentStatusMessage = "You can attach up to \(BugReportDraft.maxAttachments) photos per report."
+                draft.attachmentStatusMessage = "You can attach up to \(BugReportDraft.maxAttachments) attachments per report."
                 break
             }
+
+            let isMovieItem = item.supportedContentTypes.contains { type in
+                type.conforms(to: .movie) || type.conforms(to: .video)
+            }
+
             do {
-                if let data = try await item.loadTransferable(type: Data.self) {
+                if isMovieItem {
+                    guard draft.canAddMoreVideos else {
+                        draft.attachmentStatusMessage = "You can attach up to \(BugReportDraft.maxVideoAttachments) videos per report."
+                        failedCount += 1
+                        continue
+                    }
+                    if let pickedMovie = try await item.loadTransferable(type: PickedMovieTransferable.self) {
+                        defer {
+                            try? FileManager.default.removeItem(at: pickedMovie.fileURL)
+                        }
+                        guard draft.photoLoadGeneration == generation,
+                              !draft.isSubmitting,
+                              draft.submissionOutcome == nil else {
+                            return
+                        }
+                        let added = await draft.addVideo(from: pickedMovie.fileURL)
+                        guard draft.photoLoadGeneration == generation,
+                              !draft.isSubmitting,
+                              draft.submissionOutcome == nil else {
+                            return
+                        }
+                        if !added {
+                            failedCount += 1
+                        }
+                    } else {
+                        failedCount += 1
+                    }
+                } else if let data = try await item.loadTransferable(type: Data.self) {
                     guard draft.photoLoadGeneration == generation,
                           !draft.isSubmitting,
                           draft.submissionOutcome == nil else {
@@ -909,12 +1496,34 @@ public struct BugReportSheet: View {
 
         if draft.photoLoadGeneration == generation && failedCount > 0 && draft.attachmentStatusMessage == nil {
             draft.attachmentStatusMessage = failedCount == 1
-                ? "Could not load the selected photo."
-                : "Could not load \(failedCount) selected photos."
+                ? "Could not load the selected attachment."
+                : "Could not load \(failedCount) selected attachments."
         }
     }
     #endif
 }
+
+#if canImport(PhotosUI)
+/// File-backed `Transferable` representation for `PhotosPicker` video items so large clips are copied to disk rather than loaded into `Data`.
+struct PickedMovieTransferable: Transferable, Sendable {
+    let fileURL: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("HollerKitPickedMovies", isDirectory: true)
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+            let destination = tempDir.appendingPathComponent("\(UUID().uuidString).\(ext)", isDirectory: false)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try? FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.copyItem(at: received.file, to: destination)
+            return PickedMovieTransferable(fileURL: destination)
+        }
+    }
+}
+#endif
 
 /// Full-sheet progress and post-submission confirmation overlay shared by bug reports and quest runs.
 struct SubmissionFeedbackOverlayView: View {
@@ -934,9 +1543,16 @@ struct SubmissionFeedbackOverlayView: View {
 
             VStack(spacing: 16) {
                 if isSubmitting {
-                    ProgressView()
-                        .controlSize(.large)
-                        .padding(.bottom, 4)
+                    if let progressValue = stage?.progress {
+                        ProgressView(value: progressValue, total: 1.0)
+                            .progressViewStyle(.linear)
+                            .frame(maxWidth: 220)
+                            .padding(.bottom, 4)
+                    } else {
+                        ProgressView()
+                            .controlSize(.large)
+                            .padding(.bottom, 4)
+                    }
 
                     Text((stage ?? .sending).title)
                         .font(.headline)
@@ -1050,9 +1666,35 @@ struct SubmissionFeedbackOverlayView: View {
     }
 }
 
-struct BugReportImage: Identifiable, Hashable {
+public enum BugReportAttachmentKind: String, Codable, Equatable, Hashable, Sendable {
+    case image
+    case video
+}
+
+typealias BugReportImage = BugReportAttachment
+
+struct BugReportAttachment: Identifiable, Hashable {
     let id = UUID()
     var title: String
+    var kind: BugReportAttachmentKind
+    var videoFileURL: URL?
+    var videoMimeType: String?
+    var videoDurationSeconds: TimeInterval?
+    var videoFileSize: Int?
+
+    var isVideo: Bool {
+        kind == .video
+    }
+
+    var formattedDuration: String? {
+        guard isVideo, let duration = videoDurationSeconds, duration.isFinite, duration >= 0 else {
+            return nil
+        }
+        let totalSeconds = max(1, Int(duration.rounded()))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
 
     #if canImport(UIKit)
     var image: UIImage
@@ -1060,14 +1702,138 @@ struct BugReportImage: Identifiable, Hashable {
     /// Creates a normalized bug report image attachment with the given display title and `UIImage`.
     init(title: String, image: UIImage) {
         self.title = title
+        self.kind = .image
         self.image = Self.normalizedImage(image)
     }
 
-    /// Creates a bug report image attachment by downsampling the encoded image data in `attachment`.
+    /// Creates a bug report video attachment with a thumbnail preview, file URL, MIME type, duration, and file size.
+    init(
+        title: String,
+        thumbnail: UIImage,
+        videoFileURL: URL,
+        videoMimeType: String,
+        durationSeconds: TimeInterval,
+        fileSize: Int
+    ) {
+        self.title = title
+        self.kind = .video
+        self.image = Self.normalizedImage(thumbnail)
+        self.videoFileURL = videoFileURL
+        self.videoMimeType = videoMimeType
+        self.videoDurationSeconds = durationSeconds
+        self.videoFileSize = fileSize
+    }
+
+    /// Creates a bug report attachment from a `HollerKitAttachment` (image or video).
     init?(attachment: HollerKitAttachment) {
+        if attachment.kind == "video" || attachment.mimeType.lowercased().hasPrefix("video/") {
+            guard let fileURL = attachment.fileURL,
+                  FileManager.default.fileExists(atPath: fileURL.path) else {
+                return nil
+            }
+            let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+            let size = (attrs?[.size] as? NSNumber)?.intValue ?? attachment.data.count
+            self.title = attachment.filename
+            self.kind = .video
+            self.image = Self.placeholderVideoThumbnail()
+            self.videoFileURL = fileURL
+            self.videoMimeType = attachment.mimeType
+            self.videoDurationSeconds = attachment.durationSeconds ?? 1
+            self.videoFileSize = size
+            return
+        }
         guard let image = Self.downsampledImage(from: attachment.data) else { return nil }
         self.title = attachment.filename
+        self.kind = .image
         self.image = image
+    }
+
+    /// Inspects the duration in seconds of the video asset at `url`.
+    nonisolated static func inspectVideoDurationSeconds(at url: URL) async throws -> TimeInterval {
+        let asset = AVURLAsset(url: url)
+        let cmDuration = try await asset.load(.duration)
+        let seconds = CMTimeGetSeconds(cmDuration)
+        guard seconds.isFinite, seconds > 0 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return seconds
+    }
+
+    /// Generates a thumbnail `UIImage` from the first frame of the video at `url`.
+    nonisolated static func generateVideoThumbnail(
+        for url: URL,
+        maxPixelDimension: CGFloat = 480
+    ) async -> UIImage? {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixelDimension, height: maxPixelDimension)
+        let time = CMTime(seconds: 0, preferredTimescale: 600)
+        if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
+            return UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
+        }
+        return nil
+    }
+
+    /// Renders a fallback placeholder thumbnail when `AVAssetImageGenerator` cannot decode a frame.
+    nonisolated static func placeholderVideoThumbnail() -> UIImage {
+        let size = CGSize(width: 272, height: 208)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.image { ctx in
+            UIColor.darkGray.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+        }
+    }
+
+    /// Transcodes the video at `sourceURL` into `outputDirectoryURL` using `AVAssetExportSession` with a 720p/medium preset and `fileLengthLimit`.
+    nonisolated static func transcodeVideo(
+        sourceURL: URL,
+        outputDirectoryURL: URL,
+        maxBytes: Int
+    ) async throws -> URL {
+        let asset = AVURLAsset(url: sourceURL)
+        let preferredPresets = [
+            AVAssetExportPreset1280x720,
+            AVAssetExportPreset960x540,
+            AVAssetExportPresetMediumQuality,
+            AVAssetExportPresetLowQuality
+        ]
+        let compatible = AVAssetExportSession.exportPresets(compatibleWith: asset)
+        let chosenPreset = preferredPresets.first(where: { compatible.contains($0) }) ?? AVAssetExportPresetMediumQuality
+
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: chosenPreset) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try FileManager.default.createDirectory(at: outputDirectoryURL, withIntermediateDirectories: true)
+        let outputURL = outputDirectoryURL.appendingPathComponent("transcoded-\(UUID().uuidString).mp4", isDirectory: false)
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        let fileType: AVFileType = exportSession.supportedFileTypes.contains(.mp4)
+            ? .mp4
+            : (exportSession.supportedFileTypes.first ?? .mov)
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = fileType
+        exportSession.shouldOptimizeForNetworkUse = true
+        exportSession.fileLengthLimit = Int64(maxBytes)
+
+        let box = UncheckedSendableBox(value: exportSession)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            box.value.exportAsynchronously {
+                continuation.resume()
+            }
+        }
+
+        switch box.value.status {
+        case .completed:
+            return outputURL
+        default:
+            try? FileManager.default.removeItem(at: outputURL)
+            throw box.value.error ?? CocoaError(.fileWriteUnknown)
+        }
     }
 
     /// Downsamples encoded image `data` using `ImageIO` without decoding the full-resolution bitmap into memory,
@@ -1135,14 +1901,32 @@ struct BugReportImage: Identifiable, Hashable {
         }
     }
 
-    /// Encodes the image into a `HollerKitAttachment` within `maxBytes`, keeping compact screenshots as PNG
-    /// and compressing larger camera-roll photos as JPEG.
+    /// Encodes the attachment into a `HollerKitAttachment`:
+    /// - Video attachments reference their on-disk `videoFileURL` directly without reading the video into `Data`.
+    /// - Image attachments are encoded within `maxBytes`, keeping compact screenshots as PNG and compressing larger photos as JPEG.
     func encodedAttachment(
         index: Int,
         maxBytes: Int = BugReportDraft.maxAttachmentBytes,
         preferredPNGMaxBytes: Int = BugReportDraft.preferredPNGMaxBytes,
         maxPixelDimension: CGFloat = BugReportDraft.maxPixelDimension
     ) -> HollerKitAttachment? {
+        if isVideo {
+            guard let fileURL = videoFileURL,
+                  FileManager.default.fileExists(atPath: fileURL.path) else {
+                return nil
+            }
+            let ext = fileURL.pathExtension.lowercased() == "mp4" ? "mp4" : "mov"
+            let mime = videoMimeType ?? (ext == "mp4" ? "video/mp4" : "video/quicktime")
+            return HollerKitAttachment(
+                filename: submissionFilename(index: index, fileExtension: ext),
+                mimeType: mime,
+                data: Data(),
+                fileURL: fileURL,
+                kind: "video",
+                durationSeconds: videoDurationSeconds
+            )
+        }
+
         var candidate = Self.normalizedImage(image, maxPixelDimension: maxPixelDimension)
         let pngThreshold = min(maxBytes, preferredPNGMaxBytes)
         if let pngData = candidate.pngData(), pngData.count <= pngThreshold {
@@ -1187,7 +1971,7 @@ struct BugReportImage: Identifiable, Hashable {
     }
     #endif
 
-    static func == (lhs: BugReportImage, rhs: BugReportImage) -> Bool {
+    static func == (lhs: BugReportAttachment, rhs: BugReportAttachment) -> Bool {
         lhs.id == rhs.id
     }
 
@@ -1195,13 +1979,18 @@ struct BugReportImage: Identifiable, Hashable {
         hasher.combine(id)
     }
 
-    /// Builds a sanitized attachment filename using `title` (or `image-<index + 1>`) and `fileExtension`.
+    /// Builds a sanitized attachment filename using `title` (or `image-<index + 1>` / `video-<index + 1>`) and `fileExtension`.
     func submissionFilename(index: Int, fileExtension: String = "png") -> String {
         let base = (title as NSString).deletingPathExtension
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeBase = base.isEmpty ? "image-\(index + 1)" : base
+        let defaultPrefix = isVideo ? "video" : "image"
+        let safeBase = base.isEmpty ? "\(defaultPrefix)-\(index + 1)" : base
         return "\(safeBase).\(fileExtension)"
     }
+}
+
+private struct UncheckedSendableBox<T>: @unchecked Sendable {
+    let value: T
 }
 
 /// Coordinates live voice dictation for bug report and quest result sheets.
@@ -1432,7 +2221,7 @@ final class SpeechCaptureController {
 }
 
 struct ImageAttachmentThumbnail: View {
-    var image: BugReportImage
+    var image: BugReportAttachment
     var isDisabled: Bool = false
     var onTap: (() -> Void)? = nil
     var onRemove: (() -> Void)? = nil
@@ -1440,7 +2229,7 @@ struct ImageAttachmentThumbnail: View {
     var body: some View {
         #if canImport(UIKit)
         ZStack(alignment: .topTrailing) {
-            if let onTap {
+            if let onTap, !image.isVideo {
                 Button(action: onTap) {
                     thumbnailContent
                 }
@@ -1463,6 +2252,15 @@ struct ImageAttachmentThumbnail: View {
                 }
             } else {
                 thumbnailContent
+                    .contextMenu {
+                        if let onRemove {
+                            Button(role: .destructive) {
+                                onRemove()
+                            } label: {
+                                Label("Remove Attachment", systemImage: "trash")
+                            }
+                        }
+                    }
             }
 
             if let onRemove {
@@ -1485,19 +2283,36 @@ struct ImageAttachmentThumbnail: View {
     }
 
     #if canImport(UIKit)
-    /// Renders the thumbnail preview image and title caption for an attached photo.
+    /// Renders the thumbnail preview image, optional video duration badge, and title caption for an attachment.
     private var thumbnailContent: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Image(uiImage: image.image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 136, height: 104)
-                .background(Color(uiColor: .secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(.quaternary, lineWidth: 1)
+            ZStack(alignment: .bottomTrailing) {
+                Image(uiImage: image.image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 136, height: 104)
+                    .background(Color(uiColor: .secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(.quaternary, lineWidth: 1)
+                    }
+
+                if image.isVideo, let durationText = image.formattedDuration {
+                    HStack(spacing: 4) {
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(durationText)
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.72), in: Capsule())
+                    .padding(6)
+                    .accessibilityIdentifier("HollerKitVideoDurationBadge_\(image.title)")
                 }
+            }
 
             Text(image.title)
                 .font(.caption)
@@ -1505,7 +2320,11 @@ struct ImageAttachmentThumbnail: View {
                 .lineLimit(1)
                 .frame(width: 136, alignment: .leading)
         }
-        .accessibilityLabel("Attached image \(image.title)")
+        .accessibilityLabel(
+            image.isVideo
+                ? "Attached video \(image.title)\(image.formattedDuration.map { ", duration \($0)" } ?? "")"
+                : "Attached image \(image.title)"
+        )
     }
     #endif
 }

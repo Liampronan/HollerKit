@@ -437,6 +437,7 @@ final class HollerKitPresenterState {
         triggerName: String = "manual"
     ) {
         activeDraft.cancelCapture()
+        activeDraft.cleanupTempFiles()
         presentQuestsAfterBugReportDismiss = false
         pendingAttachments = attachments
         presentationId = UUID()
@@ -451,6 +452,7 @@ final class HollerKitPresenterState {
     /// Cleans up attachments and resets the draft when the bug report sheet is dismissed.
     func handleSheetDismissed(configuration: HollerKitConfiguration?) {
         activeDraft.cancelCapture()
+        activeDraft.cleanupTempFiles()
         pendingAttachments = []
         presentationId = UUID()
         let enabledConfiguration = (configuration?.isEnabled() == true) ? configuration : nil

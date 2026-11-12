@@ -187,6 +187,38 @@ test('defaultV1Limits matches Stage 2 spec constants and upload route enforces m
   assert.equal(wavUpload.status, 200)
   const wavBody = (await wavUpload.json()) as { key: string }
   assert.ok(wavBody.key.endsWith('.wav'), `Expected .wav extension, got ${wavBody.key}`)
+
+  const manifestRes = await handler(
+    new Request('http://hollerkit.local/v1/builds/100/manifest', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ quests: [] }),
+    }),
+  )
+  assert.equal(manifestRes.status, 200)
+  const manifestBody = (await manifestRes.json()) as {
+    limits?: { maxVideoBytes?: number; maxImageBytes?: number; maxImages?: number }
+  }
+  assert.equal(manifestBody.limits?.maxVideoBytes, defaultV1Limits.maxVideoBytes)
+  assert.equal(manifestBody.limits?.maxImageBytes, defaultV1Limits.maxImageBytes)
+  assert.equal(manifestBody.limits?.maxImages, defaultV1Limits.maxImages)
+
+  const pendingRes = await handler(
+    new Request('http://hollerkit.local/v1/builds/100/pending', {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    }),
+  )
+  assert.equal(pendingRes.status, 200)
+  const pendingBody = (await pendingRes.json()) as {
+    limits?: { maxVideoBytes?: number; maxImageBytes?: number; maxImages?: number }
+  }
+  assert.equal(pendingBody.limits?.maxVideoBytes, defaultV1Limits.maxVideoBytes)
 })
 
 test('getApiKeyPrefix preserves random suffix entropy for long custom prefixes', () => {
