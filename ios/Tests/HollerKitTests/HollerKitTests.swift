@@ -2314,6 +2314,11 @@ final class HollerKitTests: XCTestCase {
 
         let startDate = Date(timeIntervalSince1970: 1_700_000_000)
         HollerKit.quests.startQuest(questItem, startedAt: startDate)
+        defer {
+            if let active = HollerKit.quests.activeQuest {
+                HollerKit.quests.completeSubmittedSession(id: active.id)
+            }
+        }
         XCTAssertNotNil(HollerKit.quests.activeQuest)
 
         // Capture an automatic mark during the quest run

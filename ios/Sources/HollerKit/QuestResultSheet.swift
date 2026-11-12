@@ -1,3 +1,4 @@
+import Combine
 import ImageIO
 import SwiftUI
 
@@ -35,6 +36,7 @@ final class QuestResultDraft: ObservableObject {
     private(set) var photoLoadGeneration: UInt64 = 0
     private var nextAddedImageNumber = 1
     private var autoDismissTask: Task<Void, Never>?
+    private var speechCancellable: AnyCancellable?
 
     /// Returns `true` when additional image attachments can be added to the draft.
     var canAddMoreImages: Bool {
@@ -53,6 +55,9 @@ final class QuestResultDraft: ObservableObject {
     ) {
         self.selectedResult = initialResult
         self.comment = initialComment
+        self.speechCancellable = speechCapture.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     /// Clears draft inputs after successful submission.
@@ -197,7 +202,7 @@ final class QuestResultDraft: ObservableObject {
         clearActiveSessionImmediately: Bool = false,
         onAutoDismiss: (() -> Void)? = nil
     ) async {
-        guard !isSubmitting, let session = questState.activeQuest else { return }
+        guard !isSubmitting, !isLoadingAttachments, let session = questState.activeQuest else { return }
         autoDismissTask?.cancel()
         autoDismissTask = nil
         submissionOutcome = nil
@@ -271,6 +276,7 @@ final class QuestResultDraft: ObservableObject {
 public struct QuestResultSheet: View {
     @ObservedObject private var questState: HollerKitQuestState
     @StateObject private var draft: QuestResultDraft
+    @ObservedObject private var speechCapture: SpeechCaptureController
     @Environment(\.dismiss) private var dismiss
     @State private var activeAnnotationTarget: ActiveAnnotationTarget?
     #if canImport(PhotosUI)
@@ -283,8 +289,10 @@ public struct QuestResultSheet: View {
     private static let checkedStepColor = Color(red: 0.08, green: 0.50, blue: 0.24)
 
     public init(questState: HollerKitQuestState = HollerKit.quests) {
+        let defaultDraft = QuestResultDraft()
         self.questState = questState
-        self._draft = StateObject(wrappedValue: QuestResultDraft())
+        self._draft = StateObject(wrappedValue: defaultDraft)
+        self.speechCapture = defaultDraft.speechCapture
     }
 
     init(
@@ -293,6 +301,7 @@ public struct QuestResultSheet: View {
     ) {
         self.questState = questState
         self._draft = StateObject(wrappedValue: draft)
+        self.speechCapture = draft.speechCapture
     }
 
     public var body: some View {
@@ -587,7 +596,7 @@ public struct QuestResultSheet: View {
                                     }
                                     .font(.footnote.weight(.semibold))
                                 }
-                                .disabled(draft.isSubmitting || draft.speechCapture.isStopping)
+                                .disabled(draft.isSubmitting || draft.isLoadingAttachments || draft.speechCapture.isStopping)
                                 .accessibilityIdentifier("HollerKitRetrySubmitButton")
                             }
                         }
@@ -637,7 +646,7 @@ public struct QuestResultSheet: View {
                                 await submit()
                             }
                         }
-                        .disabled(draft.isSubmitting || draft.speechCapture.isStopping || questState.activeQuest == nil)
+                        .disabled(draft.isSubmitting || draft.isLoadingAttachments || draft.speechCapture.isStopping || questState.activeQuest == nil)
                         .accessibilityIdentifier("HollerKitQuestResultSubmitButton")
                     }
                 }
