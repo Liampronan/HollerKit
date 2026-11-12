@@ -10,19 +10,22 @@ public struct OutboxAttachmentPayload: Sendable, Equatable {
     public var kind: String
     public var mimeType: String
     public var data: Data
+    public var fileURL: URL?
     public var offsetSeconds: Double?
     public var videoStartOffsetSeconds: Double?
 
     public init(
         kind: String = "image",
         mimeType: String = "image/png",
-        data: Data,
+        data: Data = Data(),
+        fileURL: URL? = nil,
         offsetSeconds: Double? = nil,
         videoStartOffsetSeconds: Double? = nil
     ) {
         self.kind = kind
         self.mimeType = mimeType
         self.data = data
+        self.fileURL = fileURL
         self.offsetSeconds = offsetSeconds
         self.videoStartOffsetSeconds = videoStartOffsetSeconds
     }
@@ -207,6 +210,13 @@ actor OutboxDirectoryEngine {
         normalizedRequest.id = feedbackId.uuidString.lowercased()
         normalizedRequest.clampToBudget()
 
+        for attachment in attachments {
+            if let sourceURL = attachment.fileURL,
+               !FileManager.default.fileExists(atPath: sourceURL.path) {
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: sourceURL.path])
+            }
+        }
+
         let itemDirectoryURL = directoryURL(for: feedbackId)
         if FileManager.default.fileExists(atPath: itemDirectoryURL.path) {
             if let existingFiles = try? FileManager.default.contentsOfDirectory(
@@ -231,14 +241,28 @@ actor OutboxDirectoryEngine {
             let ext = Self.fileExtension(for: attachment.mimeType, kind: attachment.kind)
             let fileName = "\(index).\(ext)"
             let fileURL = itemDirectoryURL.appendingPathComponent(fileName, isDirectory: false)
-            try attachment.data.write(to: fileURL, options: .atomic)
+            let attachmentSize: Int
+            if let sourceURL = attachment.fileURL {
+                guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+                    throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: sourceURL.path])
+                }
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+                try FileManager.default.copyItem(at: sourceURL, to: fileURL)
+                let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+                attachmentSize = (attrs[.size] as? NSNumber)?.intValue ?? attachment.data.count
+            } else {
+                try attachment.data.write(to: fileURL, options: .atomic)
+                attachmentSize = attachment.data.count
+            }
 
             manifests.append(OutboxAttachmentManifest(
                 index: index,
                 fileName: fileName,
                 kind: attachment.kind,
                 mimeType: attachment.mimeType,
-                size: attachment.data.count,
+                size: attachmentSize,
                 offsetSeconds: attachment.offsetSeconds,
                 videoStartOffsetSeconds: attachment.videoStartOffsetSeconds
             ))
@@ -578,14 +602,16 @@ actor OutboxDirectoryEngine {
         var reusedManifestIndices: [Int] = []
         let progressCallback = progressCallbacks[envelope.feedbackId]
 
-        if !envelope.attachmentManifests.isEmpty {
-            await progressCallback?(.uploadingAttachments(count: envelope.attachmentManifests.count))
+        let totalCount = envelope.attachmentManifests.count
+        if totalCount > 0 {
+            await progressCallback?(.uploadingAttachments(count: totalCount))
         }
 
         for idx in envelope.attachmentManifests.indices {
             let manifest = envelope.attachmentManifests[idx]
             let fileURL = item.directoryURL.appendingPathComponent(manifest.fileName, isDirectory: false)
-            let fileData = try Data(contentsOf: fileURL)
+            let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            let fileSize = (attrs[.size] as? NSNumber)?.intValue ?? manifest.size
 
             if let cachedKey = manifest.uploadedKey,
                Self.isUploadGrantStillReusable(expiresAt: manifest.uploadedExpiresAt) {
@@ -594,7 +620,7 @@ actor OutboxDirectoryEngine {
                     key: cachedKey,
                     kind: manifest.kind,
                     mimeType: manifest.mimeType,
-                    size: fileData.count,
+                    size: fileSize,
                     offsetSeconds: manifest.offsetSeconds,
                     videoStartOffsetSeconds: manifest.videoStartOffsetSeconds
                 ))
@@ -605,14 +631,30 @@ actor OutboxDirectoryEngine {
                 feedbackId: envelope.feedbackId,
                 kind: manifest.kind,
                 mimeType: manifest.mimeType,
-                size: fileData.count,
+                size: fileSize,
                 token: token
             )
 
+            let itemIndex = idx + 1
+            let itemProgressCallback: (@Sendable (Double) async -> Void)?
+            if let progressCallback {
+                itemProgressCallback = { fraction in
+                    await progressCallback(.uploadingAttachment(
+                        index: itemIndex,
+                        total: totalCount,
+                        progress: fraction
+                    ))
+                }
+            } else {
+                itemProgressCallback = nil
+            }
+
             try await client.uploadFile(
                 url: grant.url,
-                data: fileData,
-                mimeType: manifest.mimeType
+                fileURL: fileURL,
+                fileSize: fileSize,
+                mimeType: manifest.mimeType,
+                onProgress: itemProgressCallback
             )
 
             envelope.attachmentManifests[idx].uploadedKey = grant.key
@@ -623,7 +665,7 @@ actor OutboxDirectoryEngine {
                 key: grant.key,
                 kind: manifest.kind,
                 mimeType: manifest.mimeType,
-                size: fileData.count,
+                size: fileSize,
                 offsetSeconds: manifest.offsetSeconds,
                 videoStartOffsetSeconds: manifest.videoStartOffsetSeconds
             ))

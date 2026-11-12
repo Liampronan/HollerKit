@@ -181,17 +181,44 @@ public struct BuildManifestQuestItem: Codable, Equatable, Sendable {
     }
 }
 
+public struct ServerAttachmentLimits: Codable, Equatable, Sendable {
+    public var maxImageBytes: Int?
+    public var maxAudioBytes: Int?
+    public var maxVideoBytes: Int?
+    public var maxImages: Int?
+
+    public init(
+        maxImageBytes: Int? = nil,
+        maxAudioBytes: Int? = nil,
+        maxVideoBytes: Int? = nil,
+        maxImages: Int? = nil
+    ) {
+        self.maxImageBytes = maxImageBytes
+        self.maxAudioBytes = maxAudioBytes
+        self.maxVideoBytes = maxVideoBytes
+        self.maxImages = maxImages
+    }
+}
+
 public struct BuildManifestResponse: Codable, Equatable, Sendable {
     public var ok: Bool
     public var build: String
     public var pendingCount: Int
     public var quests: [BuildManifestQuestItem]
+    public var limits: ServerAttachmentLimits?
 
-    public init(ok: Bool = true, build: String, pendingCount: Int, quests: [BuildManifestQuestItem]) {
+    public init(
+        ok: Bool = true,
+        build: String,
+        pendingCount: Int,
+        quests: [BuildManifestQuestItem],
+        limits: ServerAttachmentLimits? = nil
+    ) {
         self.ok = ok
         self.build = build
         self.pendingCount = pendingCount
         self.quests = quests
+        self.limits = limits
     }
 }
 
@@ -649,6 +676,7 @@ public struct PendingQuestsResponse: Codable, Equatable, Sendable {
     public var build: String
     public var pendingCount: Int
     public var quests: [PendingQuestItem]
+    public var limits: ServerAttachmentLimits?
 }
 
 private struct ErrorEnvelopeResponse: Decodable {
@@ -718,12 +746,13 @@ public struct APIClient: Sendable {
         let resolvedToken = try await resolvedBearerToken(token)
         let encodedBuild = Self.encodePathSegment(build)
         let payload = BuildManifestRequestPayload(appVersion: appVersion, quests: quests)
-        return try await sendJSONRequest(
+        let response: BuildManifestResponse = try await sendJSONRequest(
             method: "POST",
             path: "/v1/builds/\(encodedBuild)/manifest",
             token: resolvedToken,
             body: payload
         )
+        return response
     }
 
     public func requestUploadGrant(
@@ -770,6 +799,78 @@ public struct APIClient: Sendable {
         }
     }
 
+    /// Streams an attachment file from disk (`fileURL`) to the presigned `url` without loading the entire file into memory.
+    public func uploadFile(
+        url: URL,
+        fileURL: URL,
+        fileSize: Int? = nil,
+        mimeType: String,
+        onProgress: (@Sendable (Double) async -> Void)? = nil
+    ) async throws {
+        let resolvedSize: Int
+        if let fileSize {
+            resolvedSize = fileSize
+        } else if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+                  let num = attrs[.size] as? NSNumber {
+            resolvedSize = num.intValue
+        } else {
+            resolvedSize = 0
+        }
+
+        guard let inputStream = InputStream(url: fileURL) else {
+            let fallbackData = try Data(contentsOf: fileURL)
+            await onProgress?(0.0)
+            try await uploadFile(url: url, data: fallbackData, mimeType: mimeType)
+            await onProgress?(1.0)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = max(45, Double(max(resolvedSize, 1)) / (256.0 * 1024.0))
+        request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        if resolvedSize > 0 {
+            request.setValue(String(resolvedSize), forHTTPHeaderField: "Content-Length")
+        }
+        request.httpBodyStream = inputStream
+
+        await onProgress?(0.0)
+        let (stream, continuation) = AsyncStream<Double>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let consumer: Task<Void, Never>? = onProgress.map { callback in
+            Task {
+                var highestFraction = 0.0
+                for await fraction in stream {
+                    let clamped = max(highestFraction, fraction)
+                    highestFraction = clamped
+                    await callback(clamped)
+                }
+            }
+        }
+        let delegate: URLSessionTaskDelegate? = onProgress == nil ? nil :
+            UploadProgressTaskDelegate(expectedBytes: Int64(max(resolvedSize, 1))) { fraction in
+                continuation.yield(fraction)
+            }
+        defer { continuation.finish() }
+
+        do {
+            let (responseData, response) = try await session.data(for: request, delegate: delegate)
+            continuation.finish()
+            await consumer?.value
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw HollerKitAPIError.invalidResponse
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                let bodyText = String(data: responseData, encoding: .utf8) ?? ""
+                throw HollerKitAPIError.httpError(statusCode: httpResponse.statusCode, body: bodyText)
+            }
+            await onProgress?(1.0)
+        } catch {
+            continuation.finish()
+            await consumer?.value
+            throw error
+        }
+    }
+
     public func submitFeedback(
         _ request: FeedbackSubmissionRequest,
         token: String? = nil
@@ -785,18 +886,25 @@ public struct APIClient: Sendable {
         )
     }
 
-    public func fetchPendingQuests(
+    public func fetchPendingQuestsResponse(
         build: String,
         token: String? = nil
-    ) async throws -> [PendingQuestItem] {
+    ) async throws -> PendingQuestsResponse {
         let resolvedToken = try await resolvedBearerToken(token)
         let encodedBuild = Self.encodePathSegment(build)
-        let response: PendingQuestsResponse = try await sendRequest(
+        return try await sendRequest(
             method: "GET",
             path: "/v1/builds/\(encodedBuild)/pending",
             token: resolvedToken,
             bodyData: nil
         )
+    }
+
+    public func fetchPendingQuests(
+        build: String,
+        token: String? = nil
+    ) async throws -> [PendingQuestItem] {
+        let response = try await fetchPendingQuestsResponse(build: build, token: token)
         return response.quests
     }
 
@@ -882,5 +990,28 @@ public struct APIClient: Sendable {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/")
         return segment.addingPercentEncoding(withAllowedCharacters: allowed) ?? segment
+    }
+}
+
+private final class UploadProgressTaskDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    private let expectedBytes: Int64
+    private let onProgress: @Sendable (Double) -> Void
+
+    init(expectedBytes: Int64, onProgress: @escaping @Sendable (Double) -> Void) {
+        self.expectedBytes = max(1, expectedBytes)
+        self.onProgress = onProgress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        let denominator = totalBytesExpectedToSend > 0 ? totalBytesExpectedToSend : expectedBytes
+        guard denominator > 0 else { return }
+        let fraction = min(1.0, max(0.0, Double(totalBytesSent) / Double(denominator)))
+        onProgress(fraction)
     }
 }

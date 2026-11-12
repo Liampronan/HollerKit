@@ -249,6 +249,12 @@ export function createHollerKitServer(
           build: result.build,
           pendingCount: result.pendingCount,
           quests: result.quests,
+          limits: {
+            maxImageBytes: limits.maxImageBytes,
+            maxAudioBytes: limits.maxAudioBytes,
+            maxVideoBytes: limits.maxVideoBytes,
+            maxImages: limits.maxImages,
+          },
         })
       }
 
@@ -266,6 +272,12 @@ export function createHollerKitServer(
           build,
           pendingCount: quests.length,
           quests,
+          limits: {
+            maxImageBytes: limits.maxImageBytes,
+            maxAudioBytes: limits.maxAudioBytes,
+            maxVideoBytes: limits.maxVideoBytes,
+            maxImages: limits.maxImages,
+          },
         })
       }
 

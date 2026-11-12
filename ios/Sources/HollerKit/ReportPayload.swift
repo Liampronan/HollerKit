@@ -33,11 +33,35 @@ public struct HollerKitAttachment: Equatable, Sendable {
     public var filename: String
     public var mimeType: String
     public var data: Data
+    public var fileURL: URL?
+    public var kind: String
+    public var durationSeconds: Double?
+    public var videoStartOffsetSeconds: Double?
 
-    public init(filename: String, mimeType: String, data: Data) {
+    public init(
+        filename: String,
+        mimeType: String,
+        data: Data = Data(),
+        fileURL: URL? = nil,
+        kind: String? = nil,
+        durationSeconds: Double? = nil,
+        videoStartOffsetSeconds: Double? = nil
+    ) {
         self.filename = filename
         self.mimeType = mimeType
         self.data = data
+        self.fileURL = fileURL
+        if let kind {
+            self.kind = kind
+        } else if mimeType.lowercased().hasPrefix("video/") {
+            self.kind = "video"
+        } else if mimeType.lowercased().hasPrefix("audio/") {
+            self.kind = "audio"
+        } else {
+            self.kind = "image"
+        }
+        self.durationSeconds = durationSeconds
+        self.videoStartOffsetSeconds = videoStartOffsetSeconds
     }
 }
 
@@ -158,9 +182,11 @@ public struct HollerKitReportPayload: Sendable {
 
         let outboxAttachments: [OutboxAttachmentPayload] = images.map { attachment in
             OutboxAttachmentPayload(
-                kind: "image",
+                kind: attachment.kind,
                 mimeType: attachment.mimeType,
-                data: attachment.data
+                data: attachment.data,
+                fileURL: attachment.fileURL,
+                videoStartOffsetSeconds: attachment.videoStartOffsetSeconds
             )
         }
 

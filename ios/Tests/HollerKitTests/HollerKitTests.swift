@@ -1,6 +1,11 @@
+import AVFoundation
 import Foundation
 import Observation
+#if canImport(PhotosUI)
+import PhotosUI
+#endif
 import SwiftUI
+import UniformTypeIdentifiers
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -4141,4 +4146,627 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(items.first?.latestRun?.result, .fail)
         XCTAssertEqual(items.first?.latestRun?.comment, "Broken button")
     }
+
+    #if canImport(UIKit)
+    /// Generates a real valid QuickTime `.mov` video file on disk using `AVAssetWriter` for unit testing duration inspection, thumbnails, and transcoding.
+    @MainActor
+    private func makeSampleVideoFile(
+        at url: URL,
+        durationSeconds: Double = 2.0,
+        frameSize: CGSize = CGSize(width: 64, height: 64)
+    ) async throws {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(frameSize.width),
+            AVVideoHeightKey: Int(frameSize.height)
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32ARGB),
+                kCVPixelBufferWidthKey as String: Int(frameSize.width),
+                kCVPixelBufferHeightKey as String: Int(frameSize.height)
+            ]
+        )
+        XCTAssertTrue(writer.canAdd(input))
+        writer.add(input)
+        XCTAssertTrue(writer.startWriting())
+        writer.startSession(atSourceTime: .zero)
+
+        let fps: Int32 = 10
+        let totalFrames = max(2, Int((durationSeconds * Double(fps)).rounded()))
+        for frameIndex in 0..<totalFrames {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 2_000_000)
+            }
+            var pixelBuffer: CVPixelBuffer?
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                Int(frameSize.width),
+                Int(frameSize.height),
+                kCVPixelFormatType_32ARGB,
+                nil,
+                &pixelBuffer
+            )
+            XCTAssertEqual(status, kCVReturnSuccess)
+            if let buffer = pixelBuffer {
+                CVPixelBufferLockBaseAddress(buffer, [])
+                if let baseAddress = CVPixelBufferGetBaseAddress(buffer) {
+                    let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+                    let totalBytes = bytesPerRow * Int(frameSize.height)
+                    memset(baseAddress, Int32(40 + (frameIndex * 17) % 180), totalBytes)
+                }
+                CVPixelBufferUnlockBaseAddress(buffer, [])
+                let presentationTime = CMTime(value: CMTimeValue(frameIndex), timescale: fps)
+                _ = adaptor.append(buffer, withPresentationTime: presentationTime)
+            }
+        }
+
+        input.markAsFinished()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writer.finishWriting {
+                continuation.resume()
+            }
+        }
+        XCTAssertEqual(writer.status, .completed, "AVAssetWriter failed: \(String(describing: writer.error))")
+    }
+
+    @MainActor
+    func testBugReportDraftPasteBranchingWithItemProviders() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-paste-branching-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let sampleMovieURL = tempDir.appendingPathComponent("clip.mov", isDirectory: false)
+        try await makeSampleVideoFile(at: sampleMovieURL, durationSeconds: 2.0)
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        let sampleImage = UIGraphicsImageRenderer(size: CGSize(width: 48, height: 48), format: format).image { ctx in
+            UIColor.systemTeal.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 48, height: 48))
+        }
+        let samplePNGData = try XCTUnwrap(sampleImage.pngData())
+
+        func makeImageProvider() -> NSItemProvider {
+            let provider = NSItemProvider()
+            provider.registerDataRepresentation(
+                forTypeIdentifier: UTType.png.identifier,
+                visibility: .all
+            ) { completion in
+                completion(samplePNGData, nil)
+                return nil
+            }
+            return provider
+        }
+
+        func makeMovieProvider(fileURL: URL = sampleMovieURL) -> NSItemProvider {
+            let provider = NSItemProvider()
+            provider.registerFileRepresentation(
+                forTypeIdentifier: UTType.quickTimeMovie.identifier,
+                fileOptions: [],
+                visibility: .all
+            ) { completion in
+                completion(fileURL, false, nil)
+                return nil
+            }
+            return provider
+        }
+
+        // 1. Image-only item provider
+        let draft1 = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft1", isDirectory: true))
+        let imageOnlyCount = await draft1.pasteImagesFromClipboard(itemProviders: [makeImageProvider()])
+        XCTAssertEqual(imageOnlyCount, 1)
+        XCTAssertEqual(draft1.images.count, 1)
+        XCTAssertFalse(draft1.images[0].isVideo)
+        XCTAssertEqual(draft1.images[0].kind, .image)
+        XCTAssertEqual(draft1.images[0].title, "Pasted Image 1")
+        XCTAssertNil(draft1.attachmentStatusMessage)
+
+        // 2. Movie-only item provider
+        let draft2 = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft2", isDirectory: true))
+        let movieOnlyCount = await draft2.pasteImagesFromClipboard(itemProviders: [makeMovieProvider()])
+        XCTAssertEqual(movieOnlyCount, 1)
+        XCTAssertEqual(draft2.images.count, 1)
+        XCTAssertTrue(draft2.images[0].isVideo)
+        XCTAssertEqual(draft2.images[0].kind, .video)
+        XCTAssertEqual(draft2.images[0].title, "Pasted Video 1")
+        XCTAssertEqual(draft2.images[0].formattedDuration, "0:02")
+        let copiedVideoURL = try XCTUnwrap(draft2.images[0].videoFileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: copiedVideoURL.path))
+        XCTAssertTrue(copiedVideoURL.path.hasPrefix(draft2.tempDirectoryURL.path))
+        XCTAssertNil(draft2.attachmentStatusMessage)
+
+        // 3. Mixed clipboard (multiple movies + images, respecting both 3-video cap and 12-attachment cap)
+        let draft3 = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft3", isDirectory: true))
+        let mixedProviders: [NSItemProvider] = [
+            makeMovieProvider(),
+            makeImageProvider(),
+            makeMovieProvider(),
+            makeMovieProvider(),
+            makeMovieProvider(), // 4th video -> rejected by 3-video cap while images still attach
+            makeImageProvider()
+        ]
+        let mixedCount = await draft3.pasteImagesFromClipboard(itemProviders: mixedProviders)
+        XCTAssertEqual(mixedCount, 5)
+        XCTAssertEqual(draft3.videoCount, 3)
+        XCTAssertEqual(draft3.images.filter { !$0.isVideo }.count, 2)
+        XCTAssertEqual(draft3.attachmentStatusMessage, "You can attach up to 3 videos per report.")
+
+        // 4. URL + thumbnail fallback (source puts a link + thumbnail image instead of a video file)
+        let draft4 = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft4", isDirectory: true))
+        let urlWithThumbnailProvider = NSItemProvider()
+        urlWithThumbnailProvider.registerDataRepresentation(
+            forTypeIdentifier: UTType.url.identifier,
+            visibility: .all
+        ) { completion in
+            completion(Data("https://example.com/screen-recording.mp4".utf8), nil)
+            return nil
+        }
+        urlWithThumbnailProvider.registerDataRepresentation(
+            forTypeIdentifier: UTType.png.identifier,
+            visibility: .all
+        ) { completion in
+            completion(samplePNGData, nil)
+            return nil
+        }
+        let fallbackCount = await draft4.pasteImagesFromClipboard(itemProviders: [urlWithThumbnailProvider])
+        XCTAssertEqual(fallbackCount, 1)
+        XCTAssertEqual(draft4.images.count, 1)
+        XCTAssertFalse(draft4.images[0].isVideo)
+        XCTAssertEqual(
+            draft4.attachmentStatusMessage,
+            "Clipboard only contained a link or thumbnail; attached image preview instead of video."
+        )
+
+        // URL-only item provider without any image
+        let draftURLOnly = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft-url-only", isDirectory: true))
+        let urlOnlyProvider = NSItemProvider()
+        urlOnlyProvider.registerDataRepresentation(
+            forTypeIdentifier: UTType.url.identifier,
+            visibility: .all
+        ) { completion in
+            completion(Data("https://example.com/video-only-link".utf8), nil)
+            return nil
+        }
+        let urlOnlyCount = await draftURLOnly.pasteImagesFromClipboard(itemProviders: [urlOnlyProvider])
+        XCTAssertEqual(urlOnlyCount, 0)
+        XCTAssertTrue(draftURLOnly.images.isEmpty)
+        XCTAssertEqual(
+            draftURLOnly.attachmentStatusMessage,
+            "Clipboard only contained a link, not a video file or image."
+        )
+
+        // 5. Unsupported item provider (plain text only)
+        let draft5 = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft5", isDirectory: true))
+        let textProvider = NSItemProvider()
+        textProvider.registerDataRepresentation(
+            forTypeIdentifier: UTType.plainText.identifier,
+            visibility: .all
+        ) { completion in
+            completion(Data("just plain text".utf8), nil)
+            return nil
+        }
+        let unsupportedCount = await draft5.pasteImagesFromClipboard(itemProviders: [textProvider])
+        XCTAssertEqual(unsupportedCount, 0)
+        XCTAssertTrue(draft5.images.isEmpty)
+        XCTAssertEqual(draft5.attachmentStatusMessage, "No image or video found on the clipboard.")
+    }
+
+    @MainActor
+    func testBugReportDraftVideoCapDurationLimitAndTranscoding() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-video-limits-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            HollerKit.quests.serverMaxVideoBytes = nil
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        // Verify server manifest response exposes limits.maxVideoBytes and updates HollerKit.quests.serverMaxVideoBytes
+        StubURLProtocol.setHandler { request, _ in
+            let url = try XCTUnwrap(request.url)
+            let json: [String: Any] = [
+                "ok": true,
+                "build": "100",
+                "pendingCount": 0,
+                "quests": [],
+                "limits": [
+                    "maxImageBytes": 10_485_760,
+                    "maxAudioBytes": 15_728_640,
+                    "maxVideoBytes": 100_000,
+                    "maxImages": 12
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: json)
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, data)
+        }
+        defer { StubURLProtocol.setHandler(nil) }
+
+        let client = APIClient(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "token" },
+            session: makeStubSession()
+        )
+        let manifestResponse = try await client.syncBuildManifest(build: "100", appVersion: "1.0", quests: [])
+        XCTAssertEqual(manifestResponse.limits?.maxVideoBytes, 100_000)
+        XCTAssertNil(HollerKit.quests.serverMaxVideoBytes, "APIClient should not mutate HollerKit.quests directly")
+        let questStore = QuestStore(cacheDirectoryURL: tempDir.appendingPathComponent("quest-cache", isDirectory: true))
+        _ = try await questStore.syncWithServer(
+            definitions: [],
+            build: "100",
+            appVersion: "1.0",
+            client: client,
+            persistToCache: false
+        )
+        XCTAssertEqual(HollerKit.quests.serverMaxVideoBytes, 100_000)
+
+        let draft = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft", isDirectory: true))
+        XCTAssertEqual(draft.effectiveMaxVideoBytes, 100_000)
+
+        // Create real video file on disk and verify real AVAssetImageGenerator + AVAssetExportSession
+        let realVideoURL = tempDir.appendingPathComponent("real.mov", isDirectory: false)
+        try await makeSampleVideoFile(at: realVideoURL, durationSeconds: 1.5)
+        let inspectedDuration = try await BugReportAttachment.inspectVideoDurationSeconds(at: realVideoURL)
+        XCTAssertGreaterThan(inspectedDuration, 0.5)
+        XCTAssertLessThanOrEqual(inspectedDuration, 3.0)
+        let generatedThumbnail = await BugReportAttachment.generateVideoThumbnail(for: realVideoURL)
+        XCTAssertNotNil(generatedThumbnail)
+        let realTranscodedURL = try await BugReportAttachment.transcodeVideo(
+            sourceURL: realVideoURL,
+            outputDirectoryURL: tempDir.appendingPathComponent("real-transcode", isDirectory: true),
+            maxBytes: 5_000_000
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: realTranscodedURL.path))
+
+        // 1. Clip over 60 seconds is rejected BEFORE transcoding (even when file size exceeds maxVideoBytes)
+        let oversizedLongURL = tempDir.appendingPathComponent("long-oversized.mov", isDirectory: false)
+        let oversizedPayload = Data(repeating: 0xAB, count: 250_000) // > 100_000 server limit
+        try oversizedPayload.write(to: oversizedLongURL)
+
+        draft.videoDurationInspector = { _ in 60.5 }
+        let addedLong = await draft.addVideo(from: oversizedLongURL)
+        XCTAssertFalse(addedLong)
+        XCTAssertEqual(draft.attachmentStatusMessage, "Videos must be 1 minute or shorter.")
+        XCTAssertEqual(draft.transcodeInvocationCount, 0, "Duration must be checked before transcoding")
+        XCTAssertTrue(draft.images.isEmpty)
+
+        // 2. Under-size clip (<= 60s and <= effectiveMaxVideoBytes) is uploaded untouched without transcoding
+        let underSizeURL = tempDir.appendingPathComponent("undersize.mov", isDirectory: false)
+        let underSizePayload = Data((0..<40_000).map { UInt8($0 & 0xFF) })
+        try underSizePayload.write(to: underSizeURL)
+
+        draft.videoDurationInspector = { _ in 12.0 }
+        let addedUnderSize = await draft.addVideo(from: underSizeURL, title: "Screen Clip 1")
+        XCTAssertTrue(addedUnderSize)
+        XCTAssertEqual(draft.transcodeInvocationCount, 0, "Under-size video must not be transcoded")
+        XCTAssertEqual(draft.images.count, 1)
+        let storedUnderSizeURL = try XCTUnwrap(draft.images[0].videoFileURL)
+        let storedUnderSizeBytes = try Data(contentsOf: storedUnderSizeURL)
+        XCTAssertEqual(storedUnderSizeBytes, underSizePayload, "Under-size video bytes must remain untouched")
+        XCTAssertEqual(draft.images[0].formattedDuration, "0:12")
+
+        // 3. Over-size clip (<= 60s and > effectiveMaxVideoBytes) is transcoded
+        let overSizeURL = tempDir.appendingPathComponent("oversize.mov", isDirectory: false)
+        try oversizedPayload.write(to: overSizeURL)
+        let compressedBytes = Data(repeating: 0xCD, count: 45_000)
+
+        draft.videoDurationInspector = { _ in 45.0 }
+        draft.videoTranscoder = { _, outputDir, maxBytes in
+            XCTAssertEqual(maxBytes, 100_000)
+            let outURL = outputDir.appendingPathComponent("compressed-\(UUID().uuidString).mp4", isDirectory: false)
+            try compressedBytes.write(to: outURL)
+            return outURL
+        }
+        let addedOverSize = await draft.addVideo(from: overSizeURL, title: "Screen Clip 2")
+        XCTAssertTrue(addedOverSize)
+        XCTAssertEqual(draft.transcodeInvocationCount, 1, "Over-size video must be transcoded")
+        XCTAssertEqual(draft.images.count, 2)
+        let storedTranscodedURL = try XCTUnwrap(draft.images[1].videoFileURL)
+        XCTAssertEqual(try Data(contentsOf: storedTranscodedURL), compressedBytes)
+        XCTAssertEqual(draft.images[1].videoMimeType, "video/mp4")
+        XCTAssertEqual(draft.images[1].formattedDuration, "0:45")
+
+        // 4. Over-size clip that is still over maxVideoBytes after transcoding is rejected
+        draft.videoTranscoder = { _, outputDir, _ in
+            let outURL = outputDir.appendingPathComponent("still-too-big-\(UUID().uuidString).mp4", isDirectory: false)
+            try Data(repeating: 0xEF, count: 150_000).write(to: outURL)
+            return outURL
+        }
+        let addedStillTooBig = await draft.addVideo(from: overSizeURL)
+        XCTAssertFalse(addedStillTooBig)
+        XCTAssertEqual(draft.transcodeInvocationCount, 2)
+        XCTAssertEqual(draft.attachmentStatusMessage, "Video exceeds the maximum size limit even after compression.")
+        XCTAssertEqual(draft.images.count, 2)
+
+        // 5. 3-video cap within the 12-attachment total and pickerFilter switching
+        #if canImport(PhotosUI)
+        XCTAssertEqual(draft.pickerFilter, .any(of: [.images, .videos]))
+        #endif
+        XCTAssertTrue(draft.canAddMoreVideos)
+        XCTAssertEqual(draft.remainingVideoSlots, 1)
+
+        let thirdVideoAdded = await draft.addVideo(from: underSizeURL, title: "Screen Clip 3")
+        XCTAssertTrue(thirdVideoAdded)
+        XCTAssertEqual(draft.videoCount, 3)
+        XCTAssertFalse(draft.canAddMoreVideos)
+        XCTAssertEqual(draft.remainingVideoSlots, 0)
+        #if canImport(PhotosUI)
+        XCTAssertEqual(draft.pickerFilter, .images, "Picker must limit selection to images once 3 videos are attached")
+        #endif
+
+        // 4th video is rejected with the 3-video cap message
+        let fourthVideoAdded = await draft.addVideo(from: underSizeURL, title: "Screen Clip 4")
+        XCTAssertFalse(fourthVideoAdded)
+        XCTAssertEqual(draft.attachmentStatusMessage, "You can attach up to 3 videos per report.")
+        XCTAssertEqual(draft.videoCount, 3)
+
+        // Images can still be added up to 12 total attachments (3 videos + 9 images = 12)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        let sampleImage = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32), format: format).image { ctx in
+            UIColor.systemGreen.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        }
+        for idx in 1...9 {
+            XCTAssertTrue(draft.addImage(sampleImage, title: "Photo \(idx)"))
+        }
+        XCTAssertEqual(draft.images.count, 12)
+        XCTAssertFalse(draft.canAddMoreImages)
+        XCTAssertFalse(draft.addImage(sampleImage))
+        XCTAssertEqual(draft.attachmentStatusMessage, "You can attach up to 12 attachments per report.")
+
+        // Removing a video deletes its temp file and re-enables video selection once under 12 total
+        draft.removeImage(id: draft.images.last!.id) // remove 1 image -> 11 total
+        let removedVideo = draft.images[0]
+        let removedVideoFileURL = try XCTUnwrap(removedVideo.videoFileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: removedVideoFileURL.path))
+        draft.removeImage(id: removedVideo.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: removedVideoFileURL.path))
+        XCTAssertEqual(draft.videoCount, 2)
+        XCTAssertTrue(draft.canAddMoreVideos)
+        #if canImport(PhotosUI)
+        XCTAssertEqual(draft.pickerFilter, .any(of: [.images, .videos]))
+        #endif
+    }
+
+    @MainActor
+    func testBugReportVideoSkipsAnnotationStreamsUploadWithProgressAndCleansUp() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-video-upload-\(UUID().uuidString)", isDirectory: true)
+        let outboxRoot = tempDir.appendingPathComponent("Outbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let sampleMovieURL = tempDir.appendingPathComponent("clip.mov", isDirectory: false)
+        try await makeSampleVideoFile(at: sampleMovieURL, durationSeconds: 2.0)
+        let expectedVideoBytes = try Data(contentsOf: sampleMovieURL)
+
+        let draft = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft", isDirectory: true))
+        draft.autoDismissDelaySeconds = 0
+        draft.comment = "Janky scroll animation clip"
+        let added = await draft.addVideo(from: sampleMovieURL, title: "Jank Clip")
+        XCTAssertTrue(added)
+        let videoAttachment = try XCTUnwrap(draft.images.first)
+        XCTAssertTrue(videoAttachment.isVideo)
+        XCTAssertEqual(videoAttachment.formattedDuration, "0:02")
+
+        // Verify videos skip annotation
+        draft.selectedImage = videoAttachment
+        XCTAssertNil(draft.selectedImage, "Video attachments must skip annotation")
+        let originalThumbnail = videoAttachment.image
+        let redOverlay = UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20)).image { ctx in
+            UIColor.red.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 20, height: 20))
+        }
+        draft.replaceImage(id: videoAttachment.id, with: redOverlay)
+        XCTAssertEqual(draft.images[0].image.size, originalThumbnail.size, "replaceImage must ignore video attachments")
+
+        // Verify streaming upload, outbox persistence while offline, progress stages, and temp file cleanup
+        let shouldFailUploadBox = LockedBox(true)
+        let uploadedVideoBodyBox = LockedBox<Data?>(nil)
+        let uploadGrantRequestsBox = LockedBox<[[String: Any]]>([])
+        let submittedFeedbackBox = LockedBox<[String: Any]?>(nil)
+
+        StubURLProtocol.setHandler { request, bodyData in
+            let url = try XCTUnwrap(request.url)
+            if url.path == "/v1/uploads", request.httpMethod == "POST" {
+                let body = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                uploadGrantRequestsBox.withLock { $0.append(body) }
+                if shouldFailUploadBox.withLock({ $0 }) {
+                    let response = HTTPURLResponse(url: url, statusCode: 503, httpVersion: nil, headerFields: nil)!
+                    return (response, Data("{\"ok\":false}".utf8))
+                }
+                let grantJSON: [String: Any] = [
+                    "ok": true,
+                    "key": "fb-video/0.mov",
+                    "url": "https://storage.hollerkit.test/upload/0.mov",
+                    "expiresAt": "2099-01-01T00:00:00Z"
+                ]
+                let data = try JSONSerialization.data(withJSONObject: grantJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            if url.host == "storage.hollerkit.test", request.httpMethod == "PUT" {
+                uploadedVideoBodyBox.withLock { $0 = bodyData }
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data())
+            }
+            if url.path == "/v1/feedback", request.httpMethod == "POST" {
+                let body = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                submittedFeedbackBox.withLock { $0 = body }
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": (body["id"] as? String) ?? UUID().uuidString.lowercased(),
+                        "kind": "report",
+                        "build": "1",
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-12T10:00:00Z",
+                        "updatedAt": "2026-11-12T10:00:00Z"
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            throw URLError(.unsupportedURL)
+        }
+        defer { StubURLProtocol.setHandler(nil) }
+
+        let session = makeStubSession()
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "token" },
+            isEnabled: { true },
+            urlSession: session,
+            outboxDirectoryURL: outboxRoot
+        )
+        let outboxStore = OutboxStore(rootDirectoryURL: outboxRoot)
+        let draftVideoTempURL = try XCTUnwrap(videoAttachment.videoFileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: draftVideoTempURL.path))
+
+        // First submission while offline (503) -> queues in outbox and cleans up draft temp files
+        await draft.submit(
+            configuration: config,
+            breadcrumbs: BreadcrumbStore(),
+            outboxStore: outboxStore
+        )
+        guard case .queued(let queuedId, _, _) = draft.submissionOutcome else {
+            XCTFail("Expected report to be queued when upload grant returns 503")
+            return
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: draftVideoTempURL.path),
+            "Draft temporary video file should be cleaned up after enqueueing to outbox"
+        )
+        let queuedOutboxVideoURL = outboxRoot
+            .appendingPathComponent(queuedId.uuidString.lowercased(), isDirectory: true)
+            .appendingPathComponent("0.mov", isDirectory: false)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: queuedOutboxVideoURL.path),
+            "Queued video file must be persisted in the outbox directory until flushed"
+        )
+
+        // Now bring server online and submit a second report with a video to observe progress stages and flush both
+        shouldFailUploadBox.withLock { $0 = false }
+        let draft2 = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("draft2", isDirectory: true))
+        draft2.autoDismissDelaySeconds = 0
+        _ = await draft2.addVideo(from: sampleMovieURL, title: "Second Clip")
+        let (request2, attachments2) = HollerKitReportPayload(
+            inputMode: .textAndAudio,
+            comment: "Online video submission",
+            images: draft2.imageAttachments()
+        ).toFeedbackSubmission(build: "1")
+
+        let observedStagesBox = LockedBox<[SubmissionProgressStage]>([])
+        let client = APIClient(configuration: config)
+        let outcome2 = try await outboxStore.submit(
+            request: request2,
+            attachments: attachments2,
+            using: client,
+            onProgress: { stage in
+                observedStagesBox.withLock { $0.append(stage) }
+            }
+        )
+        if case .sent = outcome2 {
+            // expected
+        } else {
+            XCTFail("Expected online video submission to succeed")
+        }
+
+        let observedStages = observedStagesBox.withLock { $0 }
+        XCTAssertTrue(observedStages.contains(.uploadingAttachments(count: 1)))
+        XCTAssertTrue(observedStages.contains(.uploadingAttachment(index: 1, total: 1, progress: 0.0)))
+        XCTAssertTrue(observedStages.contains(.uploadingAttachment(index: 1, total: 1, progress: 1.0)))
+        XCTAssertTrue(observedStages.contains(.sending))
+        XCTAssertEqual(
+            SubmissionProgressStage.uploadingAttachment(index: 1, total: 2, progress: 0.5).progress ?? -1,
+            0.25,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            SubmissionProgressStage.uploadingAttachment(index: 1, total: 1, progress: 0.5).title,
+            "Uploading attachment (50%)..."
+        )
+
+        // Verify streamed video bytes match original file and outbox directories were cleaned up after flush
+        XCTAssertEqual(uploadedVideoBodyBox.withLock { $0 }, expectedVideoBytes)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: queuedOutboxVideoURL.path),
+            "Outbox video file must be cleaned up after successful flush"
+        )
+        let grantRequests = uploadGrantRequestsBox.withLock { $0 }
+        XCTAssertTrue(grantRequests.contains(where: {
+            ($0["kind"] as? String) == "video"
+                && ($0["mimeType"] as? String) == "video/quicktime"
+                && ($0["size"] as? Int) == expectedVideoBytes.count
+        }))
+        let submittedAttachments = (submittedFeedbackBox.withLock { $0 }?["attachments"] as? [[String: Any]]) ?? []
+        XCTAssertEqual(submittedAttachments.first?["kind"] as? String, "video")
+        XCTAssertEqual(submittedAttachments.first?["mimeType"] as? String, "video/quicktime")
+        XCTAssertEqual(submittedAttachments.first?["size"] as? Int, expectedVideoBytes.count)
+
+        // Verify caller-owned video files passed via HollerKitAttachment(fileURL:) are preserved on removeImage and cleanupTempFiles
+        let callerVideoURL = tempDir.appendingPathComponent("caller-owned.mov", isDirectory: false)
+        try expectedVideoBytes.write(to: callerVideoURL)
+        let callerAttachment = HollerKitAttachment(
+            filename: "Host Recording.mov",
+            mimeType: "video/quicktime",
+            fileURL: callerVideoURL,
+            kind: "video",
+            durationSeconds: 2.0
+        )
+        let callerDraft = BugReportDraft(tempDirectoryURL: tempDir.appendingPathComponent("caller-draft", isDirectory: true))
+        callerDraft.loadInitialImagesIfNeeded(
+            configuration: config,
+            invocationAttachments: [callerAttachment]
+        )
+        XCTAssertEqual(callerDraft.images.count, 1)
+        let callerItemId = try XCTUnwrap(callerDraft.images.first?.id)
+        callerDraft.removeImage(id: callerItemId)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: callerVideoURL.path),
+            "removeImage must not delete caller-owned video files outside tempDirectoryURL"
+        )
+        callerDraft.resetForAnotherReport(
+            configuration: config,
+            invocationAttachments: [callerAttachment]
+        )
+        callerDraft.cleanupTempFiles()
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: callerVideoURL.path),
+            "cleanupTempFiles must not delete caller-owned video files outside tempDirectoryURL"
+        )
+
+        // Verify OutboxStore.enqueue throws when a supplied attachment fileURL does not exist on disk
+        let missingFileURL = tempDir.appendingPathComponent("missing-video.mp4", isDirectory: false)
+        do {
+            _ = try await outboxStore.enqueue(
+                request: FeedbackSubmissionRequest(id: UUID(), kind: "report", build: "1"),
+                attachments: [
+                    OutboxAttachmentPayload(
+                        kind: "video",
+                        mimeType: "video/mp4",
+                        fileURL: missingFileURL
+                    )
+                ]
+            )
+            XCTFail("Expected enqueue to throw when supplied attachment fileURL is missing")
+        } catch {
+            // Expected error; verify no item was committed to the outbox
+            let queuedCount = await outboxStore.pendingCount()
+            XCTAssertEqual(queuedCount, 0)
+        }
+    }
+    #endif
 }

@@ -265,6 +265,11 @@ public struct QuestStore: Sendable {
             appVersion: appVersion,
             quests: entries
         )
+        if let maxVideoBytes = response.limits?.maxVideoBytes, maxVideoBytes > 0 {
+            await MainActor.run {
+                HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+            }
+        }
 
         let definitionsById = Dictionary(
             definitions.map { ($0.id.jsTrimmed, $0) },
@@ -381,9 +386,14 @@ public struct QuestStore: Sendable {
         isSimulator: Bool = Self.isRunningOnSimulator,
         persistToCache: Bool = false
     ) async throws -> [QuestBoardItem] {
-        let pendingItems = try await client.fetchPendingQuests(build: build)
+        let response = try await client.fetchPendingQuestsResponse(build: build)
+        if let maxVideoBytes = response.limits?.maxVideoBytes, maxVideoBytes > 0 {
+            await MainActor.run {
+                HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+            }
+        }
         let items = boardItems(
-            from: pendingItems,
+            from: response.quests,
             definitions: definitions,
             isSimulator: isSimulator
         )
@@ -489,6 +499,7 @@ public final class HollerKitQuestState {
     public private(set) var isSyncing: Bool = false
     public private(set) var isBackendReachable: Bool = true
     public private(set) var lastSyncError: String?
+    public internal(set) var serverMaxVideoBytes: Int?
 
     @ObservationIgnored
     private var definitions: [QuestDefinition] = []
@@ -538,6 +549,7 @@ public final class HollerKitQuestState {
         isSyncing = false
         isBackendReachable = true
         lastSyncError = nil
+        serverMaxVideoBytes = nil
         definitions = []
         confirmedBoardItemsByQuestKey = [:]
         optimisticRuns = []
@@ -886,9 +898,11 @@ public final class HollerKitQuestState {
         }
         for attachment in additionalAttachments {
             attachments.append(OutboxAttachmentPayload(
-                kind: "image",
+                kind: attachment.kind,
                 mimeType: attachment.mimeType,
-                data: attachment.data
+                data: attachment.data,
+                fileURL: attachment.fileURL,
+                videoStartOffsetSeconds: attachment.videoStartOffsetSeconds
             ))
         }
         attachments.append(contentsOf: additionalOutboxAttachments)
