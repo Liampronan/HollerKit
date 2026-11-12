@@ -998,3 +998,126 @@ test('suppresses response for in-flight cancelled requests and ignores late/unkn
   const parsed = JSON.parse(outputLines[0]!) as JsonRpcSuccessResponse
   assert.equal(parsed.id, 777)
 })
+
+test('parses UTF-8 BOM-prefixed JSON responses in requestJson / questsPending', async () => {
+  const harness = await createSeededTestHarness()
+
+  const payload = {
+    ok: true,
+    build: '105',
+    pendingCount: 0,
+    quests: [],
+  }
+  const bomBody = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(JSON.stringify(payload), 'utf8'),
+  ])
+
+  const mcp = createHollerKitMcpServer({
+    baseUrl: BASE_URL,
+    apiKey: harness.agentFullKey,
+    fetch: async () =>
+      new Response(bomBody, {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'hollerkit-protocol': '1',
+        },
+      }),
+  })
+
+  const directRes = await mcp.client.questsPending({ build: '105' })
+  assert.equal(directRes.ok, true)
+  assert.equal(directRes.build, '105')
+  assert.equal(directRes.pendingCount, 0)
+
+  const toolRes = (await mcp.callTool('quests_pending', {
+    build: '105',
+  })) as McpCallToolResult<QuestsPendingOutput>
+  assert.equal(toolRes.isError, false)
+  assert.equal(toolRes.structuredContent.ok, true)
+  assert.equal(toolRes.structuredContent.build, '105')
+})
+
+test('connectStdio returns explicit -32000 overload error with request id when pendingLines reaches maxQueuedLines', async () => {
+  const harness = await createSeededTestHarness()
+
+  let resolveSlowFetch!: () => void
+  const slowFetchGate = new Promise<void>((resolve) => {
+    resolveSlowFetch = resolve
+  })
+
+  const mcp = createHollerKitMcpServer({
+    baseUrl: BASE_URL,
+    apiKey: harness.agentFullKey,
+    maxPendingRequests: 1, // maxQueuedLines = 4
+    fetch: async (input, init) => {
+      await slowFetchGate
+      return harness.inProcessFetch(input, init)
+    },
+  })
+
+  const input = new PassThrough()
+  const output = new PassThrough()
+  const outputLines: string[] = []
+  let buffer = ''
+  output.on('data', (chunk: Buffer) => {
+    buffer += chunk.toString('utf8')
+    let idx = buffer.indexOf('\n')
+    while (idx >= 0) {
+      const line = buffer.slice(0, idx).trim()
+      buffer = buffer.slice(idx + 1)
+      if (line.length > 0) outputLines.push(line)
+      idx = buffer.indexOf('\n')
+    }
+  })
+
+  const conn = mcp.connectStdio(input, output)
+
+  // Write 6 bursty requests in a single chunk:
+  // id=1 is shifted immediately by drainQueue (in-flight),
+  // id=2..5 fill pendingLines (length 4 === maxQueuedLines),
+  // id=6 exceeds maxQueuedLines and must receive an immediate -32000 error with id=6.
+  const burst = [
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'quests_retirable', arguments: {} },
+    },
+    { jsonrpc: '2.0', id: 2, method: 'ping' },
+    { jsonrpc: '2.0', id: 3, method: 'ping' },
+    { jsonrpc: '2.0', id: 4, method: 'ping' },
+    { jsonrpc: '2.0', id: 5, method: 'ping' },
+    { jsonrpc: '2.0', id: 6, method: 'ping' },
+  ]
+    .map((req) => JSON.stringify(req))
+    .join('\n')
+
+  input.write(`${burst}\n`)
+
+  resolveSlowFetch()
+
+  const deadline = Date.now() + 2000
+  while (outputLines.length < 6 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  conn.close()
+
+  assert.equal(outputLines.length, 6)
+  const parsed = outputLines.map(
+    (line) => JSON.parse(line) as JsonRpcSuccessResponse | JsonRpcErrorResponse,
+  )
+  const byId = new Map(parsed.map((item) => [item.id, item]))
+
+  for (const id of [1, 2, 3, 4, 5]) {
+    const resp = byId.get(id)
+    assert.ok(resp && 'result' in resp, `Expected success response for id=${id}`)
+  }
+
+  const overloadResp = byId.get(6) as JsonRpcErrorResponse | undefined
+  assert.ok(overloadResp && 'error' in overloadResp)
+  assert.equal(overloadResp.id, 6)
+  assert.equal(overloadResp.error.code, -32000)
+  assert.match(overloadResp.error.message, /queue is full/i)
+})

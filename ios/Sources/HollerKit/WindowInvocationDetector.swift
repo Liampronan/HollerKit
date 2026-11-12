@@ -74,6 +74,7 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
 
     private func attachToWindow(_ window: UIWindow) {
         detachFromWindow()
+        guard HollerKitEnvironment.isDebugOrTestFlight else { return }
         currentWindow = window
         reconcileWindowAttachments(window)
     }
@@ -109,6 +110,10 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func reconcileWindowAttachments(_ window: UIWindow) {
+        guard HollerKitEnvironment.isDebugOrTestFlight else {
+            detachFromWindow()
+            return
+        }
         // 1. Stroke gestures
         var strokeDirections: Set<StrokeDirection> = []
         if invocation.actions.keys.contains(.stroke(.leftToCenter)) {

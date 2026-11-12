@@ -17,6 +17,53 @@ public enum QuestStoreError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
+public struct OptimisticQuestRunRecord: Codable, Equatable, Sendable {
+    public var feedbackId: UUID?
+    public var build: String
+    public var questKey: String
+    public var questId: String
+    public var contentHash: String
+    public var result: QuestResult
+    public var latestRun: QuestLatestRun?
+    public var createdAt: Date
+
+    public init(
+        feedbackId: UUID? = nil,
+        build: String,
+        questKey: String,
+        questId: String,
+        contentHash: String,
+        result: QuestResult,
+        latestRun: QuestLatestRun? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.feedbackId = feedbackId
+        self.build = build
+        self.questKey = questKey
+        self.questId = questId.jsTrimmed
+        self.contentHash = contentHash
+        self.result = result
+        self.latestRun = latestRun
+        self.createdAt = createdAt
+    }
+}
+
+public struct QuestBoardCachePayload: Codable, Equatable, Sendable {
+    public var items: [QuestBoardItem]
+    public var confirmedItems: [QuestBoardItem]
+    public var optimisticRuns: [OptimisticQuestRunRecord]
+
+    public init(
+        items: [QuestBoardItem] = [],
+        confirmedItems: [QuestBoardItem] = [],
+        optimisticRuns: [OptimisticQuestRunRecord] = []
+    ) {
+        self.items = items
+        self.confirmedItems = confirmedItems
+        self.optimisticRuns = optimisticRuns
+    }
+}
+
 public struct QuestStore: Sendable {
     public var cacheDirectoryURL: URL
     public var serverIdentity: String?
@@ -127,6 +174,35 @@ public struct QuestStore: Sendable {
         isBackendReachable: Bool = true
     ) -> [QuestBoardItem] {
         let cached = loadCachedBoardItems(forBuild: build)
+        return Self.resolveBoardItems(
+            from: definitions,
+            cached: cached,
+            isSimulator: isSimulator,
+            isBackendReachable: isBackendReachable
+        )
+    }
+
+    public func buildConfirmedLocalBoardItems(
+        from definitions: [QuestDefinition],
+        build: String,
+        isSimulator: Bool = Self.isRunningOnSimulator,
+        isBackendReachable: Bool = true
+    ) -> [QuestBoardItem] {
+        let payload = loadCachedBoardPayload(forBuild: build)
+        return Self.resolveBoardItems(
+            from: definitions,
+            cached: payload.confirmedItems,
+            isSimulator: isSimulator,
+            isBackendReachable: isBackendReachable
+        )
+    }
+
+    private static func resolveBoardItems(
+        from definitions: [QuestDefinition],
+        cached: [QuestBoardItem],
+        isSimulator: Bool,
+        isBackendReachable: Bool
+    ) -> [QuestBoardItem] {
         let cachedByHash = Dictionary(
             cached.map { ("\($0.id.jsTrimmed):\($0.contentHash)", $0) },
             uniquingKeysWith: { _, latest in latest }
@@ -317,24 +393,66 @@ public struct QuestStore: Sendable {
         return items
     }
 
-    public func saveCachedBoardItems(_ items: [QuestBoardItem], forBuild build: String) {
+    public func saveCachedBoardPayload(_ payload: QuestBoardCachePayload, forBuild build: String) {
         try? FileManager.default.createDirectory(
             at: cacheDirectoryURL,
             withIntermediateDirectories: true
         )
         let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(items) else { return }
+        let deduplicatedPayload = QuestBoardCachePayload(
+            items: Self.deduplicateBoardItems(payload.items),
+            confirmedItems: Self.deduplicateBoardItems(payload.confirmedItems),
+            optimisticRuns: payload.optimisticRuns
+        )
+        guard let data = try? encoder.encode(deduplicatedPayload) else { return }
         let fileURL = cacheFileURL(forBuild: build)
         try? data.write(to: fileURL, options: .atomic)
     }
 
-    public func loadCachedBoardItems(forBuild build: String) -> [QuestBoardItem] {
+    public func loadCachedBoardPayload(forBuild build: String) -> QuestBoardCachePayload {
         let fileURL = cacheFileURL(forBuild: build)
-        guard let data = try? Data(contentsOf: fileURL),
-              let items = try? JSONDecoder().decode([QuestBoardItem].self, from: data) else {
-            return []
+        guard let data = try? Data(contentsOf: fileURL) else {
+            return QuestBoardCachePayload()
         }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let payload = try? decoder.decode(QuestBoardCachePayload.self, from: data) {
+            return QuestBoardCachePayload(
+                items: Self.deduplicateBoardItems(payload.items),
+                confirmedItems: Self.deduplicateBoardItems(payload.confirmedItems),
+                optimisticRuns: payload.optimisticRuns
+            )
+        }
+        if let legacyItems = try? JSONDecoder().decode([QuestBoardItem].self, from: data) {
+            let deduplicated = Self.deduplicateBoardItems(legacyItems)
+            return QuestBoardCachePayload(
+                items: deduplicated,
+                confirmedItems: deduplicated,
+                optimisticRuns: []
+            )
+        }
+        return QuestBoardCachePayload()
+    }
+
+    public func saveCachedBoardItems(_ items: [QuestBoardItem], forBuild build: String) {
+        let existing = loadCachedBoardPayload(forBuild: build)
+        saveCachedBoardPayload(
+            QuestBoardCachePayload(
+                items: items,
+                confirmedItems: items,
+                optimisticRuns: existing.optimisticRuns
+            ),
+            forBuild: build
+        )
+    }
+
+    public func loadCachedBoardItems(forBuild build: String) -> [QuestBoardItem] {
+        loadCachedBoardPayload(forBuild: build).items
+    }
+
+    private static func deduplicateBoardItems(_ items: [QuestBoardItem]) -> [QuestBoardItem] {
         var seen: Set<String> = []
         var deduplicated: [QuestBoardItem] = []
         for item in items.reversed() {
@@ -372,25 +490,20 @@ public final class HollerKitQuestState {
     public private(set) var isBackendReachable: Bool = true
     public private(set) var lastSyncError: String?
 
-    private struct OptimisticRunSnapshot {
-        var build: String
-        var key: String
-        var questId: String
-        var previousItem: QuestBoardItem
-        var previousStatusOverride: QuestStatus?
-        var previousLatestRunOverride: QuestLatestRun?
-    }
-
     @ObservationIgnored
     private var definitions: [QuestDefinition] = []
     @ObservationIgnored
     private var store = QuestStore()
     @ObservationIgnored
+    private var currentBuild: String = "0"
+    @ObservationIgnored
+    private var confirmedBoardItemsByQuestKey: [String: QuestBoardItem] = [:]
+    @ObservationIgnored
+    private var optimisticRuns: [OptimisticQuestRunRecord] = []
+    @ObservationIgnored
     private var localStatusOverrides: [String: QuestStatus] = [:]
     @ObservationIgnored
     private var localLatestRunOverrides: [String: QuestLatestRun] = [:]
-    @ObservationIgnored
-    private var optimisticSnapshotsByFeedbackId: [UUID: OptimisticRunSnapshot] = [:]
     @ObservationIgnored
     private var configurationGeneration: UInt64 = 0
 
@@ -426,9 +539,10 @@ public final class HollerKitQuestState {
         isBackendReachable = true
         lastSyncError = nil
         definitions = []
+        confirmedBoardItemsByQuestKey = [:]
+        optimisticRuns = []
         localStatusOverrides = [:]
         localLatestRunOverrides = [:]
-        optimisticSnapshotsByFeedbackId = [:]
         QuestOverlayWindowManager.shared.hide()
     }
 
@@ -439,13 +553,15 @@ public final class HollerKitQuestState {
         serverURL: URL? = nil
     ) {
         configurationGeneration &+= 1
+        self.currentBuild = build
         self.store = QuestStore(
             cacheDirectoryURL: cacheDirectoryURL,
             serverIdentity: serverURL?.absoluteString
         )
+        self.confirmedBoardItemsByQuestKey = [:]
+        self.optimisticRuns = []
         self.localStatusOverrides = [:]
         self.localLatestRunOverrides = [:]
-        self.optimisticSnapshotsByFeedbackId = [:]
         guard let questsConfiguration else {
             reset()
             return
@@ -455,12 +571,18 @@ public final class HollerKitQuestState {
             let loaded = try store.loadManifest(from: questsConfiguration)
             self.definitions = loaded
             self.lastSyncError = nil
-            let localItems = store.buildLocalBoardItems(
+            let cachedPayload = store.loadCachedBoardPayload(forBuild: build)
+            self.optimisticRuns = cachedPayload.optimisticRuns
+            let confirmedItems = store.buildConfirmedLocalBoardItems(
                 from: loaded,
                 build: build,
                 isBackendReachable: isBackendReachable
             )
-            applyBoardItems(localItems, build: build)
+            for item in confirmedItems {
+                let key = Self.questKey(build: build, questId: item.id, contentHash: item.contentHash)
+                confirmedBoardItemsByQuestKey[key] = item
+            }
+            recomputeAndPersistBoardItems(forBuild: build, baseItems: confirmedItems)
         } catch {
             self.definitions = []
             self.quests = []
@@ -480,6 +602,7 @@ public final class HollerKitQuestState {
         let metadata = MetadataCollector.collect(extra: config.metadata())
         let build = MetadataCollector.currentBuild(from: metadata)
         let appVersion = MetadataCollector.currentAppVersion(from: metadata)
+        self.currentBuild = build
 
         if store.serverIdentity == nil {
             store.serverIdentity = config.server.absoluteString
@@ -519,19 +642,28 @@ public final class HollerKitQuestState {
             }
             isBackendReachable = true
             lastSyncError = nil
-            applyBoardItems(syncedItems, build: build)
+            applyServerConfirmedBoardItems(syncedItems, build: build)
         } catch {
             guard configurationGeneration == generation, HollerKit.isEnabled else {
                 return
             }
             isBackendReachable = false
             lastSyncError = error.localizedDescription
-            let fallbackItems = store.buildLocalBoardItems(
+            let fallbackItems = store.buildConfirmedLocalBoardItems(
                 from: definitionsSnapshot,
                 build: build,
                 isBackendReachable: false
-            )
-            applyBoardItems(fallbackItems, build: build)
+            ).map { fallbackItem -> QuestBoardItem in
+                let key = Self.questKey(build: build, questId: fallbackItem.id, contentHash: fallbackItem.contentHash)
+                if var existingConfirmed = confirmedBoardItemsByQuestKey[key] {
+                    existingConfirmed.needWarnings = fallbackItem.needWarnings
+                    confirmedBoardItemsByQuestKey[key] = existingConfirmed
+                    return existingConfirmed
+                }
+                confirmedBoardItemsByQuestKey[key] = fallbackItem
+                return fallbackItem
+            }
+            recomputeAndPersistBoardItems(forBuild: build, baseItems: fallbackItems)
         }
     }
 
@@ -691,15 +823,57 @@ public final class HollerKitQuestState {
         let device = metadata["deviceModel"]
         let os = metadata["osVersion"]
 
-        var events = HollerKit.currentBreadcrumbs.questEvents(since: session.startedAt)
-        for mark in session.marks {
-            events.append(FeedbackEventInput(
+        let rawQuestEvents = HollerKit.currentBreadcrumbs.questEvents(since: session.startedAt)
+        var markerDroppedCount = 0
+        var normalQuestEvents: [FeedbackEventInput] = []
+        normalQuestEvents.reserveCapacity(rawQuestEvents.count)
+        for event in rawQuestEvents {
+            if event.payload["message"] == "breadcrumbs.truncated" {
+                if case .int(let dropped) = event.payload.fields?["dropped"] {
+                    markerDroppedCount += max(0, dropped)
+                } else if let rawDropped = event.payload["dropped"], let dropped = Int(rawDropped) {
+                    markerDroppedCount += max(0, dropped)
+                }
+                continue
+            }
+            normalQuestEvents.append(event)
+        }
+
+        let markEvents: [FeedbackEventInput] = session.marks.prefix(20).map { mark in
+            FeedbackEventInput(
                 offsetSeconds: mark.offsetSeconds,
                 kind: "mark",
                 payload: ["label": mark.label, "markId": mark.id.uuidString.lowercased()]
-            ))
+            )
         }
-        events.sort { $0.offsetSeconds < $1.offsetSeconds }
+
+        let maxTotalEvents = FeedbackSubmissionRequest.maxEvents
+        let events: [FeedbackEventInput]
+        if markerDroppedCount == 0 && (normalQuestEvents.count + markEvents.count) <= maxTotalEvents {
+            var combined = normalQuestEvents + markEvents
+            combined.sort { $0.offsetSeconds < $1.offsetSeconds }
+            events = combined
+        } else {
+            let maxNormalBreadcrumbs = max(0, maxTotalEvents - markEvents.count - 1)
+            let newlyDroppedCount = max(0, normalQuestEvents.count - maxNormalBreadcrumbs)
+            let totalDroppedCount = markerDroppedCount + newlyDroppedCount
+            let retainedBreadcrumbs = Array(normalQuestEvents.suffix(maxNormalBreadcrumbs))
+            var combined = retainedBreadcrumbs + markEvents
+            combined.sort { $0.offsetSeconds < $1.offsetSeconds }
+
+            var markerPayload = FeedbackEventPayload()
+            markerPayload["message"] = "breadcrumbs.truncated"
+            markerPayload["category"] = "hollerkit"
+            markerPayload["truncated"] = "true"
+            markerPayload["dropped"] = String(totalDroppedCount)
+            markerPayload.fields = ["dropped": .int(totalDroppedCount)]
+            let markerEvent = FeedbackEventInput(
+                offsetSeconds: 0,
+                kind: "breadcrumb",
+                payload: markerPayload
+            )
+            events = [markerEvent] + combined
+        }
 
         var attachments: [OutboxAttachmentPayload] = session.marks.compactMap { mark in
             guard !mark.imageData.isEmpty else { return nil }
@@ -747,14 +921,6 @@ public final class HollerKitQuestState {
             ? nil
             : session.quest.definition.toManifestEntry()
 
-        let outcome = try await HollerKit.currentOutboxStore.submit(
-            request: request,
-            attachments: attachments,
-            questManifestEntry: unconfirmedManifestEntry,
-            using: client,
-            onProgress: onProgress
-        )
-
         recordLocalResult(
             result,
             forQuestId: session.quest.id,
@@ -764,6 +930,21 @@ public final class HollerKitQuestState {
             endedAt: endedAt,
             feedbackId: session.id
         )
+
+        let outcome: OutboxSubmissionOutcome
+        do {
+            outcome = try await HollerKit.currentOutboxStore.submit(
+                request: request,
+                attachments: attachments,
+                questManifestEntry: unconfirmedManifestEntry,
+                using: client,
+                onProgress: onProgress
+            )
+        } catch {
+            rollbackRejectedFeedbackIds([session.id])
+            throw error
+        }
+
         HollerKit.endQuestBreadcrumbs()
         if clearActiveSessionImmediately {
             completeSubmittedSession(id: session.id)
@@ -793,43 +974,22 @@ public final class HollerKitQuestState {
         endedAt: Date = Date(),
         feedbackId: UUID? = nil
     ) {
+        self.currentBuild = build
         let normalizedId = questId.jsTrimmed
         guard let index = quests.firstIndex(where: { $0.id == normalizedId }) else { return }
-        var item = quests[index]
+        let item = quests[index]
         if let contentHash, item.contentHash != contentHash {
             return
         }
-        let key = "\(build):\(item.id):\(item.contentHash)"
-        if let feedbackId {
-            optimisticSnapshotsByFeedbackId[feedbackId] = OptimisticRunSnapshot(
-                build: build,
-                key: key,
-                questId: item.id,
-                previousItem: item,
-                previousStatusOverride: localStatusOverrides[key],
-                previousLatestRunOverride: localLatestRunOverrides[key]
-            )
+        let key = Self.questKey(build: build, questId: item.id, contentHash: item.contentHash)
+        if confirmedBoardItemsByQuestKey[key] == nil {
+            confirmedBoardItemsByQuestKey[key] = item
         }
-        switch result {
-        case .pass:
-            item.counts.pass += 1
-            item.status = .passed
-        case .fail:
-            item.counts.fail += 1
-            if item.status != .passed {
-                item.status = .failed
-            }
-        case .unsure:
-            item.counts.unsure += 1
-            if item.status != .passed, item.status != .failed {
-                item.status = .unsure
-            }
-        case .abandoned:
-            item.counts.abandoned += 1
-        }
+
+        let latestRun: QuestLatestRun?
         if result != .abandoned {
             let isoFormatter = ISO8601DateFormatter()
-            let latestRun = QuestLatestRun(
+            latestRun = QuestLatestRun(
                 id: feedbackId?.uuidString.lowercased(),
                 result: result,
                 build: build,
@@ -837,88 +997,250 @@ public final class HollerKitQuestState {
                 comment: comment,
                 triageStatus: (result == .fail || result == .unsure) ? "new" : nil
             )
-            item.latestRun = latestRun
             localLatestRunOverrides[key] = latestRun
+        } else {
+            latestRun = nil
         }
-        if item.status == .passed || item.status == .failed || item.status == .unsure {
-            localStatusOverrides[key] = item.status
+
+        let record = OptimisticQuestRunRecord(
+            feedbackId: feedbackId,
+            build: build,
+            questKey: key,
+            questId: item.id,
+            contentHash: item.contentHash,
+            result: result,
+            latestRun: latestRun,
+            createdAt: endedAt
+        )
+        if let feedbackId {
+            optimisticRuns.removeAll { $0.feedbackId == feedbackId }
         }
-        quests[index] = item
-        applyBoardItems(quests, build: build)
+        optimisticRuns.append(record)
+
+        recomputeAndPersistBoardItems(forBuild: build)
     }
 
     /// Rolls back optimistic local quest board overrides whose queued outbox submissions were permanently rejected.
     public func rollbackRejectedFeedbackIds(_ rejectedIds: Set<UUID>) {
         guard !rejectedIds.isEmpty else { return }
-        var affectedBuilds: Set<String> = []
-        for feedbackId in rejectedIds {
-            guard let snapshot = optimisticSnapshotsByFeedbackId.removeValue(forKey: feedbackId) else {
-                continue
+        let rejectedLowerStrings = Set(rejectedIds.map { $0.uuidString.lowercased() })
+        var affectedBuilds: Set<String> = [currentBuild]
+        var affectedKeys: Set<String> = []
+
+        optimisticRuns.removeAll { record in
+            guard let fid = record.feedbackId, rejectedIds.contains(fid) else {
+                return false
             }
-            if let prevStatus = snapshot.previousStatusOverride {
-                localStatusOverrides[snapshot.key] = prevStatus
-            } else {
-                localStatusOverrides.removeValue(forKey: snapshot.key)
-            }
-            if let prevRun = snapshot.previousLatestRunOverride {
-                localLatestRunOverrides[snapshot.key] = prevRun
-            } else {
-                localLatestRunOverrides.removeValue(forKey: snapshot.key)
-            }
-            if let index = quests.firstIndex(where: {
-                $0.id == snapshot.questId && $0.contentHash == snapshot.previousItem.contentHash
-            }) {
-                quests[index] = snapshot.previousItem
-            }
-            affectedBuilds.insert(snapshot.build)
+            affectedBuilds.insert(record.build)
+            affectedKeys.insert(record.questKey)
+            return true
         }
+
+        for (key, runOverride) in localLatestRunOverrides {
+            if let runId = runOverride.id?.lowercased(), rejectedLowerStrings.contains(runId) {
+                affectedKeys.insert(key)
+            }
+        }
+
+        for key in affectedKeys {
+            let remainingForKey = optimisticRuns.filter { $0.questKey == key }
+            if let lastRun = remainingForKey.compactMap(\.latestRun).last {
+                localLatestRunOverrides[key] = lastRun
+            } else {
+                localLatestRunOverrides.removeValue(forKey: key)
+            }
+            if remainingForKey.isEmpty {
+                localStatusOverrides.removeValue(forKey: key)
+            }
+        }
+
         for build in affectedBuilds {
-            applyBoardItems(quests, build: build)
+            let cachedPayload = store.loadCachedBoardPayload(forBuild: build)
+            let filteredCachedRuns = cachedPayload.optimisticRuns.filter { record in
+                guard let fid = record.feedbackId else { return true }
+                return !rejectedIds.contains(fid)
+            }
+            if build == currentBuild && !quests.isEmpty {
+                recomputeAndPersistBoardItems(forBuild: build)
+            } else if !cachedPayload.confirmedItems.isEmpty || !cachedPayload.items.isEmpty {
+                let baseItems = cachedPayload.confirmedItems.isEmpty ? cachedPayload.items : cachedPayload.confirmedItems
+                let recomputed = baseItems.map { baseItem in
+                    let key = Self.questKey(build: build, questId: baseItem.id, contentHash: baseItem.contentHash)
+                    return Self.recomputeBoardItem(
+                        baseline: baseItem,
+                        questKey: key,
+                        optimisticRuns: filteredCachedRuns,
+                        legacyStatusOverride: nil,
+                        legacyLatestRunOverride: nil
+                    )
+                }
+                store.saveCachedBoardPayload(
+                    QuestBoardCachePayload(
+                        items: recomputed,
+                        confirmedItems: baseItems,
+                        optimisticRuns: filteredCachedRuns
+                    ),
+                    forBuild: build
+                )
+            }
         }
     }
 
-    /// Merges server/cached board items with any newer local overrides and persists the board cache.
-    private func applyBoardItems(_ items: [QuestBoardItem], build: String) {
+    private static func questKey(build: String, questId: String, contentHash: String) -> String {
+        "\(build):\(questId.jsTrimmed):\(contentHash)"
+    }
+
+    private func applyServerConfirmedBoardItems(_ syncedItems: [QuestBoardItem], build: String) {
         let clearedTriageStatuses: Set<String> = ["resolved", "wontfix", "duplicate"]
-        let merged = items.map { rawItem -> QuestBoardItem in
-            var item = rawItem
-            let key = "\(build):\(item.id):\(item.contentHash)"
-            let overrideRun = localLatestRunOverrides[key]
-            let isLocalRunNewer: Bool
-            if let overrideRun {
-                if let serverRun = item.latestRun {
-                    if let localDate = overrideRun.createdAtDate, let serverDate = serverRun.createdAtDate {
-                        isLocalRunNewer = localDate > serverDate
-                    } else {
-                        isLocalRunNewer = false
-                    }
-                } else {
-                    isLocalRunNewer = true
+
+        for serverItem in syncedItems {
+            let key = Self.questKey(build: build, questId: serverItem.id, contentHash: serverItem.contentHash)
+            confirmedBoardItemsByQuestKey[key] = serverItem
+
+            let serverRun = serverItem.latestRun
+            let serverRunIdLower = serverRun?.id?.lowercased()
+            let serverDate = serverRun?.createdAtDate
+
+            optimisticRuns.removeAll { run in
+                guard run.questKey == key else { return false }
+                if let fid = run.feedbackId?.uuidString.lowercased(),
+                   let serverRunIdLower,
+                   fid == serverRunIdLower {
+                    return true
                 }
-            } else {
-                isLocalRunNewer = false
+                if let serverDate, serverDate >= run.createdAt {
+                    return true
+                }
+                return false
             }
 
-            let isServerClearedByTriage = item.latestRun?.triageStatus.map { clearedTriageStatuses.contains($0) } ?? false
-            if isServerClearedByTriage && !isLocalRunNewer {
-                localStatusOverrides.removeValue(forKey: key)
-                localLatestRunOverrides.removeValue(forKey: key)
-            } else if let overrideStatus = localStatusOverrides[key] {
-                if overrideStatus == .passed {
-                    item.status = .passed
-                } else if overrideStatus == .failed, (item.status == .pending || item.status == .unsure) {
-                    item.status = .failed
-                } else if overrideStatus == .unsure, item.status == .pending {
-                    item.status = .unsure
+            let isServerClearedByTriage = serverRun?.triageStatus.map { clearedTriageStatuses.contains($0) } ?? false
+            if isServerClearedByTriage {
+                let hasNewerOptimistic = optimisticRuns.contains { $0.questKey == key }
+                if !hasNewerOptimistic {
+                    localStatusOverrides.removeValue(forKey: key)
+                    localLatestRunOverrides.removeValue(forKey: key)
                 }
             }
-            if isLocalRunNewer, let overrideRun {
-                item.latestRun = overrideRun
+        }
+
+        recomputeAndPersistBoardItems(forBuild: build, baseItems: syncedItems)
+    }
+
+    private func recomputeAndPersistBoardItems(
+        forBuild build: String,
+        baseItems: [QuestBoardItem]? = nil
+    ) {
+        let sourceItems = baseItems ?? quests
+        var confirmedList: [QuestBoardItem] = []
+        confirmedList.reserveCapacity(sourceItems.count)
+
+        let merged = sourceItems.map { rawItem -> QuestBoardItem in
+            let key = Self.questKey(build: build, questId: rawItem.id, contentHash: rawItem.contentHash)
+            let baseline = confirmedBoardItemsByQuestKey[key] ?? rawItem
+            confirmedBoardItemsByQuestKey[key] = baseline
+            confirmedList.append(baseline)
+
+            let recomputed = Self.recomputeBoardItem(
+                baseline: baseline,
+                questKey: key,
+                optimisticRuns: optimisticRuns,
+                legacyStatusOverride: localStatusOverrides[key],
+                legacyLatestRunOverride: localLatestRunOverrides[key]
+            )
+            if recomputed.status == .passed || recomputed.status == .failed || recomputed.status == .unsure {
+                localStatusOverrides[key] = recomputed.status
+            } else {
+                localStatusOverrides.removeValue(forKey: key)
+            }
+            return recomputed
+        }
+
+        self.quests = merged
+        self.pendingCount = merged.filter { $0.status != .passed }.count
+        let runsForBuild = optimisticRuns.filter { $0.build == build }
+        store.saveCachedBoardPayload(
+            QuestBoardCachePayload(
+                items: merged,
+                confirmedItems: confirmedList,
+                optimisticRuns: runsForBuild
+            ),
+            forBuild: build
+        )
+    }
+
+    private static func recomputeBoardItem(
+        baseline: QuestBoardItem,
+        questKey: String,
+        optimisticRuns: [OptimisticQuestRunRecord],
+        legacyStatusOverride: QuestStatus?,
+        legacyLatestRunOverride: QuestLatestRun?
+    ) -> QuestBoardItem {
+        var item = baseline
+        let matchingRuns = optimisticRuns.enumerated()
+            .filter { $0.element.questKey == questKey }
+            .sorted { lhs, rhs in
+                if lhs.element.createdAt != rhs.element.createdAt {
+                    return lhs.element.createdAt < rhs.element.createdAt
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+
+        if !matchingRuns.isEmpty {
+            for run in matchingRuns {
+                switch run.result {
+                case .pass:
+                    item.counts.pass += 1
+                    item.status = .passed
+                case .fail:
+                    item.counts.fail += 1
+                    if item.status != .passed {
+                        item.status = .failed
+                    }
+                case .unsure:
+                    item.counts.unsure += 1
+                    if item.status != .passed && item.status != .failed {
+                        item.status = .unsure
+                    }
+                case .abandoned:
+                    item.counts.abandoned += 1
+                }
+                if let runLatest = run.latestRun {
+                    if let existingLatest = item.latestRun,
+                       let existingDate = existingLatest.createdAtDate,
+                       let runDate = runLatest.createdAtDate,
+                       existingDate > runDate {
+                        // Keep newer existing run
+                    } else {
+                        item.latestRun = runLatest
+                    }
+                }
             }
             return item
         }
-        self.quests = merged
-        self.pendingCount = merged.filter { $0.status != .passed }.count
-        store.saveCachedBoardItems(merged, forBuild: build)
+
+        // Legacy fallback when no OptimisticQuestRunRecord entries exist for this questKey
+        if let legacyStatusOverride {
+            if legacyStatusOverride == .passed {
+                item.status = .passed
+            } else if legacyStatusOverride == .failed, (item.status == .pending || item.status == .unsure) {
+                item.status = .failed
+            } else if legacyStatusOverride == .unsure, item.status == .pending {
+                item.status = .unsure
+            }
+        }
+        if let legacyLatestRunOverride {
+            if let serverRun = item.latestRun,
+               let localDate = legacyLatestRunOverride.createdAtDate,
+               let serverDate = serverRun.createdAtDate {
+                if localDate > serverDate {
+                    item.latestRun = legacyLatestRunOverride
+                }
+            } else if item.latestRun == nil {
+                item.latestRun = legacyLatestRunOverride
+            }
+        }
+        return item
     }
 }

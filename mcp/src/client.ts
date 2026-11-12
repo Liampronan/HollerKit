@@ -710,7 +710,7 @@ async function readBoundedResponseText(response: Response, maxBytes: number): Pr
     }
   }
 
-  return Buffer.concat(chunks).toString('utf8')
+  return new TextDecoder().decode(Buffer.concat(chunks))
 }
 
 /**

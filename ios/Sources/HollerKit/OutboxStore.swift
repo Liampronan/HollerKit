@@ -778,6 +778,12 @@ public actor OutboxStore {
         await engine.setProgressCallback(onProgress, for: feedbackId)
         let flushResult = await engine.flush(using: client)
         await engine.setProgressCallback(nil, for: feedbackId)
+        if !flushResult.rejectedErrors.isEmpty {
+            let rejectedIds = Set(flushResult.rejectedErrors.keys)
+            await MainActor.run {
+                HollerKit.quests.rollbackRejectedFeedbackIds(rejectedIds)
+            }
+        }
         if let rejectedError = flushResult.rejectedErrors[feedbackId] {
             throw rejectedError
         }
@@ -795,7 +801,14 @@ public actor OutboxStore {
     @discardableResult
     public func flush(using client: APIClient) async -> OutboxFlushResult {
         let engine = await OutboxDirectoryCoordinator.shared.engine(for: rootDirectoryURL)
-        return await engine.flush(using: client)
+        let flushResult = await engine.flush(using: client)
+        if !flushResult.rejectedErrors.isEmpty {
+            let rejectedIds = Set(flushResult.rejectedErrors.keys)
+            await MainActor.run {
+                HollerKit.quests.rollbackRejectedFeedbackIds(rejectedIds)
+            }
+        }
+        return flushResult
     }
 
     public func pendingEnvelopes() async -> [OutboxEnvelope] {

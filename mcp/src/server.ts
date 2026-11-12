@@ -445,6 +445,10 @@ export function createHollerKitMcpServer(
       }
       if (pendingLines.length >= maxQueuedLines) {
         pauseInput()
+        const overloadReply = buildQueueOverloadErrorLine(line)
+        if (overloadReply !== null && !closed) {
+          writeLineSafely(output, `${overloadReply}\n`, shutdown)
+        }
         return
       }
       recordQueuedRequestIdsFromRawLine(line, activeOrQueuedRequestIds)
@@ -575,6 +579,48 @@ function recordQueuedRequestIdsFromRawLine(
   } catch {
     // Ignore parse errors; handleJsonRpcLine will emit a JSON-RPC parse error when dequeued.
   }
+}
+
+/**
+ * Builds an explicit JSON-RPC 2.0 overload error line (`-32000`) when the bounded input queue is at capacity,
+ * preserving each request `id` so the client never hangs waiting on a dropped request.
+ */
+function buildQueueOverloadErrorLine(line: string): string | null {
+  const trimmed = line.trim()
+  if (!trimmed) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return JSON.stringify(jsonRpcError(null, -32700, 'Parse error'))
+  }
+
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) {
+      return JSON.stringify(jsonRpcError(null, -32600, 'Invalid Request: batch must not be empty.'))
+    }
+    const errors: JsonRpcErrorResponse[] = []
+    for (const item of parsed) {
+      if (isPlainObject(item) && Object.prototype.hasOwnProperty.call(item, 'id')) {
+        const id: JsonRpcId = isValidRpcId(item.id) ? item.id : null
+        errors.push(jsonRpcError(id, -32000, 'Server request queue is full.'))
+      } else if (!isPlainObject(item)) {
+        errors.push(jsonRpcError(null, -32600, 'Invalid Request'))
+      }
+    }
+    return errors.length > 0 ? JSON.stringify(errors) : null
+  }
+
+  if (isPlainObject(parsed)) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, 'id')) {
+      return null
+    }
+    const id: JsonRpcId = isValidRpcId(parsed.id) ? parsed.id : null
+    return JSON.stringify(jsonRpcError(id, -32000, 'Server request queue is full.'))
+  }
+
+  return JSON.stringify(jsonRpcError(null, -32600, 'Invalid Request'))
 }
 
 /**

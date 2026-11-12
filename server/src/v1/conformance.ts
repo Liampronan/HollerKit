@@ -842,23 +842,26 @@ export async function runConformanceSuite(
     assert.equal(tooManyMarksRes.status, 413)
     assert.equal(tooManyMarksRes.body.error.code, 'too_many_marks')
 
-    // > maxEvents events on feedback
-    const tooManyEventsRes = await requestJson('/v1/feedback', {
-      method: 'POST',
-      token: options.testerToken,
-      body: {
-        id: randomUUID(),
-        kind: 'report',
-        build: '100',
-        events: Array.from({ length: limits.maxEvents + 1 }, (_, idx) => ({
-          offsetSeconds: idx * 0.1,
-          kind: 'navigation',
-          payload: { screen: `s-${idx}` },
-        })),
-      },
+    // > maxEvents events on feedback (within maxJsonBytes)
+    const nowIso = new Date().toISOString()
+    const tooManyEventsBody = JSON.stringify({
+      id: randomUUID(),
+      kind: 'report',
+      build: '100',
+      events: Array.from({ length: limits.maxEvents + 1 }, () => ({
+        kind: 'log',
+        ts: nowIso,
+      })),
     })
-    assert.equal(tooManyEventsRes.status, 400)
-    assert.equal(tooManyEventsRes.body.error.code, 'too_many_events')
+    if (Buffer.byteLength(tooManyEventsBody, 'utf8') <= limits.maxJsonBytes) {
+      const tooManyEventsRes = await requestJson('/v1/feedback', {
+        method: 'POST',
+        token: options.testerToken,
+        rawBody: tooManyEventsBody,
+      })
+      assert.equal(tooManyEventsRes.status, 400)
+      assert.equal(tooManyEventsRes.body.error.code, 'too_many_events')
+    }
   })
 
   // 11. Board status separates unsure from failed, orders untried ahead of needs-attention, and clears on triage

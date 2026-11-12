@@ -3808,17 +3808,31 @@ final class HollerKitTests: XCTestCase {
             .appendingPathComponent("HollerKitQuestRollbackTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: outboxDirectory) }
 
+        let questDef = QuestDefinition(
+            id: "checkout.quest",
+            title: "Checkout Quest",
+            area: "checkout",
+            steps: ["Complete checkout"],
+            expect: ["Order succeeds"]
+        )
+
         let capturedSubmissions = LockedBox<[FeedbackSubmissionRequest]>([])
         let shouldRejectFlush = LockedBox(false)
+        let rejectedFeedbackIdsBox = LockedBox<Set<String>>([])
+        let shouldAcceptNonRejectedFeedback = LockedBox(false)
 
         StubURLProtocol.setHandler { request, bodyData in
             let url = try XCTUnwrap(request.url)
             if request.httpMethod == "POST", url.path == "/v1/feedback" {
+                var decodedRequest: FeedbackSubmissionRequest?
                 if let bodyData,
                    let decoded = try? JSONDecoder().decode(FeedbackSubmissionRequest.self, from: bodyData) {
+                    decodedRequest = decoded
                     capturedSubmissions.withLock { $0.append(decoded) }
                 }
-                if shouldRejectFlush.withLock({ $0 }) {
+                let feedbackId = decodedRequest?.id.lowercased() ?? ""
+                let isSpecificallyRejected = rejectedFeedbackIdsBox.withLock { $0.contains(feedbackId) }
+                if shouldRejectFlush.withLock({ $0 }) || isSpecificallyRejected {
                     let response = HTTPURLResponse(
                         url: url,
                         statusCode: 422,
@@ -3826,6 +3840,29 @@ final class HollerKitTests: XCTestCase {
                         headerFields: ["Content-Type": "application/json"]
                     )!
                     return (response, Data(#"{"error":{"code":"invalid_quest","message":"Unprocessable quest run"}}"#.utf8))
+                }
+                if shouldAcceptNonRejectedFeedback.withLock({ $0 }) {
+                    let responseJSON = """
+                    {
+                      "ok": true,
+                      "idempotent": false,
+                      "feedback": {
+                        "id": "\(feedbackId)",
+                        "kind": "\(decodedRequest?.kind ?? "quest_run")",
+                        "build": "200",
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-11T12:00:00Z",
+                        "updatedAt": "2026-11-11T12:00:00Z"
+                      }
+                    }
+                    """
+                    let response = HTTPURLResponse(
+                        url: url,
+                        statusCode: 201,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "application/json"]
+                    )!
+                    return (response, Data(responseJSON.utf8))
                 }
                 let response = HTTPURLResponse(
                     url: url,
@@ -3844,7 +3881,7 @@ final class HollerKitTests: XCTestCase {
                 {
                   "id": "checkout.quest",
                   "version": 1,
-                  "contentHash": "hash1",
+                  "contentHash": "\(questDef.contentHash)",
                   "questStatus": "active",
                   "boardStatus": "pending",
                   "title": "Checkout Quest",
@@ -3869,13 +3906,6 @@ final class HollerKitTests: XCTestCase {
         defer { StubURLProtocol.setHandler(nil) }
 
         let session = makeStubSession()
-        let questDef = QuestDefinition(
-            id: "checkout.quest",
-            title: "Checkout Quest",
-            area: "checkout",
-            steps: ["Complete checkout"],
-            expect: ["Order succeeds"]
-        )
         let config = HollerKitConfiguration(
             server: URL(string: "https://api.hollerkit.test")!,
             auth: { "tester-jwt" },
@@ -3883,7 +3913,7 @@ final class HollerKitTests: XCTestCase {
             metadata: { ["build": "200"] },
             quests: .definitions([questDef]),
             urlSession: session,
-            outboxDirectoryURL: outboxDirectory
+            outboxDirectoryURL: outboxDirectory.appendingPathComponent("Outbox", isDirectory: true)
         )
         if let active = HollerKit.quests.activeQuest {
             HollerKit.quests.completeSubmittedSession(id: active.id)
@@ -3906,7 +3936,7 @@ final class HollerKitTests: XCTestCase {
             comment: "Voice note for quest run",
             transcript: transcript
         )
-        if case .queued(let queuedId) = queuedOutcome {
+        if case .queued(let queuedId, _, _) = queuedOutcome {
             XCTAssertNotNil(queuedId)
         } else {
             XCTFail("Expected quest run to be queued offline on HTTP 503")
@@ -3930,6 +3960,138 @@ final class HollerKitTests: XCTestCase {
         // Optimistic status override should be rolled back to .pending
         XCTAssertEqual(HollerKit.quests.quests.first?.status, .pending)
         XCTAssertNil(HollerKit.quests.quests.first?.latestRun)
+
+        // Verify multi-run ordering and rollback across reconfiguration:
+        // Queue Run A (.fail) then Run B (.pass) while offline (503).
+        shouldRejectFlush.withLock { $0 = false }
+        let baseDate = Date(timeIntervalSince1970: 1_700_100_000)
+
+        let itemForRunA = try XCTUnwrap(HollerKit.quests.quests.first)
+        HollerKit.quests.startQuest(itemForRunA, startedAt: baseDate)
+        let outcomeA = try await HollerKit.quests.submitActiveQuest(
+            result: .fail,
+            comment: "Run A failed",
+            transcript: nil,
+            endedAt: baseDate.addingTimeInterval(5)
+        )
+        guard case .queued(let runAId, _, _) = outcomeA else {
+            XCTFail("Expected Run A to be queued")
+            return
+        }
+
+        let itemForRunB = try XCTUnwrap(HollerKit.quests.quests.first)
+        HollerKit.quests.startQuest(itemForRunB, startedAt: baseDate.addingTimeInterval(10))
+        let outcomeB = try await HollerKit.quests.submitActiveQuest(
+            result: .pass,
+            comment: "Run B passed",
+            transcript: nil,
+            endedAt: baseDate.addingTimeInterval(15)
+        )
+        guard case .queued(let runBId, _, _) = outcomeB else {
+            XCTFail("Expected Run B to be queued")
+            return
+        }
+
+        XCTAssertEqual(HollerKit.quests.quests.first?.status, .passed)
+        XCTAssertEqual(HollerKit.quests.quests.first?.counts.fail, 1)
+        XCTAssertEqual(HollerKit.quests.quests.first?.counts.pass, 1)
+        XCTAssertEqual(HollerKit.quests.quests.first?.latestRun?.result, .pass)
+        XCTAssertEqual(HollerKit.quests.completedQuests.count, 1)
+
+        // Re-configure HollerKit to simulate app restart while both runs are still queued on disk
+        HollerKit.configure(config)
+        XCTAssertEqual(HollerKit.quests.quests.first?.status, .passed)
+        XCTAssertEqual(HollerKit.quests.quests.first?.counts.fail, 1)
+        XCTAssertEqual(HollerKit.quests.quests.first?.counts.pass, 1)
+
+        // Reject Run A with 422 while accepting Run B (and a report submission triggering OutboxStore.submit)
+        rejectedFeedbackIdsBox.withLock { $0 = [runAId.uuidString.lowercased()] }
+        shouldAcceptNonRejectedFeedback.withLock { $0 = true }
+
+        let reportOutcome = try await HollerKit.submitReport(
+            HollerKitReportPayload(
+                inputMode: .textOnly,
+                comment: "Trigger outbox flush via submitReport",
+                metadata: ["build": "200"]
+            )
+        )
+        if case .sent = reportOutcome {
+            // expected
+        } else {
+            XCTFail("Expected report submission to succeed and flush outbox")
+        }
+
+        // Run A was rejected, but Run B succeeded -> board preserves Run B's .passed status, counts, and latestRun!
+        XCTAssertEqual(HollerKit.quests.quests.first?.status, .passed)
+        XCTAssertEqual(HollerKit.quests.quests.first?.counts.fail, 0)
+        XCTAssertEqual(HollerKit.quests.quests.first?.counts.pass, 1)
+        XCTAssertEqual(HollerKit.quests.quests.first?.latestRun?.id, runBId.uuidString.lowercased())
+        XCTAssertEqual(HollerKit.quests.quests.first?.latestRun?.comment, "Run B passed")
+        XCTAssertEqual(HollerKit.quests.completedQuests.count, 1)
+
+        // And if Run B is also rolled back, the confirmed baseline (.pending) is restored and Completed is empty
+        HollerKit.quests.rollbackRejectedFeedbackIds([runBId])
+        XCTAssertEqual(HollerKit.quests.quests.first?.status, .pending)
+        XCTAssertEqual(HollerKit.quests.quests.first?.counts.pass, 0)
+        XCTAssertNil(HollerKit.quests.quests.first?.latestRun)
+        XCTAssertTrue(HollerKit.quests.completedQuests.isEmpty)
+    }
+
+    func testReportPayloadAndRequestClampEventsToMax200WithTruncatedMarker() throws {
+        let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let breadcrumbs: [HollerKitBreadcrumb] = (0..<250).map { index in
+            HollerKitBreadcrumb(
+                timestamp: baseDate.addingTimeInterval(Double(index)),
+                category: "nav",
+                message: "crumb-\(index)",
+                offsetSeconds: Double(index)
+            )
+        }
+
+        let payload = HollerKitReportPayload(
+            inputMode: .textAndAudio,
+            comment: "Too many breadcrumbs",
+            metadata: ["build": "100"],
+            breadcrumbs: breadcrumbs,
+            truncatedBreadcrumbsCount: 10
+        )
+
+        let (request, _) = payload.toFeedbackSubmission()
+        XCTAssertEqual(request.events.count, HollerKitReportPayload.maxFeedbackEvents)
+        XCTAssertEqual(request.events.count, 200)
+        XCTAssertEqual(request.events.first?.payload["message"], "breadcrumbs.truncated")
+        // 10 previously truncated + 51 newly dropped (250 -> 199 retained) = 61 total dropped
+        XCTAssertEqual(request.events.first?.payload.fields?["dropped"], .int(61))
+        XCTAssertEqual(request.events.first?.payload["dropped"], "61")
+        XCTAssertEqual(request.events[1].payload["message"], "crumb-51")
+        XCTAssertEqual(request.events.last?.payload["message"], "crumb-249")
+
+        // Also verify FeedbackSubmissionRequest.clampToBudget trims >200 events while preserving mark events
+        var rawEvents: [FeedbackEventInput] = (0..<210).map { idx in
+            FeedbackEventInput(
+                offsetSeconds: Double(idx),
+                kind: "breadcrumb",
+                payload: ["message": "raw-\(idx)"]
+            )
+        }
+        rawEvents.insert(
+            FeedbackEventInput(
+                offsetSeconds: 5.0,
+                kind: "mark",
+                payload: ["label": "Mark 1", "markId": "m1"]
+            ),
+            at: 5
+        )
+        var directRequest = FeedbackSubmissionRequest(
+            kind: "quest_run",
+            build: "100",
+            events: rawEvents
+        )
+        directRequest.clampToBudget()
+        XCTAssertEqual(directRequest.events.count, 200)
+        XCTAssertEqual(directRequest.events.first?.payload["message"], "breadcrumbs.truncated")
+        XCTAssertTrue(directRequest.events.contains(where: { $0.kind == "mark" && $0.payload["markId"] == "m1" }))
+        XCTAssertEqual(directRequest.events.last?.payload["message"], "raw-209")
     }
 
     func testPendingQuestItemPreservesBoardStatusAndLatestRun() throws {

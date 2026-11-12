@@ -1354,11 +1354,14 @@ paths:
   /v1/webhooks/github:
     post:
       operationId: postGithubWebhook
-      summary: Receive GitHub PR and issue webhook events to auto-resolve linked feedback
+      summary: Receive GitHub ping and issues webhook events to synchronize linked feedback triage
       description: >
         Verifies the `X-Hub-Signature-256` HMAC-SHA256 signature against the configured
-        GitHub webhook secret and auto-triages feedback items linked to merged PRs or
-        closed issues.
+        GitHub webhook secret. Handles `ping` and `issues` (`closed`, `reopened`) events
+        (other event types return `{ ok: true, ignored: true, reason: 'unsupported_event' }`).
+        Synchronizing an issue close or reopen requires both a valid HollerKit `feedbackId`
+        marker in the issue body and a matching trusted GitHub issue URL already recorded
+        in `feedback.links`.
       security: []
       parameters:
         - $ref: "#/components/parameters/HollerKitProtocolRequestHeader"
@@ -1394,17 +1397,23 @@ paths:
                   ok:
                     type: boolean
                     const: true
+                  event:
+                    type: string
+                  pong:
+                    type: boolean
+                  action:
+                    type: string
+                  feedbackId:
+                    type: string
+                    format: uuid
+                  triageStatus:
+                    $ref: "#/components/schemas/TriageStatus"
+                  triage:
+                    $ref: "#/components/schemas/TriageEntry"
                   ignored:
                     type: boolean
                   reason:
                     type: string
-                  resolvedCount:
-                    type: integer
-                  resolvedFeedbackIds:
-                    type: array
-                    items:
-                      type: string
-                      format: uuid
         "400":
           description: Malformed webhook payload
           content:

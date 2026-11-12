@@ -42,12 +42,15 @@ public struct HollerKitAttachment: Equatable, Sendable {
 }
 
 public struct HollerKitReportPayload: Sendable {
+    public static let maxFeedbackEvents = 200
+
     public var id: UUID
     public var inputMode: HollerKitInputMode
     public var comment: String?
     public var transcript: HollerKitTranscript?
     public var metadata: [String: String]
     public var breadcrumbs: [HollerKitBreadcrumb]
+    public var truncatedBreadcrumbsCount: Int
     public var images: [HollerKitAttachment]
 
     public init(
@@ -57,6 +60,7 @@ public struct HollerKitReportPayload: Sendable {
         transcript: HollerKitTranscript? = nil,
         metadata: [String: String] = [:],
         breadcrumbs: [HollerKitBreadcrumb] = [],
+        truncatedBreadcrumbsCount: Int = 0,
         images: [HollerKitAttachment] = []
     ) {
         self.id = id
@@ -65,6 +69,7 @@ public struct HollerKitReportPayload: Sendable {
         self.transcript = transcript
         self.metadata = metadata
         self.breadcrumbs = breadcrumbs
+        self.truncatedBreadcrumbsCount = max(0, truncatedBreadcrumbsCount)
         self.images = images
     }
 
@@ -91,7 +96,20 @@ public struct HollerKitReportPayload: Sendable {
         let os = enrichedMetadata["osVersion"]
 
         let isoFormatter = ISO8601DateFormatter()
-        let events: [FeedbackEventInput] = breadcrumbs.map { crumb in
+        var markerDroppedCount = 0
+        var normalEvents: [FeedbackEventInput] = []
+        normalEvents.reserveCapacity(breadcrumbs.count)
+
+        for crumb in breadcrumbs {
+            if crumb.message == "breadcrumbs.truncated" {
+                if case .int(let dropped) = crumb.fields["dropped"] {
+                    markerDroppedCount += max(0, dropped)
+                } else if let rawDropped = crumb.metadata["dropped"], let dropped = Int(rawDropped) {
+                    markerDroppedCount += max(0, dropped)
+                }
+                continue
+            }
+
             var payload = FeedbackEventPayload(strings: crumb.metadata)
             payload["message"] = crumb.message
             payload["timestamp"] = isoFormatter.string(from: crumb.timestamp)
@@ -107,11 +125,35 @@ public struct HollerKitReportPayload: Sendable {
             if let startOffset = crumb.startOffsetSeconds {
                 payload.startOffsetSeconds = startOffset
             }
-            return FeedbackEventInput(
+            normalEvents.append(FeedbackEventInput(
                 offsetSeconds: crumb.offsetSeconds ?? 0,
                 kind: "breadcrumb",
                 payload: payload
+            ))
+        }
+
+        let baseDroppedCount = max(markerDroppedCount, max(0, truncatedBreadcrumbsCount))
+        let events: [FeedbackEventInput]
+        if baseDroppedCount == 0 && normalEvents.count <= Self.maxFeedbackEvents {
+            events = normalEvents
+        } else {
+            let maxNormalEvents = max(0, Self.maxFeedbackEvents - 1)
+            let newlyDroppedCount = max(0, normalEvents.count - maxNormalEvents)
+            let totalDroppedCount = baseDroppedCount + newlyDroppedCount
+            let retainedEvents = Array(normalEvents.suffix(maxNormalEvents))
+
+            var markerPayload = FeedbackEventPayload()
+            markerPayload["message"] = "breadcrumbs.truncated"
+            markerPayload["category"] = "hollerkit"
+            markerPayload["truncated"] = "true"
+            markerPayload["dropped"] = String(totalDroppedCount)
+            markerPayload.fields = ["dropped": .int(totalDroppedCount)]
+            let markerEvent = FeedbackEventInput(
+                offsetSeconds: 0,
+                kind: "breadcrumb",
+                payload: markerPayload
             )
+            events = [markerEvent] + retainedEvents
         }
 
         let outboxAttachments: [OutboxAttachmentPayload] = images.map { attachment in

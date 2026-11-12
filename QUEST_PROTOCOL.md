@@ -174,9 +174,13 @@ Attachments use a two-step grant-and-consume flow to prevent unauthenticated buc
 ### Transactional Triage (`PUT /v1/feedback/{id}/triage`)
 - Appends an immutable audit entry to `hollerkit.triage` (`feedback_id`, `status`, `summary`, `links`, `actor`, `created_at`) and updates `hollerkit.feedback` (`triage_status`, `triage_summary`, `links`, `updated_at`) in the same database transaction.
 
-### GitHub Webhook Auto-Resolution (`POST /v1/webhooks/github`)
+### GitHub Webhook Triage Synchronization (`POST /v1/webhooks/github`)
 - Verifies the `X-Hub-Signature-256` HMAC-SHA256 signature against the configured GitHub webhook secret (`githubWebhookSecret`).
-- When a `pull_request` event is closed with `merged = true` or an `issues` event is closed, any feedback items whose `links` match the PR/issue URL (or referenced feedback IDs) are automatically transitioned to `triage_status = 'resolved'` with an audit entry in `hollerkit.triage`.
+- Supports `ping` (returns `{ ok: true, event: 'ping', pong: true }`) and `issues` (`closed`, `reopened`) events; all other GitHub event types return `{ ok: true, event, ignored: true, reason: 'unsupported_event' }`, and other `issues` actions return `{ ok: true, event: 'issues', action, ignored: true, reason: 'unsupported_action' }`.
+- Synchronizing an `issues` (`closed` or `reopened`) event requires **both**:
+  1. A valid HollerKit `feedbackId` marker embedded in the issue body (`<!-- hollerkit-feedback-id: <uuid> -->` or `<!-- hollerkit:{"feedbackId":"<uuid>"} -->`), and
+  2. The webhook issue's `html_url` matching a trusted GitHub issue URL already recorded in `feedback.links` (with on-demand outbox reconciliation if `feedback.links` has not yet recorded an issue link).
+- When verified, `closed` transitions `triage_status` to `'resolved'` (or `'wontfix'` for `state_reason = 'not_planned'`, `'duplicate'` for `state_reason = 'duplicate'`) and `reopened` transitions `triage_status` to `'triaged'`, appending an audit entry in `hollerkit.triage`.
 
 ---
 
