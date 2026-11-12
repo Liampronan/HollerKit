@@ -67,6 +67,39 @@ export interface PostgresHollerKitStore extends HollerKitStore {
   close(): Promise<void>
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function decodeCursorToken(raw: string): { id: string; createdAt?: string } | null {
+  const trimmed = raw.trim()
+  if (UUID_REGEX.test(trimmed)) {
+    return { id: trimmed.toLowerCase() }
+  }
+  if (/^[A-Za-z0-9_-]+={0,2}$/.test(trimmed)) {
+    try {
+      const parsed = JSON.parse(Buffer.from(trimmed, 'base64url').toString('utf8'))
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        !Array.isArray(parsed) &&
+        typeof parsed.id === 'string' &&
+        UUID_REGEX.test(parsed.id.trim()) &&
+        (parsed.createdAt === undefined ||
+          (typeof parsed.createdAt === 'string' && !Number.isNaN(Date.parse(parsed.createdAt))))
+      ) {
+        return {
+          id: parsed.id.trim().toLowerCase(),
+          ...(typeof parsed.createdAt === 'string'
+            ? { createdAt: new Date(Date.parse(parsed.createdAt)).toISOString() }
+            : {}),
+        }
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
 /**
  * Creates a PostgreSQL-backed `HollerKitStore` using `postgres.js`.
  * Defaults `prepare: false` for compatibility with transaction-mode connection poolers.
@@ -295,6 +328,9 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
 
+        // Acquire manifest-level transaction advisory lock so concurrent syncQuests calls cannot race when retiring omitted quests
+        await db`SELECT pg_advisory_xact_lock(hashtext('hollerkit:quests_sync'))`
+
         // Acquire per-quest transaction advisory locks in sorted ID order to serialize version allocation
         const sortedIds = Array.from(new Set(input.quests.map((q) => q.id.trim()))).sort()
         for (const lockId of sortedIds) {
@@ -430,14 +466,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
 
-        // Ensure hollerkit.builds exists and persist the build registration transactionally
-        await db`
-          CREATE TABLE IF NOT EXISTS hollerkit.builds (
-            build text PRIMARY KEY,
-            app_version text,
-            first_seen_at timestamptz NOT NULL DEFAULT now()
-          )
-        `
+        // Persist the build registration transactionally
         await db`
           INSERT INTO hollerkit.builds (build, app_version, first_seen_at)
           VALUES (${input.build}, ${input.appVersion ?? null}, ${nowIso})
@@ -563,13 +592,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     },
 
     async getPendingQuestsForBuild(build: string): Promise<QuestVersionRecord[]> {
-      await sql`
-        CREATE TABLE IF NOT EXISTS hollerkit.builds (
-          build text PRIMARY KEY,
-          app_version text,
-          first_seen_at timestamptz NOT NULL DEFAULT now()
-        )
-      `
       const buildCheck = await sql<{ exists: boolean }[]>`
         SELECT (
           EXISTS (SELECT 1 FROM hollerkit.builds WHERE build = ${build})
@@ -674,27 +696,35 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
         const attachmentsInput = input.attachments ?? []
         const seenKeys = new Set<string>()
-        const grantsToConsume: UploadGrantRecord[] = []
-
         for (const att of attachmentsInput) {
           if (seenKeys.has(att.key)) {
             throw new HollerKitError(400, 'duplicate_attachment_key', `Duplicate attachment key: ${att.key}.`)
           }
           seenKeys.add(att.key)
+        }
 
+        // Lock upload_grants in deterministic lexicographical storage_key order to prevent deadlocks
+        const sortedUniqueKeys = Array.from(seenKeys).sort()
+        const grantsByKey = new Map<string, UploadGrantRecord>()
+        for (const storageKey of sortedUniqueKeys) {
           const grantRows = await db<any[]>`
             SELECT * FROM hollerkit.upload_grants
-            WHERE storage_key = ${att.key}
+            WHERE storage_key = ${storageKey}
             FOR UPDATE
           `
           if (grantRows.length === 0) {
             throw new HollerKitError(
               400,
               'invalid_attachment_grant',
-              `Upload grant not found for key: ${att.key}.`,
+              `Upload grant not found for key: ${storageKey}.`,
             )
           }
-          const grant = toUploadGrantRecord(grantRows[0]!)
+          grantsByKey.set(storageKey, toUploadGrantRecord(grantRows[0]!))
+        }
+
+        const grantsToConsume: UploadGrantRecord[] = []
+        for (const att of attachmentsInput) {
+          const grant = grantsByKey.get(att.key)!
 
           if (grant.submitterId !== input.submitterId) {
             throw new HollerKitError(403, 'forbidden', 'Attachment grant belongs to another submitter.')
@@ -778,11 +808,11 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           triageStatus = 'new'
         }
 
-        for (const grant of grantsToConsume) {
+        for (const storageKey of sortedUniqueKeys) {
           await db`
             UPDATE hollerkit.upload_grants
             SET consumed_at = ${nowIso}
-            WHERE storage_key = ${grant.storageKey}
+            WHERE storage_key = ${storageKey}
           `
         }
 
@@ -886,15 +916,24 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
       let cursorId: string | null = null
 
       if (filter.cursor) {
-        const cursorRows = await sql<{ id: string; created_at_raw: string }[]>`
-          SELECT id::text AS id, created_at::text AS created_at_raw
-          FROM hollerkit.feedback
-          WHERE id = ${filter.cursor}
-          LIMIT 1
-        `
-        if (cursorRows[0]) {
-          cursorCreatedAt = cursorRows[0].created_at_raw
-          cursorId = cursorRows[0].id
+        const decodedCursor = decodeCursorToken(filter.cursor)
+        if (!decodedCursor) {
+          throw new HollerKitError(400, 'invalid_cursor', 'cursor must be a valid cursor token or UUID.')
+        }
+        if (decodedCursor.createdAt) {
+          cursorCreatedAt = decodedCursor.createdAt
+          cursorId = decodedCursor.id
+        } else {
+          const cursorRows = await sql<{ id: string; created_at_raw: string }[]>`
+            SELECT id::text AS id, created_at::text AS created_at_raw
+            FROM hollerkit.feedback
+            WHERE id = ${decodedCursor.id}
+            LIMIT 1
+          `
+          if (cursorRows[0]) {
+            cursorCreatedAt = cursorRows[0].created_at_raw
+            cursorId = cursorRows[0].id
+          }
         }
       }
 
@@ -940,6 +979,10 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     },
 
     async getFeedbackById(id: string): Promise<FeedbackDetailRecord | null> {
+      if (typeof id !== 'string' || !UUID_REGEX.test(id.trim())) {
+        return null
+      }
+      const normalizedId = id.trim().toLowerCase()
       const fbRows = await sql<any[]>`
         SELECT f.*,
                COALESCE(
@@ -949,7 +992,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         FROM hollerkit.feedback f
         LEFT JOIN hollerkit.quests q
           ON q.id = f.quest_id AND q.version = f.quest_version
-        WHERE f.id = ${id}
+        WHERE f.id = ${normalizedId}
         LIMIT 1
       `
       if (fbRows.length === 0) return null
@@ -969,17 +1012,17 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
       const eventRows = await sql<any[]>`
         SELECT * FROM hollerkit.events
-        WHERE feedback_id = ${id}
+        WHERE feedback_id = ${normalizedId}
         ORDER BY offset_seconds ASC, id ASC
       `
       const triageRows = await sql<any[]>`
         SELECT * FROM hollerkit.triage
-        WHERE feedback_id = ${id}
+        WHERE feedback_id = ${normalizedId}
         ORDER BY created_at ASC, id ASC
       `
       const attachmentRows = await sql<any[]>`
         SELECT * FROM hollerkit.attachments
-        WHERE feedback_id = ${id}
+        WHERE feedback_id = ${normalizedId}
         ORDER BY created_at ASC
       `
 
@@ -1019,23 +1062,27 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     async triageFeedback(
       input: TriageFeedbackInput,
     ): Promise<{ feedback: FeedbackRecord; triage: TriageRecord }> {
+      if (typeof input.feedbackId !== 'string' || !UUID_REGEX.test(input.feedbackId.trim())) {
+        throw new HollerKitError(400, 'invalid_uuid', 'id must be a valid UUID.')
+      }
+      const feedbackId = input.feedbackId.trim().toLowerCase()
       const nowIso = (input.now ?? new Date()).toISOString()
       const links = input.links ? [...input.links] : []
 
       return sql.begin(async (tx) => {
         const db = tx as unknown as Sql
         const existing = await db<any[]>`
-          SELECT id FROM hollerkit.feedback WHERE id = ${input.feedbackId} FOR UPDATE
+          SELECT id FROM hollerkit.feedback WHERE id = ${feedbackId} FOR UPDATE
         `
         if (existing.length === 0) {
-          throw new HollerKitError(404, 'not_found', `Feedback not found: ${input.feedbackId}.`)
+          throw new HollerKitError(404, 'not_found', `Feedback not found: ${feedbackId}.`)
         }
 
         const triageRows = await db<any[]>`
           INSERT INTO hollerkit.triage (
             feedback_id, status, summary, links, actor, created_at
           ) VALUES (
-            ${input.feedbackId}, ${input.status}, ${input.summary},
+            ${feedbackId}, ${input.status}, ${input.summary},
             ${db.json(links)}, ${input.actor ?? null}, ${nowIso}
           )
           RETURNING *
@@ -1048,7 +1095,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
                 triage_summary = ${input.summary},
                 links = ${db.json(links)},
                 updated_at = ${nowIso}
-            WHERE id = ${input.feedbackId}
+            WHERE id = ${feedbackId}
           `
         } else {
           await db`
@@ -1056,7 +1103,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             SET triage_status = ${input.status},
                 triage_summary = ${input.summary},
                 updated_at = ${nowIso}
-            WHERE id = ${input.feedbackId}
+            WHERE id = ${feedbackId}
           `
         }
 
@@ -1069,7 +1116,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           FROM hollerkit.feedback f
           LEFT JOIN hollerkit.quests q
             ON q.id = f.quest_id AND q.version = f.quest_version
-          WHERE f.id = ${input.feedbackId}
+          WHERE f.id = ${feedbackId}
           LIMIT 1
         `
 
@@ -1175,11 +1222,18 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
     },
 
     async claimPendingOutbox(input: ClaimPendingOutboxInput = {}): Promise<OutboxRecord[]> {
+      if (input.feedbackId !== undefined && !UUID_REGEX.test(input.feedbackId.trim())) {
+        return []
+      }
+      const feedbackIdFilter = input.feedbackId ? input.feedbackId.trim().toLowerCase() : null
       const now = input.now ?? new Date()
       const nowIso = now.toISOString()
-      const leaseMs = Math.max(0, input.leaseMs ?? 60_000)
-      const leaseUntilIso = new Date(now.getTime() + leaseMs).toISOString()
       const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
+      const leaseMs =
+        input.leaseMs === 0
+          ? 0
+          : Math.max(0, Math.max(input.leaseMs ?? 60_000, limit * 35_000))
+      const leaseUntilIso = new Date(now.getTime() + leaseMs).toISOString()
 
       const rows = await sql<any[]>`
         WITH claimed AS (
@@ -1187,7 +1241,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           FROM hollerkit.outbox
           WHERE delivered_at IS NULL
             AND next_attempt_at <= ${nowIso}::timestamptz
-            AND (${input.feedbackId ?? null}::uuid IS NULL OR feedback_id = ${input.feedbackId ?? null}::uuid)
+            AND (${feedbackIdFilter}::uuid IS NULL OR feedback_id = ${feedbackIdFilter}::uuid)
           ORDER BY next_attempt_at ASC, id ASC
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
@@ -1252,6 +1306,7 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
             last_error = ${input.error},
             next_attempt_at = ${input.nextAttemptAt}
         WHERE id = ${input.id}
+          AND delivered_at IS NULL
         RETURNING *
       `
       return rows[0] ? toOutboxRecord(rows[0]) : null

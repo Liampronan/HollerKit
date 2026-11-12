@@ -4,6 +4,7 @@ import { constants, copyFile, mkdir, readdir, readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { githubIssuesSink } from './adapters/sinks/github.js'
+import { s3Storage } from './adapters/storage/s3.js'
 import { supabaseStorage } from './adapters/storage/supabase.js'
 import { generateApiKey, getApiKeyPrefix, hashApiKey } from './v1/auth.js'
 import { runConformanceSuite } from './v1/conformance.js'
@@ -113,17 +114,26 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
           }),
         })
 
-        const payload = (await response.json()) as {
+        const rawBody = await response.text()
+        let payload: {
           ok?: boolean
           quests?: QuestVersionRecord[]
           activatedIds?: string[]
           reactivatedIds?: string[]
           retiredIds?: string[]
           error?: { code?: string; message?: string }
+        } | null = null
+        try {
+          payload = JSON.parse(rawBody)
+        } catch {
+          payload = null
         }
 
-        if (!response.ok || !payload.ok) {
-          const errMsg = payload?.error?.message ?? `HTTP ${response.status}`
+        if (!response.ok || !payload?.ok) {
+          const snippet = rawBody.trim().slice(0, 200)
+          const errMsg =
+            payload?.error?.message ??
+            (snippet ? `HTTP ${response.status}: ${snippet}` : `HTTP ${response.status}`)
           stderr(`Error syncing quests: ${errMsg}`)
           return 1
         }
@@ -325,6 +335,25 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
           flags.get('supabase-service-role-key') ?? process.env.SUPABASE_SERVICE_ROLE_KEY
         const bucket = flags.get('bucket') ?? process.env.HOLLERKIT_BUCKET ?? 'hollerkit'
 
+        const s3Endpoint =
+          flags.get('s3-endpoint') ?? process.env.HOLLERKIT_S3_ENDPOINT ?? process.env.S3_ENDPOINT
+        const s3Bucket =
+          flags.get('s3-bucket') ??
+          process.env.HOLLERKIT_S3_BUCKET ??
+          process.env.S3_BUCKET ??
+          flags.get('bucket') ??
+          process.env.HOLLERKIT_BUCKET
+        const s3Region =
+          flags.get('s3-region') ?? process.env.HOLLERKIT_S3_REGION ?? process.env.S3_REGION
+        const s3AccessKeyId =
+          flags.get('s3-access-key-id') ??
+          process.env.HOLLERKIT_S3_ACCESS_KEY_ID ??
+          process.env.S3_ACCESS_KEY_ID
+        const s3SecretAccessKey =
+          flags.get('s3-secret-access-key') ??
+          process.env.HOLLERKIT_S3_SECRET_ACCESS_KEY ??
+          process.env.S3_SECRET_ACCESS_KEY
+
         const storage =
           supabaseUrl && supabaseServiceRoleKey
             ? supabaseStorage({
@@ -333,7 +362,15 @@ export async function runCli(argv: string[], io: CliIo = {}): Promise<number> {
                 bucket,
                 fetchImpl: fetchFn,
               })
-            : undefined
+            : s3Endpoint && s3Bucket && s3AccessKeyId && s3SecretAccessKey
+              ? s3Storage({
+                  endpoint: s3Endpoint,
+                  bucket: s3Bucket,
+                  region: s3Region,
+                  accessKeyId: s3AccessKeyId,
+                  secretAccessKey: s3SecretAccessKey,
+                })
+              : undefined
 
         const sink = githubIssuesSink({
           repo: githubRepo,

@@ -77,6 +77,39 @@ interface StoredQuestBuildRow {
   firstSeenAt: string
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function decodeCursorToken(raw: string): { id: string; createdAt?: string } | null {
+  const trimmed = raw.trim()
+  if (UUID_REGEX.test(trimmed)) {
+    return { id: trimmed.toLowerCase() }
+  }
+  if (/^[A-Za-z0-9_-]+={0,2}$/.test(trimmed)) {
+    try {
+      const parsed = JSON.parse(Buffer.from(trimmed, 'base64url').toString('utf8'))
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        !Array.isArray(parsed) &&
+        typeof parsed.id === 'string' &&
+        UUID_REGEX.test(parsed.id.trim()) &&
+        (parsed.createdAt === undefined ||
+          (typeof parsed.createdAt === 'string' && !Number.isNaN(Date.parse(parsed.createdAt))))
+      ) {
+        return {
+          id: parsed.id.trim().toLowerCase(),
+          ...(typeof parsed.createdAt === 'string'
+            ? { createdAt: new Date(Date.parse(parsed.createdAt)).toISOString() }
+            : {}),
+        }
+      }
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
 /**
  * Creates an in-memory `HollerKitStore` implementation for tests and local development.
  */
@@ -671,9 +704,23 @@ export function memoryStore(): HollerKitStore {
 
     async listFeedback(filter: ListFeedbackFilter = {}): Promise<ListFeedbackResult> {
       const sinceMs = filter.since ? new Date(filter.since).getTime() : null
-      const cursorRecord = filter.cursor ? feedbacks.get(filter.cursor) : undefined
+      let cursorBoundary: { id: string; createdAt: string } | undefined
+      if (filter.cursor) {
+        const decoded = decodeCursorToken(filter.cursor)
+        if (!decoded) {
+          throw new HollerKitError(400, 'invalid_cursor', 'cursor must be a valid cursor token or UUID.')
+        }
+        if (decoded.createdAt) {
+          cursorBoundary = { id: decoded.id, createdAt: decoded.createdAt }
+        } else {
+          const found = feedbacks.get(decoded.id)
+          if (found) {
+            cursorBoundary = { id: found.id, createdAt: found.createdAt }
+          }
+        }
+      }
       const all = Array.from(feedbacks.values()).filter((fb) => {
-        if (cursorRecord && compareFeedbackDesc(fb, cursorRecord) <= 0) return false
+        if (cursorBoundary && compareFeedbackDesc(fb, cursorBoundary as FeedbackRecord) <= 0) return false
         if (filter.kind && fb.kind !== filter.kind) return false
         if (filter.result && fb.result !== filter.result) return false
         if (filter.triage !== undefined && fb.triageStatus !== filter.triage) return false
@@ -699,7 +746,11 @@ export function memoryStore(): HollerKitStore {
     },
 
     async getFeedbackById(id: string): Promise<FeedbackDetailRecord | null> {
-      const fb = feedbacks.get(id)
+      if (typeof id !== 'string' || !UUID_REGEX.test(id.trim())) {
+        return null
+      }
+      const normalizedId = id.trim().toLowerCase()
+      const fb = feedbacks.get(normalizedId)
       if (!fb) return null
 
       let quest: QuestVersionRecord | null = null
@@ -710,19 +761,19 @@ export function memoryStore(): HollerKitStore {
         }
       }
 
-      const events = [...(eventsByFeedback.get(id) ?? [])].sort((a, b) => {
+      const events = [...(eventsByFeedback.get(normalizedId) ?? [])].sort((a, b) => {
         if (a.offsetSeconds !== b.offsetSeconds) return a.offsetSeconds - b.offsetSeconds
         return a.id - b.id
       })
 
-      const triage = [...(triageByFeedback.get(id) ?? [])].sort((a, b) => {
+      const triage = [...(triageByFeedback.get(normalizedId) ?? [])].sort((a, b) => {
         const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
         if (diff !== 0) return diff
         return a.id - b.id
       })
 
-      const attachments = [...(attachmentsByFeedback.get(id) ?? [])]
-      const captures = (capturesByFeedback.get(id) ?? evaluateQuestCaptures(quest?.capture, events).captures).map(
+      const attachments = [...(attachmentsByFeedback.get(normalizedId) ?? [])]
+      const captures = (capturesByFeedback.get(normalizedId) ?? evaluateQuestCaptures(quest?.capture, events).captures).map(
         (cap) => ({
           ...cap,
           flags: [...cap.flags],
@@ -770,9 +821,13 @@ export function memoryStore(): HollerKitStore {
     async triageFeedback(
       input: TriageFeedbackInput,
     ): Promise<{ feedback: FeedbackRecord; triage: TriageRecord }> {
-      const fb = feedbacks.get(input.feedbackId)
+      if (typeof input.feedbackId !== 'string' || !UUID_REGEX.test(input.feedbackId.trim())) {
+        throw new HollerKitError(400, 'invalid_uuid', 'id must be a valid UUID.')
+      }
+      const feedbackId = input.feedbackId.trim().toLowerCase()
+      const fb = feedbacks.get(feedbackId)
       if (!fb) {
-        throw new HollerKitError(404, 'not_found', `Feedback not found: ${input.feedbackId}.`)
+        throw new HollerKitError(404, 'not_found', `Feedback not found: ${feedbackId}.`)
       }
 
       const nowIso = (input.now ?? new Date()).toISOString()
@@ -889,16 +944,23 @@ export function memoryStore(): HollerKitStore {
     },
 
     async claimPendingOutbox(input: ClaimPendingOutboxInput = {}): Promise<OutboxRecord[]> {
+      if (input.feedbackId !== undefined && !UUID_REGEX.test(input.feedbackId.trim())) {
+        return []
+      }
+      const feedbackIdFilter = input.feedbackId ? input.feedbackId.trim().toLowerCase() : undefined
       const nowMs = (input.now ?? new Date()).getTime()
-      const leaseMs = Math.max(0, input.leaseMs ?? 60_000)
-      const leaseUntilIso = new Date(nowMs + leaseMs).toISOString()
       const limit = Math.min(Math.max(input.limit ?? 20, 1), 100)
+      const leaseMs =
+        input.leaseMs === 0
+          ? 0
+          : Math.max(0, Math.max(input.leaseMs ?? 60_000, limit * 35_000))
+      const leaseUntilIso = new Date(nowMs + leaseMs).toISOString()
       const pending = Array.from(outbox.values())
         .filter(
           (row) =>
             row.deliveredAt === null &&
             new Date(row.nextAttemptAt).getTime() <= nowMs &&
-            (input.feedbackId === undefined || row.feedbackId === input.feedbackId),
+            (feedbackIdFilter === undefined || row.feedbackId === feedbackIdFilter),
         )
         .sort((a, b) => {
           const diff = new Date(a.nextAttemptAt).getTime() - new Date(b.nextAttemptAt).getTime()
@@ -935,7 +997,7 @@ export function memoryStore(): HollerKitStore {
 
     async markOutboxFailed(input: MarkOutboxFailedInput): Promise<OutboxRecord | null> {
       const row = outbox.get(input.id)
-      if (!row) return null
+      if (!row || row.deliveredAt !== null) return null
       row.attempts += 1
       row.lastError = input.error
       row.nextAttemptAt = input.nextAttemptAt

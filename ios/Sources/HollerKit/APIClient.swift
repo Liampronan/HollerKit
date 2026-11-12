@@ -531,37 +531,62 @@ public struct FeedbackSubmissionRequest: Codable, Equatable, Sendable {
         self.attachments = attachments
     }
 
-    public mutating func clampToBudget(maxBytes: Int = 240 * 1024) {
+    public static let maxEvents = 200
+
+    public mutating func clampToBudget(
+        maxBytes: Int = 240 * 1024,
+        maxEvents: Int = FeedbackSubmissionRequest.maxEvents
+    ) {
         for i in 0..<events.count {
             events[i].payload.clampToSize(maxBytes: 2048)
+        }
+
+        var droppedCount = 0
+        if let first = events.first, first.payload["message"] == "breadcrumbs.truncated" {
+            if case .int(let existing) = first.payload.fields?["dropped"] {
+                droppedCount = max(0, existing)
+            } else if let rawDropped = first.payload["dropped"], let existing = Int(rawDropped) {
+                droppedCount = max(0, existing)
+            }
+        }
+
+        func dropOldestEventAndUpdateMarker() -> Bool {
+            let startIdx = (events.first?.payload["message"] == "breadcrumbs.truncated") ? 1 : 0
+            guard startIdx < events.count else { return false }
+            let indexToRemove = events[startIdx...].firstIndex(where: { $0.kind != "mark" }) ?? startIdx
+            events.remove(at: indexToRemove)
+            droppedCount += 1
+
+            var marker = FeedbackEventPayload()
+            marker["message"] = "breadcrumbs.truncated"
+            marker["category"] = "hollerkit"
+            marker["truncated"] = "true"
+            marker["dropped"] = String(droppedCount)
+            marker.fields = ["dropped": .int(droppedCount)]
+            let markerEvent = FeedbackEventInput(offsetSeconds: 0, kind: "breadcrumb", payload: marker)
+
+            if events.first?.payload["message"] == "breadcrumbs.truncated" {
+                events[0] = markerEvent
+            } else {
+                events.insert(markerEvent, at: 0)
+            }
+            return true
+        }
+
+        if maxEvents > 0 {
+            while events.count > maxEvents {
+                if !dropOldestEventAndUpdateMarker() {
+                    break
+                }
+            }
         }
 
         let encoder = JSONEncoder()
         guard let data = try? encoder.encode(self), data.count > maxBytes else { return }
 
-        var droppedCount = 0
         while events.count > 1, let current = try? encoder.encode(self), current.count > maxBytes {
-            if events.first?.payload["message"] == "breadcrumbs.truncated" {
-                if events.count > 2 {
-                    events.remove(at: 1)
-                    droppedCount += 1
-                } else {
-                    break
-                }
-            } else {
-                events.removeFirst()
-                droppedCount += 1
-            }
-
-            if events.first?.payload["message"] != "breadcrumbs.truncated" {
-                var marker = FeedbackEventPayload()
-                marker["message"] = "breadcrumbs.truncated"
-                marker["category"] = "hollerkit"
-                marker["truncated"] = "true"
-                marker.fields = ["dropped": .int(droppedCount)]
-                events.insert(FeedbackEventInput(offsetSeconds: 0, kind: "breadcrumb", payload: marker), at: 0)
-            } else {
-                events[0].payload.fields = ["dropped": .int(droppedCount)]
+            if !dropOldestEventAndUpdateMarker() {
+                break
             }
         }
     }
@@ -611,9 +636,11 @@ public struct PendingQuestItem: Codable, Equatable, Sendable {
     public var start: String?
     public var source: QuestManifestSource?
     public var status: String
+    public var boardStatus: String?
     public var createdAt: String
     public var retiredAt: String?
     public var counts: QuestResultCounts?
+    public var latestRun: QuestLatestRun?
     public var passedOnCurrentVersion: Bool?
 }
 
@@ -728,6 +755,7 @@ public struct APIClient: Sendable {
     ) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
+        request.timeoutInterval = 45
         request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
         request.setValue(String(data.count), forHTTPHeaderField: "Content-Length")
         request.httpBody = data
@@ -807,6 +835,7 @@ public struct APIClient: Sendable {
         let url = try endpointURL(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.timeoutInterval = 20
         request.setValue(Self.protocolVersion, forHTTPHeaderField: "hollerkit-protocol")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

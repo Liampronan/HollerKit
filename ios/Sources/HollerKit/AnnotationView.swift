@@ -42,7 +42,7 @@ struct AnnotationEditorScreen: View {
                         .onAppear {
                             canvasSize = imageFrame.size
                         }
-                        .onChange(of: imageFrame.size) { newSize in
+                        .onChange(of: imageFrame.size) { _, newSize in
                             canvasSize = newSize
                         }
 

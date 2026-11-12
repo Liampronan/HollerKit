@@ -1,7 +1,7 @@
 import SwiftUI
 
 public struct QuestBoardView: View {
-    @ObservedObject private var questState: HollerKitQuestState
+    private let questState: HollerKitQuestState
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab: BoardTab = .pending
 

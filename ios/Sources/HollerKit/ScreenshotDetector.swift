@@ -43,23 +43,78 @@ final class ScreenshotDetectorViewController: UIViewController {
     }
 
     @objc @MainActor private func userDidTakeScreenshot() {
-        onScreenshot(HollerKitScreenCapture.currentScreenshotAttachment())
+        let preferredScene = viewIfLoaded?.window?.windowScene
+        onScreenshot(HollerKitScreenCapture.currentScreenshotAttachment(preferredScene: preferredScene))
     }
 }
 
 enum HollerKitScreenCapture {
     @MainActor
-    static func currentScreenshotAttachment() -> HollerKitAttachment? {
-        var keyWindow: UIWindow?
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else { continue }
-            if let window = windowScene.windows.first(where: { $0.isKeyWindow }) {
-                keyWindow = window
-                break
+    private static func isEligibleCaptureWindow(_ window: UIWindow) -> Bool {
+        !(window is PassthroughOverlayWindow)
+            && !window.isHidden
+            && window.alpha > 0
+            && window.bounds.width > 0
+            && window.bounds.height > 0
+    }
+
+    @MainActor
+    private static func preferredNonKeyWindow(in windows: [UIWindow]) -> UIWindow? {
+        windows.first(where: { $0.windowLevel == .normal }) ?? windows.first
+    }
+
+    @MainActor
+    static func selectCaptureWindow(
+        preferredScene: UIWindowScene? = nil,
+        connectedScenes: [UIWindowScene] = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    ) -> UIWindow? {
+        if let preferredScene {
+            let eligibleWindows = preferredScene.windows.filter(isEligibleCaptureWindow)
+            if let keyWindow = eligibleWindows.first(where: \.isKeyWindow) {
+                return keyWindow
+            }
+            if let normalWindow = preferredNonKeyWindow(in: eligibleWindows) {
+                return normalWindow
             }
         }
 
-        guard let window = keyWindow else { return nil }
+        let activeScenes = connectedScenes.filter { $0.activationState == .foregroundActive }
+        let inactiveScenes = connectedScenes.filter { $0.activationState != .foregroundActive }
+
+        for windowScene in activeScenes {
+            let eligibleWindows = windowScene.windows.filter(isEligibleCaptureWindow)
+            if let keyWindow = eligibleWindows.first(where: \.isKeyWindow) {
+                return keyWindow
+            }
+        }
+
+        for windowScene in activeScenes {
+            let eligibleWindows = windowScene.windows.filter(isEligibleCaptureWindow)
+            if let normalWindow = preferredNonKeyWindow(in: eligibleWindows) {
+                return normalWindow
+            }
+        }
+
+        for windowScene in inactiveScenes {
+            let eligibleWindows = windowScene.windows.filter(isEligibleCaptureWindow)
+            if let keyWindow = eligibleWindows.first(where: \.isKeyWindow) {
+                return keyWindow
+            }
+        }
+
+        for windowScene in inactiveScenes {
+            let eligibleWindows = windowScene.windows.filter(isEligibleCaptureWindow)
+            if let normalWindow = preferredNonKeyWindow(in: eligibleWindows) {
+                return normalWindow
+            }
+        }
+
+        return nil
+    }
+
+    @MainActor
+    static func currentScreenshotAttachment(preferredScene: UIWindowScene? = nil) -> HollerKitAttachment? {
+        guard let window = selectCaptureWindow(preferredScene: preferredScene) else { return nil }
 
         let format = UIGraphicsImageRendererFormat()
         format.scale = window.screen.scale

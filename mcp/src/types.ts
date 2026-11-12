@@ -30,6 +30,7 @@ export interface HollerKitMcpConfig {
   protocolVersion?: string | undefined
   timeoutMs?: number | undefined
   maxPendingRequests?: number | undefined
+  maxResponseBytes?: number | undefined
 }
 
 export interface FeedbackItem {

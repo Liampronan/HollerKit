@@ -60,7 +60,7 @@ public enum HollerKitEnvironment: Sendable {
             || content.contains("ProvisionsAllDevices") {
             return true
         }
-        return true
+        return false
     }
 }
 
@@ -170,6 +170,28 @@ public struct HollerKitConfiguration: Sendable {
         self.quests = quests
         self.urlSession = urlSession
         self.outboxDirectoryURL = outboxDirectoryURL
+    }
+
+    /// Resolves the effective audio configuration for the active `inputMode`, ensuring `.audioOnly`
+    /// always enables voice transcription with its configured `maxDuration` and `.textOnly` disables it.
+    public var effectiveAudioConfiguration: HollerKitAudioConfiguration {
+        switch inputMode {
+        case .textOnly:
+            return .off
+        case .audioOnly(_, let maxDuration):
+            let requireOnDevice: Bool
+            if case .transcriptOnly(_, let onDevice) = audio {
+                requireOnDevice = onDevice
+            } else {
+                requireOnDevice = false
+            }
+            return .transcriptOnly(
+                maxDuration: maxDuration,
+                requireOnDeviceTranscription: requireOnDevice
+            )
+        case .textAndAudio:
+            return audio
+        }
     }
 }
 

@@ -85,9 +85,16 @@ export function generateApiKey(prefix?: string): string {
 }
 
 /**
- * Returns the 12-character display prefix for a raw `hk_...` API key.
+ * Returns a high-entropy display prefix for a raw `hk_...` API key.
+ * For keys with a custom label prefix (`hk_<label>_<hex>`), includes up to 8 hex characters
+ * of the random suffix so keys sharing a long label never share a zero-entropy prefix.
  */
 export function getApiKeyPrefix(rawKey: string): string {
+  const match = rawKey.match(/^(hk_[a-z0-9_-]+_)([0-9a-f]{8,})$/i)
+  if (match && match[1] && match[2]) {
+    const minLen = Math.max(12, match[1].length + 8)
+    return rawKey.slice(0, minLen)
+  }
   return rawKey.slice(0, 12)
 }
 

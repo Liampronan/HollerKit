@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import SwiftUI
 
 @MainActor
@@ -117,6 +118,7 @@ public enum HollerKit {
             state.configuredWhileEnabled = false
             quests.reset()
             state.breadcrumbs = BreadcrumbStore(capacity: state.configuration?.maxBreadcrumbs ?? 500)
+            presenterState.presentQuestsAfterBugReportDismiss = false
             if presenterState.isPresented {
                 presenterState.isPresented = false
                 presenterState.handleSheetDismissed(configuration: nil)
@@ -156,7 +158,10 @@ public enum HollerKit {
                   state.configuredWhileEnabled,
                   state.activationGeneration == generation else { return }
             let client = APIClient(configuration: configuration)
-            _ = await state.outboxStore.flush(using: client)
+            let flushResult = await state.outboxStore.flush(using: client)
+            if !flushResult.rejectedErrors.isEmpty {
+                quests.rollbackRejectedFeedbackIds(Set(flushResult.rejectedErrors.keys))
+            }
             guard !Task.isCancelled,
                   state.configuredWhileEnabled,
                   state.activationGeneration == generation,
@@ -306,13 +311,28 @@ public enum HollerKit {
         presenterState.isQuestsPresented = true
     }
 
+    static func requestQuestsAfterBugReportDismiss() {
+        guard reconcileEnablement() else { return }
+        breadcrumb("Invoked quests via bugReport", category: "invocation")
+        if presenterState.isPresented {
+            presenterState.presentQuestsAfterBugReportDismiss = true
+            presenterState.isPresented = false
+        } else {
+            presenterState.isQuestsPresented = true
+        }
+    }
+
     @discardableResult
     public static func flushOutbox() async -> OutboxFlushResult {
         guard reconcileEnablement(), let configuration = state.configuration else {
             return OutboxFlushResult()
         }
         let client = APIClient(configuration: configuration)
-        return await state.outboxStore.flush(using: client)
+        let result = await state.outboxStore.flush(using: client)
+        if !result.rejectedErrors.isEmpty {
+            quests.rollbackRejectedFeedbackIds(Set(result.rejectedErrors.keys))
+        }
+        return result
     }
 
     public static func submitReport(
@@ -398,12 +418,14 @@ private struct HollerKitState {
     var outboxStore = OutboxStore()
 }
 
+@Observable
 @MainActor
-final class HollerKitPresenterState: ObservableObject {
-    @Published var isRuntimeEnabled = false
-    @Published var isPresented = false
-    @Published var isQuestsPresented = false
-    @Published var currentInvocation: HollerKitInvocation = []
+final class HollerKitPresenterState {
+    var isRuntimeEnabled = false
+    var isPresented = false
+    var isQuestsPresented = false
+    var presentQuestsAfterBugReportDismiss = false
+    var currentInvocation: HollerKitInvocation = []
     var presentationId = UUID()
     var activeDraft = BugReportDraft()
     var pendingAttachments: [HollerKitAttachment] = []
@@ -415,6 +437,7 @@ final class HollerKitPresenterState: ObservableObject {
         triggerName: String = "manual"
     ) {
         activeDraft.cancelCapture()
+        presentQuestsAfterBugReportDismiss = false
         pendingAttachments = attachments
         presentationId = UUID()
         activeDraft = BugReportDraft(
@@ -435,5 +458,11 @@ final class HollerKitPresenterState: ObservableObject {
             configuration: enabledConfiguration,
             invocationAttachments: []
         )
+        if presentQuestsAfterBugReportDismiss {
+            presentQuestsAfterBugReportDismiss = false
+            if isRuntimeEnabled && enabledConfiguration != nil {
+                isQuestsPresented = true
+            }
+        }
     }
 }

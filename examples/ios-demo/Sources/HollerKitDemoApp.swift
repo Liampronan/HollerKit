@@ -1,15 +1,17 @@
 import HollerKit
+import Observation
 import SwiftUI
 
+@Observable
 @MainActor
-final class DemoNavigationState: ObservableObject {
+final class DemoNavigationState {
     enum Screen: String {
         case checkout
         case profile
     }
 
     static let shared = DemoNavigationState()
-    @Published var currentScreen: Screen = .checkout
+    var currentScreen: Screen = .checkout
 }
 
 @main

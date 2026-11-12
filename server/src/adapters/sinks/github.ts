@@ -350,7 +350,20 @@ export function githubIssuesSink(options: GitHubIssuesSinkOptions): HollerKitSin
     .filter((a) => a.length > 0)
 
   const deliveredByFeedbackId = new Map<string, string>()
+  const MAX_DELIVERED_CACHE_ENTRIES = 1_000
   const repoIssueUrlPrefix = `https://github.com/${owner}/${repo}/issues/`.toLowerCase()
+
+  function cacheDeliveredLink(feedbackId: string, link: string): void {
+    if (deliveredByFeedbackId.has(feedbackId)) {
+      deliveredByFeedbackId.delete(feedbackId)
+    } else if (deliveredByFeedbackId.size >= MAX_DELIVERED_CACHE_ENTRIES) {
+      const oldestKey = deliveredByFeedbackId.keys().next().value
+      if (oldestKey !== undefined) {
+        deliveredByFeedbackId.delete(oldestKey)
+      }
+    }
+    deliveredByFeedbackId.set(feedbackId, link)
+  }
 
   return {
     name: sinkName,
@@ -370,7 +383,7 @@ export function githubIssuesSink(options: GitHubIssuesSinkOptions): HollerKitSin
         link.toLowerCase().startsWith(repoIssueUrlPrefix),
       )
       if (existingRepoLink) {
-        deliveredByFeedbackId.set(feedbackId, existingRepoLink)
+        cacheDeliveredLink(feedbackId, existingRepoLink)
         return { link: existingRepoLink }
       }
 
@@ -388,7 +401,7 @@ export function githubIssuesSink(options: GitHubIssuesSinkOptions): HollerKitSin
           signal: context?.signal,
         })
         if (foundUrl) {
-          deliveredByFeedbackId.set(feedbackId, foundUrl)
+          cacheDeliveredLink(feedbackId, foundUrl)
           return { link: foundUrl }
         }
       }
@@ -473,7 +486,7 @@ export function githubIssuesSink(options: GitHubIssuesSinkOptions): HollerKitSin
         )
       }
 
-      deliveredByFeedbackId.set(feedbackId, htmlUrl)
+      cacheDeliveredLink(feedbackId, htmlUrl)
       return { link: htmlUrl }
     },
   }

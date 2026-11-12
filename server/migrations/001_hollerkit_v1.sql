@@ -176,6 +176,10 @@ CREATE TABLE IF NOT EXISTS hollerkit.values (
 );
 
 -- Indexes for inbox, pending quests, values, and build queries
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quests_single_active_per_id
+  ON hollerkit.quests (id)
+  WHERE status = 'active';
+
 CREATE INDEX IF NOT EXISTS idx_quests_status_area
   ON hollerkit.quests (status, area);
 
@@ -187,6 +191,10 @@ CREATE INDEX IF NOT EXISTS idx_feedback_triage_created
 
 CREATE INDEX IF NOT EXISTS idx_feedback_quest_version_result
   ON hollerkit.feedback (quest_id, quest_version, result);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_quest_latest_run
+  ON hollerkit.feedback (quest_id, quest_version, created_at DESC, id DESC)
+  WHERE kind = 'quest_run';
 
 CREATE INDEX IF NOT EXISTS idx_feedback_build_created
   ON hollerkit.feedback (build, created_at DESC);

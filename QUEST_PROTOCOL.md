@@ -55,6 +55,7 @@ All `/v1/*` endpoints authenticate via `Authorization: Bearer <token>`. Two cred
 | `GET /v1/quests` | `agent:read` |
 | `GET /v1/builds/{build}/pending` | `tester` or `agent:read` |
 | `GET /v1/values` | `agent:read` |
+| `POST /v1/webhooks/github` | `X-Hub-Signature-256` (HMAC-SHA256) |
 
 Missing or invalid credentials return `401 Unauthorized` (`code: "unauthorized"`). Valid credentials lacking the required scope return `403 Forbidden` (`code: "forbidden"`).
 
@@ -115,7 +116,7 @@ Normalization rules applied by `computeQuestContentHash(quest)`:
 
 When `PUT /v1/quests` syncs a manifest from `main`:
 1. For each quest in `manifest.quests`, the server computes `content_hash = computeQuestContentHash(quest)`:
-   - **Existing `(id, content_hash)` match**: If any version row for `id` already has that `content_hash` (whether `active`, `draft`, `superseded`, or `retired`), the server **reactivates** that version row (`status = 'active'`, `retired_at = NULL`, updating metadata/source fields) and marks all other versions of `id` as `superseded`. No duplicate version is minted.
+   - **Existing `(id, content_hash)` match**: If any version row for `id` already has that `content_hash` (whether `active`, `draft`, `superseded`, or `retired`), the server **reactivates** that version row (`status = 'active'`, `retired_at = NULL`, updating metadata/source fields) and marks any other `'active'` or `'draft'` versions of `id` as `'superseded'` while preserving `'retired'` on previously retired versions. No duplicate version is minted.
    - **New `(id, content_hash)`**: The server computes `nextVersion = COALESCE(MAX(version), 0) + 1` across all versions of `id`, marks any prior `active` or `draft` versions of `id` as `superseded`, and inserts `(id, nextVersion, content_hash, ..., status = 'active')`.
 2. **Retirement**: Any quest `id` that had an `active` version before the sync and is omitted from `manifest.quests` has its active version marked `status = 'retired'` with `retired_at = now()`.
 
@@ -172,6 +173,14 @@ Attachments use a two-step grant-and-consume flow to prevent unauthenticated buc
 
 ### Transactional Triage (`PUT /v1/feedback/{id}/triage`)
 - Appends an immutable audit entry to `hollerkit.triage` (`feedback_id`, `status`, `summary`, `links`, `actor`, `created_at`) and updates `hollerkit.feedback` (`triage_status`, `triage_summary`, `links`, `updated_at`) in the same database transaction.
+
+### GitHub Webhook Triage Synchronization (`POST /v1/webhooks/github`)
+- Verifies the `X-Hub-Signature-256` HMAC-SHA256 signature against the configured GitHub webhook secret (`githubWebhookSecret`).
+- Supports `ping` (returns `{ ok: true, event: 'ping', pong: true }`) and `issues` (`closed`, `reopened`) events; all other GitHub event types return `{ ok: true, event, ignored: true, reason: 'unsupported_event' }`, and other `issues` actions return `{ ok: true, event: 'issues', action, ignored: true, reason: 'unsupported_action' }`.
+- Synchronizing an `issues` (`closed` or `reopened`) event requires **both**:
+  1. A valid HollerKit `feedbackId` marker embedded in the issue body (`<!-- hollerkit-feedback-id: <uuid> -->` or `<!-- hollerkit:{"feedbackId":"<uuid>"} -->`), and
+  2. The webhook issue's `html_url` matching a trusted GitHub issue URL already recorded in `feedback.links` (with on-demand outbox reconciliation if `feedback.links` has not yet recorded an issue link).
+- When verified, `closed` transitions `triage_status` to `'resolved'` (or `'wontfix'` for `state_reason = 'not_planned'`, `'duplicate'` for `state_reason = 'duplicate'`) and `reopened` transitions `triage_status` to `'triaged'`, appending an audit entry in `hollerkit.triage`.
 
 ---
 

@@ -62,24 +62,49 @@ const handler = createHollerKitServer({
 })
 
 createServer(async (incoming, outgoing) => {
-  const contentLength = Number(incoming.headers['content-length'] ?? 0)
-  if (contentLength > defaultV1Limits.maxJsonBytes) {
-    outgoing.writeHead(413, {
-      'content-type': 'application/json',
-      'hollerkit-protocol': '1',
-    })
-    outgoing.end(JSON.stringify({ ok: false, error: { code: 'body_too_large', message: 'Payload too large.' } }))
-    return
+  try {
+    const pathname = new URL(incoming.url ?? '/', 'http://localhost').pathname.replace(/\/+$/, '')
+    const isGitHubWebhook = pathname.endsWith('/v1/webhooks/github')
+    const maxBytes = isGitHubWebhook ? 1024 * 1024 : defaultV1Limits.maxJsonBytes
+    const contentLength = Number(incoming.headers['content-length'] ?? 0)
+    if (contentLength > maxBytes) {
+      outgoing.writeHead(413, {
+        'content-type': 'application/json',
+        'hollerkit-protocol': '1',
+        'x-hollerkit-protocol': '1',
+      })
+      outgoing.end(
+        JSON.stringify({ ok: false, error: { code: 'body_too_large', message: 'Payload too large.' } }),
+      )
+      return
+    }
+
+    const request = new Request(`http://localhost${incoming.url}`, {
+      method: incoming.method,
+      headers: incoming.headers as HeadersInit,
+      body: incoming.method === 'GET' || incoming.method === 'HEAD' ? undefined : incoming,
+      duplex: 'half',
+    } as RequestInit)
+    const response = await handler(request)
+
+    outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()))
+    outgoing.end(Buffer.from(await response.arrayBuffer()))
+  } catch (error) {
+    console.error('[hollerkit] unhandled request error', error)
+    if (!outgoing.headersSent) {
+      outgoing.writeHead(500, {
+        'content-type': 'application/json',
+        'hollerkit-protocol': '1',
+        'x-hollerkit-protocol': '1',
+      })
+    }
+    if (!outgoing.writableEnded) {
+      outgoing.end(
+        JSON.stringify({
+          ok: false,
+          error: { code: 'internal_error', message: 'Unexpected server error.' },
+        }),
+      )
+    }
   }
-
-  const request = new Request(`http://localhost${incoming.url}`, {
-    method: incoming.method,
-    headers: incoming.headers as HeadersInit,
-    body: incoming.method === 'GET' || incoming.method === 'HEAD' ? undefined : incoming,
-    duplex: 'half',
-  } as RequestInit)
-  const response = await handler(request)
-
-  outgoing.writeHead(response.status, Object.fromEntries(response.headers.entries()))
-  outgoing.end(Buffer.from(await response.arrayBuffer()))
 }).listen(3000)

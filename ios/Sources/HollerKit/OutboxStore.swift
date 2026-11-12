@@ -513,9 +513,9 @@ actor OutboxDirectoryEngine {
             }
 
             markInFlight(feedbackId)
+            defer { unmarkInFlight(feedbackId) }
             do {
                 let response = try await flushSingleItem(item, token: token, using: client)
-                unmarkInFlight(feedbackId)
                 do {
                     try FileManager.default.removeItem(at: item.directoryURL)
                 } catch {
@@ -527,7 +527,6 @@ actor OutboxDirectoryEngine {
                 result.responses[feedbackId] = response
                 result.flushedRevisions[feedbackId] = revision
             } catch {
-                unmarkInFlight(feedbackId)
                 result.lastError = error.localizedDescription
                 if let apiError = error as? HollerKitAPIError {
                     if apiError.isAuthenticationError {
@@ -779,6 +778,12 @@ public actor OutboxStore {
         await engine.setProgressCallback(onProgress, for: feedbackId)
         let flushResult = await engine.flush(using: client)
         await engine.setProgressCallback(nil, for: feedbackId)
+        if !flushResult.rejectedErrors.isEmpty {
+            let rejectedIds = Set(flushResult.rejectedErrors.keys)
+            await MainActor.run {
+                HollerKit.quests.rollbackRejectedFeedbackIds(rejectedIds)
+            }
+        }
         if let rejectedError = flushResult.rejectedErrors[feedbackId] {
             throw rejectedError
         }
@@ -796,7 +801,14 @@ public actor OutboxStore {
     @discardableResult
     public func flush(using client: APIClient) async -> OutboxFlushResult {
         let engine = await OutboxDirectoryCoordinator.shared.engine(for: rootDirectoryURL)
-        return await engine.flush(using: client)
+        let flushResult = await engine.flush(using: client)
+        if !flushResult.rejectedErrors.isEmpty {
+            let rejectedIds = Set(flushResult.rejectedErrors.keys)
+            await MainActor.run {
+                HollerKit.quests.rollbackRejectedFeedbackIds(rejectedIds)
+            }
+        }
+        return flushResult
     }
 
     public func pendingEnvelopes() async -> [OutboxEnvelope] {
@@ -831,10 +843,13 @@ final class OutboxLifecycleMonitor {
 
         let trigger = onTriggerFlush
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { path in
+        monitor.pathUpdateHandler = { [weak self] path in
             let isSatisfied = (path.status == .satisfied)
-            Task { @MainActor in
-                if isSatisfied {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let transitionedToSatisfied = !self.wasNetworkSatisfied && isSatisfied
+                self.wasNetworkSatisfied = isSatisfied
+                if transitionedToSatisfied {
                     trigger()
                 }
             }

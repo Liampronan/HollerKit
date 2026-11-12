@@ -63,6 +63,7 @@ export function createHollerKitMcpServer(
       : DEFAULT_MAX_PENDING_REQUESTS
 
   const canceledRequestIds = new Set<string | number>()
+  const activeOrQueuedRequestIds = new Set<string | number>()
 
   /**
    * Dispatches a validated MCP tool invocation to the corresponding HollerKit `/v1` client method.
@@ -178,13 +179,17 @@ export function createHollerKitMcpServer(
 
     // Notifications (requests without an `id` member) produce no response.
     if (!hasId) {
-      recordCancelFromRpcObject(message, canceledRequestIds)
+      recordCancelFromRpcObject(message, canceledRequestIds, activeOrQueuedRequestIds)
       return null
     }
 
-    if ((typeof id === 'string' || typeof id === 'number') && canceledRequestIds.has(id)) {
-      canceledRequestIds.delete(id)
+    if (id !== null && id !== undefined && canceledRequestIds.delete(id)) {
+      activeOrQueuedRequestIds.delete(id)
       return null
+    }
+
+    if (id !== null && id !== undefined) {
+      activeOrQueuedRequestIds.add(id)
     }
 
     try {
@@ -244,11 +249,13 @@ export function createHollerKitMcpServer(
           if (!isPlainObject(rawArgs)) {
             return jsonRpcError(id, -32602, 'Invalid params: tools/call "arguments" must be an object.')
           }
-          if ((typeof id === 'string' || typeof id === 'number') && canceledRequestIds.has(id)) {
-            canceledRequestIds.delete(id)
+          if (id !== null && id !== undefined && canceledRequestIds.delete(id)) {
             return null
           }
           const toolResult = await callTool(toolDef.name, rawArgs)
+          if (id !== null && id !== undefined && canceledRequestIds.delete(id)) {
+            return null
+          }
           return {
             jsonrpc: '2.0',
             id,
@@ -262,6 +269,11 @@ export function createHollerKitMcpServer(
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error)
       return jsonRpcError(id, -32603, `Internal error: ${messageText}`)
+    } finally {
+      if (id !== null && id !== undefined) {
+        activeOrQueuedRequestIds.delete(id)
+        canceledRequestIds.delete(id)
+      }
     }
   }
 
@@ -275,17 +287,31 @@ export function createHollerKitMcpServer(
       if (message.length === 0) {
         return jsonRpcError(null, -32600, 'Invalid Request: empty batch')
       }
+      const batchRequestIds: (string | number)[] = []
       for (const item of message) {
-        if (isPlainObject(item) && !Object.prototype.hasOwnProperty.call(item, 'id')) {
-          recordCancelFromRpcObject(item, canceledRequestIds)
+        if (isPlainObject(item) && (typeof item.id === 'string' || typeof item.id === 'number')) {
+          batchRequestIds.push(item.id)
+          activeOrQueuedRequestIds.add(item.id)
         }
       }
-      const responses: (JsonRpcResponse | null)[] = []
-      for (const item of message) {
-        responses.push(await handleSingleRpc(item))
+      try {
+        for (const item of message) {
+          if (isPlainObject(item) && !Object.prototype.hasOwnProperty.call(item, 'id')) {
+            recordCancelFromRpcObject(item, canceledRequestIds, activeOrQueuedRequestIds)
+          }
+        }
+        const responses: (JsonRpcResponse | null)[] = []
+        for (const item of message) {
+          responses.push(await handleSingleRpc(item))
+        }
+        const filtered = responses.filter((item): item is JsonRpcResponse => item !== null)
+        return filtered.length > 0 ? filtered : null
+      } finally {
+        for (const reqId of batchRequestIds) {
+          activeOrQueuedRequestIds.delete(reqId)
+          canceledRequestIds.delete(reqId)
+        }
       }
-      const filtered = responses.filter((item): item is JsonRpcResponse => item !== null)
-      return filtered.length > 0 ? filtered : null
     }
     return handleSingleRpc(message)
   }
@@ -322,6 +348,7 @@ export function createHollerKitMcpServer(
     })
 
     const pendingLines: string[] = []
+    const maxQueuedLines = maxPendingRequests * 4
     let processing = false
     let inputPaused = false
     let closed = false
@@ -355,6 +382,8 @@ export function createHollerKitMcpServer(
       if (closed) return
       closed = true
       pendingLines.length = 0
+      activeOrQueuedRequestIds.clear()
+      canceledRequestIds.clear()
       output.removeListener('error', onStreamError)
       output.removeListener('close', onStreamClose)
       input.removeListener('error', onStreamError)
@@ -396,14 +425,33 @@ export function createHollerKitMcpServer(
         }
       } finally {
         processing = false
+        if (pendingLines.length === 0) {
+          activeOrQueuedRequestIds.clear()
+          canceledRequestIds.clear()
+        }
       }
     }
 
     rl.on('line', (line) => {
       if (closed) return
-      if (recordCancellationFromRawLine(line, canceledRequestIds)) {
+      if (
+        recordCancellationFromRawLine(
+          line,
+          canceledRequestIds,
+          activeOrQueuedRequestIds,
+        )
+      ) {
         return
       }
+      if (pendingLines.length >= maxQueuedLines) {
+        pauseInput()
+        const overloadReply = buildQueueOverloadErrorLine(line)
+        if (overloadReply !== null && !closed) {
+          writeLineSafely(output, `${overloadReply}\n`, shutdown)
+        }
+        return
+      }
+      recordQueuedRequestIdsFromRawLine(line, activeOrQueuedRequestIds)
       pendingLines.push(line)
       if (pendingLines.length >= maxPendingRequests) {
         pauseInput()
@@ -457,11 +505,13 @@ function validateToolInputSchema(
 }
 
 /**
- * Records a cancellation request ID if the given JSON-RPC notification is a cancellation message.
+ * Records a cancellation request ID if the given JSON-RPC notification is a cancellation message
+ * and the target request ID is currently active or queued.
  */
 function recordCancelFromRpcObject(
   message: Record<string, unknown>,
   canceledRequestIds: Set<string | number>,
+  activeOrQueuedRequestIds: Set<string | number>,
 ): boolean {
   if (message.jsonrpc !== '2.0') return false
   if (message.method !== 'notifications/cancelled' && message.method !== '$/cancelRequest') {
@@ -470,7 +520,9 @@ function recordCancelFromRpcObject(
   if (!isPlainObject(message.params)) return false
   const reqId = message.params.requestId ?? message.params.id
   if (typeof reqId === 'string' || typeof reqId === 'number') {
-    canceledRequestIds.add(reqId)
+    if (activeOrQueuedRequestIds.has(reqId)) {
+      canceledRequestIds.add(reqId)
+    }
     return true
   }
   return false
@@ -482,6 +534,7 @@ function recordCancelFromRpcObject(
 function recordCancellationFromRawLine(
   line: string,
   canceledRequestIds: Set<string | number>,
+  activeOrQueuedRequestIds: Set<string | number>,
 ): boolean {
   const trimmed = line.trim()
   if (!trimmed.includes('cancel')) return false
@@ -490,7 +543,7 @@ function recordCancellationFromRawLine(
     if (
       isPlainObject(parsed) &&
       !Object.prototype.hasOwnProperty.call(parsed, 'id') &&
-      recordCancelFromRpcObject(parsed, canceledRequestIds)
+      recordCancelFromRpcObject(parsed, canceledRequestIds, activeOrQueuedRequestIds)
     ) {
       return true
     }
@@ -498,6 +551,76 @@ function recordCancellationFromRawLine(
     // Let normal line processing report any JSON parse error.
   }
   return false
+}
+
+/**
+ * Extracts request IDs from a raw JSON-RPC line when it is queued so cancellations arriving while queued are tracked.
+ */
+function recordQueuedRequestIdsFromRawLine(
+  line: string,
+  activeOrQueuedRequestIds: Set<string | number>,
+): void {
+  const trimmed = line.trim()
+  if (!trimmed) return
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (isPlainObject(item) && (typeof item.id === 'string' || typeof item.id === 'number')) {
+          activeOrQueuedRequestIds.add(item.id)
+        }
+      }
+    } else if (
+      isPlainObject(parsed) &&
+      (typeof parsed.id === 'string' || typeof parsed.id === 'number')
+    ) {
+      activeOrQueuedRequestIds.add(parsed.id)
+    }
+  } catch {
+    // Ignore parse errors; handleJsonRpcLine will emit a JSON-RPC parse error when dequeued.
+  }
+}
+
+/**
+ * Builds an explicit JSON-RPC 2.0 overload error line (`-32000`) when the bounded input queue is at capacity,
+ * preserving each request `id` so the client never hangs waiting on a dropped request.
+ */
+function buildQueueOverloadErrorLine(line: string): string | null {
+  const trimmed = line.trim()
+  if (!trimmed) return null
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return JSON.stringify(jsonRpcError(null, -32700, 'Parse error'))
+  }
+
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) {
+      return JSON.stringify(jsonRpcError(null, -32600, 'Invalid Request: batch must not be empty.'))
+    }
+    const errors: JsonRpcErrorResponse[] = []
+    for (const item of parsed) {
+      if (isPlainObject(item) && Object.prototype.hasOwnProperty.call(item, 'id')) {
+        const id: JsonRpcId = isValidRpcId(item.id) ? item.id : null
+        errors.push(jsonRpcError(id, -32000, 'Server request queue is full.'))
+      } else if (!isPlainObject(item)) {
+        errors.push(jsonRpcError(null, -32600, 'Invalid Request'))
+      }
+    }
+    return errors.length > 0 ? JSON.stringify(errors) : null
+  }
+
+  if (isPlainObject(parsed)) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, 'id')) {
+      return null
+    }
+    const id: JsonRpcId = isValidRpcId(parsed.id) ? parsed.id : null
+    return JSON.stringify(jsonRpcError(id, -32000, 'Server request queue is full.'))
+  }
+
+  return JSON.stringify(jsonRpcError(null, -32600, 'Invalid Request'))
 }
 
 /**

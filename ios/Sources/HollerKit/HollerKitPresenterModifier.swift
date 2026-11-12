@@ -7,7 +7,7 @@ public extension View {
 }
 
 private struct HollerKitPresenterModifier: ViewModifier {
-    @ObservedObject private var presenter = HollerKit.presenterState
+    @Bindable private var presenter = HollerKit.presenterState
     @Environment(\.scenePhase) private var scenePhase
 
     func body(content: Content) -> some View {

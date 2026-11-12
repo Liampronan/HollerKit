@@ -44,6 +44,14 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
         fatalError("init(coder:) has not been implemented")
     }
 
+    deinit {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                detachFromWindow()
+            }
+        }
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if let window {
@@ -65,8 +73,8 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func attachToWindow(_ window: UIWindow) {
-        guard HollerKitEnvironment.isDebugOrTestFlight else { return }
         detachFromWindow()
+        guard HollerKitEnvironment.isDebugOrTestFlight else { return }
         currentWindow = window
         reconcileWindowAttachments(window)
     }
@@ -106,7 +114,6 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
             detachFromWindow()
             return
         }
-
         // 1. Stroke gestures
         var strokeDirections: Set<StrokeDirection> = []
         if invocation.actions.keys.contains(.stroke(.leftToCenter)) {

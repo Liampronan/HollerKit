@@ -191,7 +191,7 @@ private enum OverlayPalette {
 
 /// Floating quest overlay card and collapsed pill displayed while a quest is active.
 public struct QuestOverlayView: View {
-    @ObservedObject private var questState: HollerKitQuestState
+    private let questState: HollerKitQuestState
     @State private var dragOffset: CGSize = .zero
     @State private var accumulatedOffset: CGSize = .zero
     @State private var cardSize: CGSize = .zero
@@ -573,7 +573,7 @@ public struct QuestOverlayView: View {
 }
 
 private struct QuestOverlayRootView: View {
-    @ObservedObject var questState: HollerKitQuestState
+    var questState: HollerKitQuestState
     var onFrameChange: (CGRect) -> Void
 
     var body: some View {

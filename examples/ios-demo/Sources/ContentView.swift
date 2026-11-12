@@ -2,8 +2,8 @@ import HollerKit
 import SwiftUI
 
 struct ContentView: View {
-    @ObservedObject private var questState = HollerKit.quests
-    @ObservedObject private var navigation = DemoNavigationState.shared
+    private let questState = HollerKit.quests
+    private let navigation = DemoNavigationState.shared
     @State private var didOpenReport = false
 
     var body: some View {
