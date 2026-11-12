@@ -205,6 +205,7 @@ actor OutboxDirectoryEngine {
         let revision = UUID()
         var normalizedRequest = request
         normalizedRequest.id = feedbackId.uuidString.lowercased()
+        normalizedRequest.clampToBudget()
 
         let itemDirectoryURL = directoryURL(for: feedbackId)
         if FileManager.default.fileExists(atPath: itemDirectoryURL.path) {

@@ -153,15 +153,34 @@ final class HollerKitTests: XCTestCase {
         XCTAssertLessThanOrEqual(encodedData.count, 2048)
     }
 
+    func testFeedbackEventPayloadClampsManyShortEntriesToUnderLimit() {
+        var manyEntriesPayload = FeedbackEventPayload()
+        for i in 0..<200 {
+            manyEntriesPayload["key_\(i)"] = "short_value_\(i)"
+        }
+        let dataBefore = try? JSONEncoder().encode(manyEntriesPayload)
+        XCTAssertGreaterThan(dataBefore?.count ?? 0, 2048)
+        manyEntriesPayload.clampToSize(maxBytes: 2048)
+        let dataAfter = try? JSONEncoder().encode(manyEntriesPayload)
+        XCTAssertLessThanOrEqual(dataAfter?.count ?? 0, 2048)
+    }
+
     @MainActor
     func testHollerKitSpanRecordsDurationMsAndFields() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-span-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
         let serverURL = URL(string: "http://127.0.0.1:8080")!
-        HollerKit.configure(
+        let config = HollerKitConfiguration(
             server: serverURL,
             auth: { "token" },
             isEnabled: { true },
-            captureBreadcrumbs: true
+            captureBreadcrumbs: true,
+            urlSession: URLSession(configuration: .ephemeral),
+            outboxDirectoryURL: tempDir
         )
+        HollerKit.configure(config)
 
         let t0 = Date()
         let span = HollerKit.begin("share.render", fields: ["cached": false], startDate: t0)
@@ -3554,6 +3573,10 @@ final class HollerKitTests: XCTestCase {
 
     @MainActor
     func testSpanInvalidatedOnEnablementToggle() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-span-invalid-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
         final class FlagBox: @unchecked Sendable {
             var value: Bool = true
         }
@@ -3563,7 +3586,9 @@ final class HollerKitTests: XCTestCase {
             auth: { "token" },
             isEnabled: { flag.value },
             captureBreadcrumbs: true,
-            maxBreadcrumbs: 50
+            maxBreadcrumbs: 50,
+            urlSession: URLSession(configuration: .ephemeral),
+            outboxDirectoryURL: tempDir
         )
         HollerKit.configure(config)
 

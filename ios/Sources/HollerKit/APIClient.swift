@@ -304,6 +304,9 @@ public struct FeedbackEventPayload: Codable, Equatable, Sendable, ExpressibleByD
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: DynamicCodingKey.self)
         for (k, v) in strings {
+            if k == "fields" && fields != nil { continue }
+            if k == "durationMs" && durationMs != nil { continue }
+            if k == "startOffsetSeconds" && startOffsetSeconds != nil { continue }
             if let key = DynamicCodingKey(stringValue: k) {
                 try container.encode(v, forKey: key)
             }
@@ -320,8 +323,24 @@ public struct FeedbackEventPayload: Codable, Equatable, Sendable, ExpressibleByD
     }
 
     public mutating func clampToSize(maxBytes: Int = 2048) {
+        if let d = durationMs, !d.isFinite {
+            durationMs = nil
+        }
+        if let s = startOffsetSeconds, !s.isFinite {
+            startOffsetSeconds = nil
+        }
+        if var curFields = fields {
+            curFields = curFields.filter { _, v in
+                switch v {
+                case .double(let d): return d.isFinite
+                default: return true
+                }
+            }
+            fields = curFields.isEmpty ? nil : curFields
+        }
+
         var iterations = 0
-        while iterations < 20, let data = try? JSONEncoder().encode(self), data.count > maxBytes {
+        while iterations < 100, let data = try? JSONEncoder().encode(self), data.count > maxBytes {
             iterations += 1
             let overhead = data.count - maxBytes
             var trimmedSomething = false
@@ -355,16 +374,40 @@ public struct FeedbackEventPayload: Codable, Equatable, Sendable, ExpressibleByD
             }
 
             if !trimmedSomething {
-                if let k = strings.keys.first(where: { $0 != "message" && $0 != "category" }) ?? strings.keys.first {
-                    strings.removeValue(forKey: k)
-                    trimmedSomething = true
-                } else if var curFields = fields, let k = curFields.keys.first {
-                    curFields.removeValue(forKey: k)
-                    fields = curFields.isEmpty ? nil : curFields
-                    trimmedSomething = true
-                } else {
+                let estimateKeysToDrop = max(1, overhead / 40)
+                var dropped = 0
+                while dropped < estimateKeysToDrop {
+                    if let k = strings.keys.first(where: { $0 != "message" && $0 != "category" }) ?? strings.keys.first {
+                        strings.removeValue(forKey: k)
+                        dropped += 1
+                        trimmedSomething = true
+                    } else if var curFields = fields, let k = curFields.keys.first {
+                        curFields.removeValue(forKey: k)
+                        fields = curFields.isEmpty ? nil : curFields
+                        dropped += 1
+                        trimmedSomething = true
+                    } else {
+                        break
+                    }
+                }
+                if !trimmedSomething {
                     break
                 }
+            }
+        }
+
+        if let data = try? JSONEncoder().encode(self), data.count > maxBytes {
+            fields = nil
+            for k in strings.keys where k != "message" && k != "category" {
+                strings.removeValue(forKey: k)
+            }
+            if let msg = strings["message"], let current = try? JSONEncoder().encode(self), current.count > maxBytes {
+                let overhead = current.count - maxBytes
+                let newLen = max(0, msg.count - overhead - 16)
+                strings["message"] = newLen > 0 ? (String(msg.prefix(newLen)) + "...[truncated]") : "...[truncated]"
+            }
+            if let current = try? JSONEncoder().encode(self), current.count > maxBytes {
+                strings = ["message": "...[truncated]"]
             }
         }
     }
@@ -376,14 +419,14 @@ public struct FeedbackEventInput: Codable, Equatable, Sendable {
     public var payload: FeedbackEventPayload
 
     public init(offsetSeconds: Double = 0, kind: String, payload: FeedbackEventPayload = FeedbackEventPayload()) {
-        self.offsetSeconds = offsetSeconds
+        self.offsetSeconds = offsetSeconds.isFinite ? offsetSeconds : 0
         self.kind = kind
         self.payload = payload
         self.payload.clampToSize(maxBytes: 2048)
     }
 
     public init(offsetSeconds: Double = 0, kind: String, payload: [String: String]) {
-        self.offsetSeconds = offsetSeconds
+        self.offsetSeconds = offsetSeconds.isFinite ? offsetSeconds : 0
         self.kind = kind
         self.payload = FeedbackEventPayload(strings: payload)
         self.payload.clampToSize(maxBytes: 2048)
@@ -399,7 +442,8 @@ public struct FeedbackEventInput: Codable, Equatable, Sendable {
         var clampedPayload = payload
         clampedPayload.clampToSize(maxBytes: 2048)
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(offsetSeconds, forKey: .offsetSeconds)
+        let safeOffset = offsetSeconds.isFinite ? offsetSeconds : 0
+        try container.encode(safeOffset, forKey: .offsetSeconds)
         try container.encode(kind, forKey: .kind)
         try container.encode(clampedPayload, forKey: .payload)
     }
