@@ -4854,4 +4854,224 @@ final class HollerKitTests: XCTestCase {
         )
         XCTAssertEqual(questOverlay.progressTitle, "Sending your result…")
     }
+
+    #if canImport(UIKit)
+    @MainActor
+    func testAlwaysVisiblePasteButtonDisabledStateHintAndForegroundRefreshAcrossBothSheets() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-paste-hint-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 1. Verify aligned label, accessibility identifiers, and hint copy constants
+        XCTAssertEqual(ClipboardPasteAttachmentRow.pasteButtonTitle, "Paste from Clipboard")
+        XCTAssertEqual(ClipboardPasteAttachmentRow.pasteButtonSystemImage, "doc.on.clipboard")
+        XCTAssertEqual(ClipboardPasteAttachmentRow.pasteButtonAccessibilityIdentifier, "HollerKitPasteImageButton")
+        XCTAssertEqual(ClipboardPasteAttachmentRow.hintButtonSystemImage, "info.circle")
+        XCTAssertEqual(ClipboardPasteAttachmentRow.hintButtonAccessibilityIdentifier, "HollerKitPasteHintButton")
+        XCTAssertEqual(ClipboardPasteAttachmentRow.hintButtonAccessibilityLabel, "Paste from Clipboard Info")
+        XCTAssertEqual(ClipboardPasteAttachmentRow.hintTextAccessibilityIdentifier, "HollerKitPasteHintText")
+        XCTAssertEqual(
+            ClipboardPasteAttachmentRow.hintMessage,
+            "Copy a screenshot or screen recording, then paste it here."
+        )
+
+        // 2. Verify type-only clipboard availability detection (empty, plain text, image, movie/video, URL)
+        XCTAssertFalse(ClipboardAttachmentAvailability.hasAttachableTypeIdentifiers([]))
+        XCTAssertFalse(ClipboardAttachmentAvailability.hasAttachableTypeIdentifiers([UTType.plainText.identifier]))
+        XCTAssertTrue(ClipboardAttachmentAvailability.hasAttachableTypeIdentifiers([UTType.png.identifier]))
+        XCTAssertTrue(ClipboardAttachmentAvailability.hasAttachableTypeIdentifiers([UTType.jpeg.identifier]))
+        XCTAssertTrue(ClipboardAttachmentAvailability.hasAttachableTypeIdentifiers([UTType.quickTimeMovie.identifier]))
+        XCTAssertTrue(ClipboardAttachmentAvailability.hasAttachableTypeIdentifiers([UTType.mpeg4Movie.identifier]))
+        XCTAssertTrue(ClipboardAttachmentAvailability.hasAttachableTypeIdentifiers([UTType.url.identifier]))
+
+        let testPasteboard = UIPasteboard.withUniqueName()
+        defer { UIPasteboard.remove(withName: testPasteboard.name) }
+        testPasteboard.items = []
+        XCTAssertFalse(ClipboardAttachmentAvailability.hasAttachableItem(pasteboard: testPasteboard))
+
+        // 3. Configure an active quest session so both BugReportSheet and QuestResultSheet render their Attachments section
+        let questDef = QuestDefinition(
+            id: "hollerkit-shake-report",
+            title: "Shake to report a bug",
+            area: "feedback",
+            steps: ["Shake device", "Verify paste button"],
+            expect: ["Paste button is visible and disabled when clipboard is empty"]
+        )
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            quests: .definitions([questDef]),
+            urlSession: makeStubSession(),
+            outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
+        )
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
+        HollerKit.configure(config)
+        let boardItem = QuestBoardItem(
+            id: questDef.id,
+            version: 2,
+            definition: questDef,
+            status: .pending
+        )
+        HollerKit.quests.startQuest(boardItem)
+        defer {
+            if let active = HollerKit.quests.activeQuest {
+                HollerKit.quests.completeSubmittedSession(id: active.id)
+            }
+        }
+
+        let bugDraft = BugReportDraft(
+            configuration: config,
+            tempDirectoryURL: tempDir.appendingPathComponent("bug-draft", isDirectory: true)
+        )
+        bugDraft.pasteboard = testPasteboard
+        _ = bugDraft.refreshClipboardImageAvailability()
+
+        let questDraft = QuestResultDraft(
+            tempDirectoryURL: tempDir.appendingPathComponent("quest-draft", isDirectory: true)
+        )
+        questDraft.pasteboard = testPasteboard
+        _ = questDraft.refreshClipboardImageAvailability()
+
+        let bugSheet = BugReportSheet(
+            configuration: config,
+            breadcrumbs: BreadcrumbStore(),
+            draft: bugDraft
+        )
+        let questSheet = QuestResultSheet(
+            questState: HollerKit.quests,
+            draft: questDraft
+        )
+
+        // Host both sheets in UIWindows so SwiftUI .onAppear and NotificationCenter .onReceive subscriptions are active
+        let bugHost = UIHostingController(rootView: bugSheet)
+        let bugWindow = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        bugWindow.rootViewController = bugHost
+        bugWindow.makeKeyAndVisible()
+        bugHost.view.layoutIfNeeded()
+
+        let questHost = UIHostingController(rootView: questSheet)
+        let questWindow = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        questWindow.rootViewController = questHost
+        questWindow.makeKeyAndVisible()
+        questHost.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        defer {
+            bugWindow.isHidden = true
+            questWindow.isHidden = true
+        }
+
+        // 4. With an empty clipboard, the paste button is visible and disabled in both sheets, while the hint button is enabled
+        XCTAssertFalse(bugDraft.hasClipboardImage)
+        XCTAssertFalse(questDraft.hasClipboardImage)
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertTrue(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertFalse(bugSheet.pasteAttachmentRow.isHintButtonDisabled, "Info hint button must remain enabled when clipboard is empty")
+        XCTAssertFalse(questSheet.pasteAttachmentRow.isHintButtonDisabled, "Info hint button must remain enabled when clipboard is empty")
+
+        // 5. Copying plain text alone keeps the paste button disabled
+        testPasteboard.string = "Just plain text on clipboard"
+        NotificationCenter.default.post(name: UIPasteboard.changedNotification, object: testPasteboard)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(bugDraft.hasClipboardImage)
+        XCTAssertFalse(questDraft.hasClipboardImage)
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertTrue(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
+        // 6. Copying an image in another app and returning to foreground enables the paste button in both sheets
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        let sampleImage = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40), format: format).image { ctx in
+            UIColor.systemOrange.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+        }
+        testPasteboard.image = sampleImage
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = false
+        questDraft.hasClipboardImage = false
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertTrue(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
+        NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(bugDraft.hasClipboardImage)
+        XCTAssertTrue(questDraft.hasClipboardImage)
+        XCTAssertFalse(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertFalse(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
+        // Verify disabled state also respects loading, submitting, and maxAttachments cap
+        bugDraft.isLoadingAttachments = true
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertFalse(bugSheet.pasteAttachmentRow.isHintButtonDisabled)
+        bugDraft.isLoadingAttachments = false
+        XCTAssertFalse(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
+        bugDraft.isSubmitting = true
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isHintButtonDisabled)
+        bugDraft.isSubmitting = false
+
+        // 7. Clear clipboard, verify button disables on didBecomeActiveNotification, then copy a video and verify both sheets enable and can paste the video
+        testPasteboard.items = []
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = true
+        questDraft.hasClipboardImage = true
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(bugDraft.hasClipboardImage)
+        XCTAssertFalse(questDraft.hasClipboardImage)
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertTrue(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
+        let sampleMovieURL = tempDir.appendingPathComponent("clipboard-recording.mov", isDirectory: false)
+        try await makeSampleVideoFile(at: sampleMovieURL, durationSeconds: 1.5)
+        let sampleMovieBytes = try Data(contentsOf: sampleMovieURL)
+        testPasteboard.setData(sampleMovieBytes, forPasteboardType: UTType.quickTimeMovie.identifier)
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = false
+        questDraft.hasClipboardImage = false
+
+        NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertTrue(bugDraft.hasClipboardImage, "Video on clipboard must enable paste button in BugReportSheet")
+        XCTAssertTrue(questDraft.hasClipboardImage, "Video on clipboard must enable paste button in QuestResultSheet")
+        XCTAssertFalse(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertFalse(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
+        // 8. Multi-item pasteboard where the first item is plain text and the second item is movie data
+        testPasteboard.items = [
+            [UTType.plainText.identifier: "Plain text first item"],
+            [UTType.quickTimeMovie.identifier: sampleMovieBytes]
+        ]
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = false
+        questDraft.hasClipboardImage = false
+        XCTAssertTrue(ClipboardAttachmentAvailability.hasAttachableItem(pasteboard: testPasteboard))
+        NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(bugDraft.hasClipboardImage, "Movie in second pasteboard item must enable paste button in BugReportSheet")
+        XCTAssertTrue(questDraft.hasClipboardImage, "Movie in second pasteboard item must enable paste button in QuestResultSheet")
+
+        // Verify QuestResultDraft.pasteFromClipboard attaches both video and image providers just like BugReportDraft
+        let movieProvider = NSItemProvider()
+        movieProvider.registerFileRepresentation(
+            forTypeIdentifier: UTType.quickTimeMovie.identifier,
+            fileOptions: [],
+            visibility: .all
+        ) { completion in
+            completion(sampleMovieURL, false, nil)
+            return nil
+        }
+        let questPastedVideoCount = await questDraft.pasteFromClipboard(itemProviders: [movieProvider])
+        XCTAssertEqual(questPastedVideoCount, 1)
+        XCTAssertEqual(questDraft.images.count, 1)
+        XCTAssertTrue(questDraft.images[0].isVideo)
+        XCTAssertEqual(questDraft.images[0].title, "Pasted Video 1")
+    }
+    #endif
 }
