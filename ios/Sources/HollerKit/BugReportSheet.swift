@@ -12,8 +12,16 @@ import PhotosUI
 import UIKit
 #endif
 
+/// Identifies the user-facing submission flow for progress copy.
+public enum SubmissionFlow: String, CaseIterable, Equatable, Sendable {
+    case bugReport
+    case questResult
+}
+
 /// Progress stages displayed while a bug report or quest run is being submitted.
 public enum SubmissionProgressStage: Equatable, Sendable {
+    public typealias Flow = SubmissionFlow
+
     case preparing
     case uploadingAttachments(count: Int)
     case uploadingAttachment(index: Int, total: Int, progress: Double)
@@ -21,19 +29,29 @@ public enum SubmissionProgressStage: Equatable, Sendable {
 
     /// Human-readable headline for the current submission stage.
     public var title: String {
+        title(for: .bugReport)
+    }
+
+    /// Flow-specific human-readable headline for the current submission stage.
+    public func title(for flow: SubmissionFlow) -> String {
         switch self {
         case .preparing:
-            return "Preparing feedback..."
+            return "Preparing feedback…"
         case .uploadingAttachments(let count):
-            return count == 1 ? "Uploading 1 attachment..." : "Uploading \(count) attachments..."
+            return count == 1 ? "Uploading 1 attachment…" : "Uploading \(count) attachments…"
         case .uploadingAttachment(let index, let total, let progress):
             let percent = Int((min(1.0, max(0.0, progress)) * 100).rounded())
             if total <= 1 {
-                return "Uploading attachment (\(percent)%)..."
+                return "Uploading attachment (\(percent)%)…"
             }
-            return "Uploading attachment \(index) of \(total) (\(percent)%)..."
+            return "Uploading attachment \(index) of \(total) (\(percent)%)…"
         case .sending:
-            return "Sending to server..."
+            switch flow {
+            case .bugReport:
+                return "Sending your report…"
+            case .questResult:
+                return "Sending your result…"
+            }
         }
     }
 
@@ -103,6 +121,11 @@ final class BugReportDraft {
     var submissionStage: SubmissionProgressStage?
     var submissionError: String?
     var submissionOutcome: OutboxSubmissionOutcome?
+
+    /// Human-readable headline for the active bug report submission stage, if submitting.
+    var submissionProgressTitle: String? {
+        submissionStage?.title(for: .bugReport)
+    }
 
     @ObservationIgnored
     var invokingTrigger: String = "manual"
@@ -1306,6 +1329,7 @@ public struct BugReportSheet: View {
                     SubmissionFeedbackOverlayView(
                         isSubmitting: draft.isSubmitting,
                         stage: draft.submissionStage,
+                        flow: .bugReport,
                         outcome: draft.submissionOutcome,
                         sentTitle: "Report Sent",
                         onDone: {
@@ -1603,12 +1627,18 @@ struct PickedMovieTransferable: Transferable, Sendable {
 struct SubmissionFeedbackOverlayView: View {
     var isSubmitting: Bool
     var stage: SubmissionProgressStage?
+    var flow: SubmissionFlow = .bugReport
     var outcome: OutboxSubmissionOutcome?
     var sentTitle: String
     var onDone: () -> Void
     var onSendAnother: (() -> Void)?
 
     @State private var animateBadge = false
+
+    /// Resolved human-readable progress headline for the overlay's current stage and submission flow.
+    var progressTitle: String {
+        (stage ?? .sending).title(for: flow)
+    }
 
     var body: some View {
         ZStack {
@@ -1628,7 +1658,7 @@ struct SubmissionFeedbackOverlayView: View {
                             .padding(.bottom, 4)
                     }
 
-                    Text((stage ?? .sending).title)
+                    Text(progressTitle)
                         .font(.headline)
                         .multilineTextAlignment(.center)
                         .accessibilityIdentifier("HollerKitSubmissionProgressText")

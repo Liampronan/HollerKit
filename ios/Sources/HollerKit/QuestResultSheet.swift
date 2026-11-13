@@ -32,6 +32,11 @@ final class QuestResultDraft {
     var submissionOutcome: OutboxSubmissionOutcome?
     var submittedSessionId: UUID?
 
+    /// Human-readable headline for the active quest result submission stage, if submitting.
+    var submissionProgressTitle: String? {
+        submissionStage?.title(for: .questResult)
+    }
+
     let speechCapture = SpeechCaptureController()
     @ObservationIgnored
     var autoDismissDelaySeconds: TimeInterval? = 1.2
@@ -613,6 +618,7 @@ public struct QuestResultSheet: View {
                     SubmissionFeedbackOverlayView(
                         isSubmitting: draft.isSubmitting,
                         stage: draft.submissionStage,
+                        flow: .questResult,
                         outcome: draft.submissionOutcome,
                         sentTitle: "Quest Submitted",
                         onDone: {
