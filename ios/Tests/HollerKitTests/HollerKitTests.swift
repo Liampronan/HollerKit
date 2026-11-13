@@ -4696,7 +4696,7 @@ final class HollerKitTests: XCTestCase {
         )
         XCTAssertEqual(
             SubmissionProgressStage.uploadingAttachment(index: 1, total: 1, progress: 0.5).title,
-            "Uploading attachment (50%)..."
+            "Uploading attachment (50%)…"
         )
 
         // Verify streamed video bytes match original file and outbox directories were cleaned up after flush
@@ -4769,4 +4769,89 @@ final class HollerKitTests: XCTestCase {
         }
     }
     #endif
+
+    @MainActor
+    func testSubmissionProgressStageHumanFriendlyTitlesAcrossFlows() {
+        XCTAssertEqual(SubmissionProgressStage.preparing.title, "Preparing feedback…")
+        XCTAssertEqual(SubmissionProgressStage.preparing.title(for: .bugReport), "Preparing feedback…")
+        XCTAssertEqual(SubmissionProgressStage.preparing.title(for: .questResult), "Preparing feedback…")
+
+        XCTAssertEqual(SubmissionProgressStage.uploadingAttachments(count: 1).title, "Uploading 1 attachment…")
+        XCTAssertEqual(SubmissionProgressStage.uploadingAttachments(count: 3).title, "Uploading 3 attachments…")
+
+        XCTAssertEqual(
+            SubmissionProgressStage.uploadingAttachment(index: 1, total: 1, progress: 0.42).title,
+            "Uploading attachment (42%)…"
+        )
+        XCTAssertEqual(
+            SubmissionProgressStage.uploadingAttachment(index: 2, total: 3, progress: 0.75).title,
+            "Uploading attachment 2 of 3 (75%)…"
+        )
+
+        XCTAssertEqual(SubmissionProgressStage.sending.title, "Sending your report…")
+        XCTAssertEqual(SubmissionProgressStage.sending.title(for: .bugReport), "Sending your report…")
+        XCTAssertEqual(SubmissionProgressStage.sending.title(for: .questResult), "Sending your result…")
+
+        let allSampleStages: [SubmissionProgressStage] = [
+            .preparing,
+            .uploadingAttachments(count: 1),
+            .uploadingAttachments(count: 2),
+            .uploadingAttachment(index: 1, total: 1, progress: 0.0),
+            .uploadingAttachment(index: 1, total: 2, progress: 0.5),
+            .sending
+        ]
+        for stage in allSampleStages {
+            XCTAssertFalse(
+                stage.title.localizedCaseInsensitiveContains("server"),
+                "Progress title '\(stage.title)' must not leak the word 'server'"
+            )
+            XCTAssertFalse(
+                stage.title.contains("..."),
+                "Progress title '\(stage.title)' should use the typographic ellipsis '…'"
+            )
+            for flow in SubmissionFlow.allCases {
+                let flowTitle = stage.title(for: flow)
+                XCTAssertFalse(
+                    flowTitle.localizedCaseInsensitiveContains("server"),
+                    "Progress title '\(flowTitle)' for flow \(flow.rawValue) must not leak the word 'server'"
+                )
+                XCTAssertFalse(
+                    flowTitle.contains("..."),
+                    "Progress title '\(flowTitle)' for flow \(flow.rawValue) should use the typographic ellipsis '…'"
+                )
+            }
+        }
+
+        let bugDraft = BugReportDraft()
+        XCTAssertNil(bugDraft.submissionProgressTitle)
+        bugDraft.submissionStage = .sending
+        XCTAssertEqual(bugDraft.submissionProgressTitle, "Sending your report…")
+
+        let questDraft = QuestResultDraft()
+        XCTAssertNil(questDraft.submissionProgressTitle)
+        questDraft.submissionStage = .sending
+        XCTAssertEqual(questDraft.submissionProgressTitle, "Sending your result…")
+
+        let bugOverlay = SubmissionFeedbackOverlayView(
+            isSubmitting: true,
+            stage: .sending,
+            flow: .bugReport,
+            outcome: nil,
+            sentTitle: "Report Sent",
+            onDone: {},
+            onSendAnother: nil
+        )
+        XCTAssertEqual(bugOverlay.progressTitle, "Sending your report…")
+
+        let questOverlay = SubmissionFeedbackOverlayView(
+            isSubmitting: true,
+            stage: .sending,
+            flow: .questResult,
+            outcome: nil,
+            sentTitle: "Quest Submitted",
+            onDone: {},
+            onSendAnother: nil
+        )
+        XCTAssertEqual(questOverlay.progressTitle, "Sending your result…")
+    }
 }
