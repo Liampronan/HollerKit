@@ -116,6 +116,7 @@ final class BugReportDraft {
         }
     }
     var isLoadingAttachments = false
+    var hasClipboardImage = false
     var attachmentStatusMessage: String?
     var isSubmitting = false
     var submissionStage: SubmissionProgressStage?
@@ -154,6 +155,8 @@ final class BugReportDraft {
         )
     }
     #if canImport(UIKit)
+    @ObservationIgnored
+    var pasteboard: UIPasteboard = .general
     @ObservationIgnored
     var videoThumbnailGenerator: @Sendable (URL) async -> UIImage? = { url in
         await BugReportAttachment.generateVideoThumbnail(for: url)
@@ -223,12 +226,26 @@ final class BugReportDraft {
         self.tempDirectoryURL = tempDirectoryURL ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("HollerKitDrafts", isDirectory: true)
             .appendingPathComponent(id.uuidString.lowercased(), isDirectory: true)
+        _ = refreshClipboardImageAvailability()
         if configuration != nil || !invocationAttachments.isEmpty {
             loadInitialImagesIfNeeded(
                 configuration: configuration,
                 invocationAttachments: invocationAttachments
             )
         }
+    }
+
+    /// Updates `hasClipboardImage` from the pasteboard using a type-only check without reading item payloads.
+    @discardableResult
+    func refreshClipboardImageAvailability() -> Bool {
+        #if canImport(UIKit)
+        let available = ClipboardAttachmentAvailability.hasAttachableItem(pasteboard: pasteboard)
+        hasClipboardImage = available
+        return available
+        #else
+        hasClipboardImage = false
+        return false
+        #endif
     }
 
     deinit {
@@ -331,6 +348,7 @@ final class BugReportDraft {
         submissionError = nil
         submissionOutcome = nil
         didLoadInitialImages = false
+        _ = refreshClipboardImageAvailability()
         loadInitialImagesIfNeeded(
             configuration: configuration,
             invocationAttachments: invocationAttachments
@@ -565,9 +583,9 @@ final class BugReportDraft {
         let sourceImages: [UIImage]
         if let pasteboardImages {
             sourceImages = pasteboardImages
-        } else if let allImages = UIPasteboard.general.images, !allImages.isEmpty {
+        } else if let allImages = pasteboard.images, !allImages.isEmpty {
             sourceImages = allImages
-        } else if let singleImage = UIPasteboard.general.image {
+        } else if let singleImage = pasteboard.image {
             sourceImages = [singleImage]
         } else {
             sourceImages = []
@@ -618,14 +636,14 @@ final class BugReportDraft {
         } else if fallbackImages != nil {
             providers = []
         } else {
-            providers = UIPasteboard.general.itemProviders
+            providers = pasteboard.itemProviders
         }
 
         if providers.isEmpty {
             if let fallbackImages {
                 return pasteImagesFromClipboard(images: fallbackImages)
             }
-            if UIPasteboard.general.hasImages {
+            if pasteboard.hasImages {
                 return pasteImagesFromClipboard()
             }
             attachmentStatusMessage = "No image or video found on the clipboard."
@@ -786,7 +804,7 @@ final class BugReportDraft {
         return addedCount
     }
 
-    private nonisolated static func preferredMovieTypeIdentifier(for provider: NSItemProvider) -> String? {
+    nonisolated static func preferredMovieTypeIdentifier(for provider: NSItemProvider) -> String? {
         for identifier in provider.registeredTypeIdentifiers {
             if let utType = UTType(identifier),
                (utType.conforms(to: .movie) || utType.conforms(to: .video) || utType == .mpeg4Movie || utType == .quickTimeMovie) {
@@ -802,7 +820,7 @@ final class BugReportDraft {
         return nil
     }
 
-    private nonisolated static func preferredImageTypeIdentifier(for provider: NSItemProvider) -> String? {
+    nonisolated static func preferredImageTypeIdentifier(for provider: NSItemProvider) -> String? {
         for identifier in provider.registeredTypeIdentifiers {
             if let utType = UTType(identifier), utType.conforms(to: .image) {
                 return identifier
@@ -814,7 +832,7 @@ final class BugReportDraft {
         return nil
     }
 
-    private nonisolated static func preferredURLTypeIdentifier(for provider: NSItemProvider) -> String? {
+    nonisolated static func preferredURLTypeIdentifier(for provider: NSItemProvider) -> String? {
         for identifier in provider.registeredTypeIdentifiers {
             if let utType = UTType(identifier), (utType.conforms(to: .url) || utType.conforms(to: .fileURL)) {
                 return identifier
@@ -826,7 +844,7 @@ final class BugReportDraft {
         return nil
     }
 
-    private nonisolated static func isMovieFileURL(_ url: URL) -> Bool {
+    nonisolated static func isMovieFileURL(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
         if ext == "mp4" || ext == "mov" || ext == "m4v" {
             return true
@@ -837,7 +855,7 @@ final class BugReportDraft {
         return false
     }
 
-    private nonisolated static func normalizedVideoExtension(for url: URL) -> String {
+    nonisolated static func normalizedVideoExtension(for url: URL) -> String {
         let lower = url.pathExtension.lowercased()
         if lower == "mp4" {
             return "mp4"
@@ -845,7 +863,7 @@ final class BugReportDraft {
         return "mov"
     }
 
-    private nonisolated static func mimeTypeForVideoExtension(_ ext: String) -> String {
+    nonisolated static func mimeTypeForVideoExtension(_ ext: String) -> String {
         let lower = ext.lowercased()
         if lower == "mp4" {
             return "video/mp4"
@@ -853,14 +871,14 @@ final class BugReportDraft {
         return "video/quicktime"
     }
 
-    private static func nextFallbackImage(from fallbackImages: [UIImage]?, index: inout Int) -> UIImage? {
+    static func nextFallbackImage(from fallbackImages: [UIImage]?, index: inout Int) -> UIImage? {
         guard let fallbackImages, index < fallbackImages.count else { return nil }
         let img = fallbackImages[index]
         index += 1
         return img
     }
 
-    private static func loadTemporaryFile(
+    static func loadTemporaryFile(
         from provider: NSItemProvider,
         typeIdentifier: String,
         into directoryURL: URL
@@ -884,7 +902,7 @@ final class BugReportDraft {
         }
     }
 
-    private static func loadImage(
+    static func loadImage(
         from provider: NSItemProvider,
         imageTypeIdentifier: String?
     ) async -> UIImage? {
@@ -913,7 +931,7 @@ final class BugReportDraft {
         return nil
     }
 
-    private static func loadURL(
+    static func loadURL(
         from provider: NSItemProvider,
         typeIdentifier: String
     ) async -> URL? {
@@ -1110,13 +1128,30 @@ public struct BugReportSheet: View {
     private let questState = HollerKit.quests
     @State private var draft: BugReportDraft
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     #if canImport(PhotosUI)
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     #endif
-    @State private var hasClipboardImage = false
 
     private var speechCapture: SpeechCaptureController {
         draft.speechCapture
+    }
+
+    var pasteAttachmentRow: ClipboardPasteAttachmentRow {
+        ClipboardPasteAttachmentRow(
+            hasClipboardImage: draft.hasClipboardImage,
+            isSubmitting: draft.isSubmitting,
+            isLoadingAttachments: draft.isLoadingAttachments,
+            canAddMoreImages: draft.canAddMoreImages,
+            onPaste: {
+                Task { @MainActor in
+                    #if canImport(UIKit)
+                    _ = await draft.pasteFromClipboard()
+                    #endif
+                    refreshClipboardImageAvailability()
+                }
+            }
+        )
     }
 
     init(
@@ -1232,18 +1267,7 @@ public struct BugReportSheet: View {
                             #endif
 
                             #if canImport(UIKit)
-                            if hasClipboardImage {
-                                Button {
-                                    Task { @MainActor in
-                                        _ = await draft.pasteFromClipboard()
-                                        refreshClipboardImageAvailability()
-                                    }
-                                } label: {
-                                    Label("Paste from Clipboard", systemImage: "doc.on.clipboard")
-                                }
-                                .disabled(draft.isSubmitting || draft.isLoadingAttachments || !draft.canAddMoreImages)
-                                .accessibilityIdentifier("HollerKitPasteImageButton")
-                            }
+                            pasteAttachmentRow
                             #endif
 
                             if let statusMessage = draft.attachmentStatusMessage {
@@ -1398,7 +1422,6 @@ public struct BugReportSheet: View {
             }
         }
         .onChange(of: presentationId) { _, _ in
-            refreshClipboardImageAvailability()
             if let externalDraft {
                 draft = externalDraft
             }
@@ -1406,6 +1429,12 @@ public struct BugReportSheet: View {
                 configuration: configuration,
                 invocationAttachments: invocationAttachments
             )
+            refreshClipboardImageAvailability()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                refreshClipboardImageAvailability()
+            }
         }
         #if canImport(PhotosUI) && canImport(UIKit)
         .onChange(of: selectedPhotoItems) { _, newItems in
@@ -1417,6 +1446,9 @@ public struct BugReportSheet: View {
         }
         #endif
         #if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            refreshClipboardImageAvailability()
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             refreshClipboardImageAvailability()
         }
@@ -1492,25 +1524,10 @@ public struct BugReportSheet: View {
         await speechCapture.retry(configuration: effectiveAudioConfiguration)
     }
 
-    /// Updates `hasClipboardImage` from the system pasteboard without reading clipboard item payloads until tapped.
+    /// Updates `draft.hasClipboardImage` from the system pasteboard without reading clipboard item payloads until tapped.
     @MainActor
-    private func refreshClipboardImageAvailability() {
-        #if canImport(UIKit)
-        let pasteboard = UIPasteboard.general
-        if pasteboard.hasImages || pasteboard.hasURLs {
-            hasClipboardImage = true
-            return
-        }
-        hasClipboardImage = pasteboard.types.contains { identifier in
-            guard let utType = UTType(identifier) else { return false }
-            return utType.conforms(to: .movie)
-                || utType.conforms(to: .video)
-                || utType.conforms(to: .image)
-                || utType.conforms(to: .url)
-        }
-        #else
-        hasClipboardImage = false
-        #endif
+    func refreshClipboardImageAvailability() {
+        _ = draft.refreshClipboardImageAvailability()
     }
 
     #if canImport(PhotosUI) && canImport(UIKit)
@@ -1599,6 +1616,105 @@ public struct BugReportSheet: View {
         }
     }
     #endif
+}
+
+/// Evaluates whether the pasteboard currently advertises any attachable image, video, or URL types
+/// without reading item payloads (preventing iOS paste permission prompts before the user taps Paste).
+enum ClipboardAttachmentAvailability {
+    #if canImport(UIKit)
+    @MainActor
+    static func hasAttachableItem(pasteboard: UIPasteboard = .general) -> Bool {
+        if pasteboard.hasImages || pasteboard.hasURLs {
+            return true
+        }
+        return hasAttachableTypeIdentifiers(pasteboard.types)
+    }
+    #endif
+
+    static func hasAttachableTypeIdentifiers(_ identifiers: [String]) -> Bool {
+        identifiers.contains { identifier in
+            guard let utType = UTType(identifier) else { return false }
+            return utType.conforms(to: .movie)
+                || utType.conforms(to: .video)
+                || utType.conforms(to: .image)
+                || utType.conforms(to: .url)
+        }
+    }
+}
+
+/// Shared row displaying the "Paste from Clipboard" action button alongside an always-reachable info button and hint.
+@MainActor
+struct ClipboardPasteAttachmentRow: View {
+    nonisolated static let pasteButtonTitle = "Paste from Clipboard"
+    nonisolated static let pasteButtonSystemImage = "doc.on.clipboard"
+    nonisolated static let pasteButtonAccessibilityIdentifier = "HollerKitPasteImageButton"
+    nonisolated static let hintButtonSystemImage = "info.circle"
+    nonisolated static let hintButtonAccessibilityIdentifier = "HollerKitPasteHintButton"
+    nonisolated static let hintButtonAccessibilityLabel = "Paste from Clipboard Info"
+    nonisolated static let hintTextAccessibilityIdentifier = "HollerKitPasteHintText"
+    nonisolated static let hintMessage = "Copy a screenshot or screen recording, then paste it here."
+
+    var hasClipboardImage: Bool
+    var isSubmitting: Bool
+    var isLoadingAttachments: Bool
+    var canAddMoreImages: Bool
+    var onPaste: @MainActor () -> Void
+
+    @State private var isShowingHint = false
+
+    /// Returns `true` when the paste button should be disabled (empty clipboard, submitting, loading, or at attachment cap).
+    var isPasteButtonDisabled: Bool {
+        !hasClipboardImage || isSubmitting || isLoadingAttachments || !canAddMoreImages
+    }
+
+    /// Returns `true` when the info button should be disabled (only while actively submitting, never when the clipboard is empty).
+    var isHintButtonDisabled: Bool {
+        isSubmitting
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                onPaste()
+            } label: {
+                Label(Self.pasteButtonTitle, systemImage: Self.pasteButtonSystemImage)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .disabled(isPasteButtonDisabled)
+            .accessibilityIdentifier(Self.pasteButtonAccessibilityIdentifier)
+            .accessibilityHint(Self.hintMessage)
+
+            Button {
+                isShowingHint.toggle()
+            } label: {
+                Image(systemName: Self.hintButtonSystemImage)
+                    .imageScale(.medium)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28, alignment: .center)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .disabled(isHintButtonDisabled)
+            .accessibilityIdentifier(Self.hintButtonAccessibilityIdentifier)
+            .accessibilityLabel(Self.hintButtonAccessibilityLabel)
+            .accessibilityValue(Self.hintMessage)
+            .accessibilityHint(Self.hintMessage)
+            .popover(isPresented: $isShowingHint, arrowEdge: .top) {
+                Text(Self.hintMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(idealWidth: 240, maxWidth: 260, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .presentationCompactAdaptation(.popover)
+                    .accessibilityIdentifier(Self.hintTextAccessibilityIdentifier)
+            }
+        }
+    }
 }
 
 #if canImport(PhotosUI)
