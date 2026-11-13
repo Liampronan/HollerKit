@@ -4989,6 +4989,12 @@ final class HollerKitTests: XCTestCase {
             ctx.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
         }
         testPasteboard.image = sampleImage
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = false
+        questDraft.hasClipboardImage = false
+        XCTAssertTrue(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
+        XCTAssertTrue(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
         NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
         try await Task.sleep(for: .milliseconds(50))
 
@@ -5011,6 +5017,9 @@ final class HollerKitTests: XCTestCase {
 
         // 7. Clear clipboard, verify button disables on didBecomeActiveNotification, then copy a video and verify both sheets enable and can paste the video
         testPasteboard.items = []
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = true
+        questDraft.hasClipboardImage = true
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertFalse(bugDraft.hasClipboardImage)
@@ -5022,6 +5031,9 @@ final class HollerKitTests: XCTestCase {
         try await makeSampleVideoFile(at: sampleMovieURL, durationSeconds: 1.5)
         let sampleMovieBytes = try Data(contentsOf: sampleMovieURL)
         testPasteboard.setData(sampleMovieBytes, forPasteboardType: UTType.quickTimeMovie.identifier)
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = false
+        questDraft.hasClipboardImage = false
 
         NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
         try await Task.sleep(for: .milliseconds(50))
@@ -5030,6 +5042,20 @@ final class HollerKitTests: XCTestCase {
         XCTAssertTrue(questDraft.hasClipboardImage, "Video on clipboard must enable paste button in QuestResultSheet")
         XCTAssertFalse(bugSheet.pasteAttachmentRow.isPasteButtonDisabled)
         XCTAssertFalse(questSheet.pasteAttachmentRow.isPasteButtonDisabled)
+
+        // 8. Multi-item pasteboard where the first item is plain text and the second item is movie data
+        testPasteboard.items = [
+            [UTType.plainText.identifier: "Plain text first item"],
+            [UTType.quickTimeMovie.identifier: sampleMovieBytes]
+        ]
+        try await Task.sleep(for: .milliseconds(50))
+        bugDraft.hasClipboardImage = false
+        questDraft.hasClipboardImage = false
+        XCTAssertTrue(ClipboardAttachmentAvailability.hasAttachableItem(pasteboard: testPasteboard))
+        NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(bugDraft.hasClipboardImage, "Movie in second pasteboard item must enable paste button in BugReportSheet")
+        XCTAssertTrue(questDraft.hasClipboardImage, "Movie in second pasteboard item must enable paste button in QuestResultSheet")
 
         // Verify QuestResultDraft.pasteFromClipboard attaches both video and image providers just like BugReportDraft
         let movieProvider = NSItemProvider()

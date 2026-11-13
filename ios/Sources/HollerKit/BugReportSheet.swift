@@ -1627,7 +1627,8 @@ enum ClipboardAttachmentAvailability {
         if pasteboard.hasImages || pasteboard.hasURLs {
             return true
         }
-        return hasAttachableTypeIdentifiers(pasteboard.types)
+        let allItemTypes = pasteboard.types(forItemSet: nil)?.flatMap { $0 } ?? pasteboard.types
+        return hasAttachableTypeIdentifiers(allItemTypes)
     }
     #endif
 
