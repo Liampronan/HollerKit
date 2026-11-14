@@ -1095,7 +1095,10 @@ final class HollerKitTests: XCTestCase {
             return
         }
         questState.startQuest(item)
-        defer { QuestOverlayWindowManager.shared.hide() }
+        defer {
+            questState.reset()
+            QuestOverlayWindowManager.shared.hide()
+        }
 
         let windowBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
         var reportedFrame: CGRect = .zero
@@ -5591,6 +5594,289 @@ final class HollerKitTests: XCTestCase {
         XCTAssertTrue(
             hasBlueStartButtonPixels(in: controller.view),
             "Disclosing quest-1 must render the prominent blue Start Quest button capsule"
+        )
+    }
+
+    @MainActor
+    func testQuestOverlayMaintainsStableSizeAcrossStepAdvancementMarksAndQuests() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitOverlayStableSizeTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // 1. Verify formatting helpers for Mark button and step progress badge
+        XCTAssertEqual(QuestOverlayView.markButtonTitle(for: 0), "Mark")
+        XCTAssertEqual(QuestOverlayView.markButtonTitle(for: 1), "Mark (1)")
+        XCTAssertEqual(QuestOverlayView.markButtonTitle(for: 12), "Mark (12)")
+        XCTAssertNil(QuestOverlayView.stepProgressSummary(checkedCount: 0, totalSteps: 0))
+        XCTAssertEqual(QuestOverlayView.stepProgressSummary(checkedCount: 0, totalSteps: 3), "0/3")
+        XCTAssertEqual(QuestOverlayView.stepProgressSummary(checkedCount: 2, totalSteps: 3), "2/3")
+        XCTAssertEqual(QuestOverlayView.stepProgressSummary(checkedCount: 3, totalSteps: 3), "3/3")
+
+        let shortTitleQuest = QuestDefinition(
+            id: "short-title-quest",
+            title: "Quick check",
+            area: "feed",
+            steps: [
+                "Tap card",
+                "Verify the hero image, author avatar, timestamp, and multi-line caption render without clipping or overlapping the bottom action bar",
+                "Swipe back"
+            ],
+            expect: ["Transition completes smoothly"]
+        )
+        let longTitleQuest = QuestDefinition(
+            id: "long-title-quest",
+            title: "Open a feed card with a very long title, verify zoom transition, and return to the exact scroll offset",
+            area: "feed",
+            steps: [
+                "Scroll down to the third feed item",
+                "Tap the card to open detail view",
+                "Navigate back and verify scroll position"
+            ],
+            expect: ["Scroll offset is preserved"]
+        )
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { nil },
+            isEnabled: { true },
+            quests: .definitions([shortTitleQuest, longTitleQuest]),
+            urlSession: makeStubSession(),
+            outboxDirectoryURL: tempDir
+        ))
+
+        let questState = HollerKit.quests
+        defer {
+            HollerKit.configure(HollerKitConfiguration(
+                server: URL(string: "https://api.hollerkit.test")!,
+                auth: { nil },
+                isEnabled: { false },
+                outboxDirectoryURL: tempDir
+            ))
+            questState.reset()
+            QuestOverlayWindowManager.shared.hide()
+        }
+
+        guard let firstItem = questState.quests.first(where: { $0.id == "short-title-quest" }),
+              let secondItem = questState.quests.first(where: { $0.id == "long-title-quest" }) else {
+            XCTFail("Expected configured quest items")
+            return
+        }
+
+        let startDate = Date(timeIntervalSince1970: 1_700_000_000)
+        questState.startQuest(firstItem, startedAt: startDate)
+
+        let windowBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        var reportedFrame: CGRect = .zero
+
+        let rootView = ZStack(alignment: .bottom) {
+            Color.clear
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+            QuestOverlayView(
+                questState: questState,
+                viewportSize: windowBounds.size,
+                onFrameChange: { frame in
+                    reportedFrame = frame
+                }
+            )
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+
+        let hostingController = UIHostingController(rootView: rootView)
+        hostingController.view.backgroundColor = .clear
+        let window = UIWindow(frame: windowBounds)
+        window.rootViewController = hostingController
+        window.isHidden = false
+        defer { window.isHidden = true }
+
+        func flushOverlayLayout() {
+            hostingController.view.frame = window.bounds
+            hostingController.view.setNeedsLayout()
+            hostingController.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+            hostingController.view.layoutIfNeeded()
+        }
+
+        flushOverlayLayout()
+        let initialCollapsedFrame = reportedFrame
+        XCTAssertNotEqual(initialCollapsedFrame, .zero)
+        XCTAssertEqual(initialCollapsedFrame.width, QuestOverlayView.maxOverlayWidth, accuracy: 1.0)
+        XCTAssertLessThan(initialCollapsedFrame.height, 80, "Collapsed pill should be a compact single-row capsule")
+
+        // 2. Stepping through steps 0 -> 1 -> 2 -> 3 and capturing marks 1..10 in the collapsed pill must not change its frame size
+        questState.toggleStep(at: 0)
+        flushOverlayLayout()
+        XCTAssertEqual(reportedFrame.width, initialCollapsedFrame.width, accuracy: 0.5)
+        XCTAssertEqual(reportedFrame.height, initialCollapsedFrame.height, accuracy: 0.5)
+
+        questState.toggleStep(at: 1)
+        questState.toggleStep(at: 2)
+        flushOverlayLayout()
+        XCTAssertEqual(reportedFrame.width, initialCollapsedFrame.width, accuracy: 0.5)
+        XCTAssertEqual(reportedFrame.height, initialCollapsedFrame.height, accuracy: 0.5)
+
+        for markIdx in 1...10 {
+            questState.captureMark(
+                label: "Mark \(markIdx)",
+                imageData: Data([0x89, 0x50, 0x4E, 0x47]),
+                at: startDate.addingTimeInterval(Double(markIdx))
+            )
+            flushOverlayLayout()
+            XCTAssertEqual(
+                reportedFrame.width,
+                initialCollapsedFrame.width,
+                accuracy: 0.5,
+                "Collapsed pill width must not jump when capturing mark \(markIdx)"
+            )
+            XCTAssertEqual(
+                reportedFrame.height,
+                initialCollapsedFrame.height,
+                accuracy: 0.5,
+                "Collapsed pill height must not jump when capturing mark \(markIdx)"
+            )
+        }
+
+        // 3. Expand the overlay card and verify its width and height remain rock-solid across step toggles and mark captures
+        questState.setOverlayExpanded(true)
+        flushOverlayLayout()
+        let initialExpandedFrame = reportedFrame
+        XCTAssertEqual(initialExpandedFrame.width, initialCollapsedFrame.width, accuracy: 0.5)
+        XCTAssertGreaterThan(initialExpandedFrame.height, initialCollapsedFrame.height + 80)
+
+        // Uncheck and re-check short and multi-line steps in expanded mode
+        for stepIdx in 0..<3 {
+            questState.toggleStep(at: stepIdx)
+            flushOverlayLayout()
+            XCTAssertEqual(
+                reportedFrame.width,
+                initialExpandedFrame.width,
+                accuracy: 0.5,
+                "Expanded card width must stay stable when toggling step \(stepIdx)"
+            )
+            XCTAssertEqual(
+                reportedFrame.height,
+                initialExpandedFrame.height,
+                accuracy: 0.5,
+                "Expanded card height must stay stable when toggling step \(stepIdx)"
+            )
+        }
+
+        questState.checkAllSteps()
+        flushOverlayLayout()
+        XCTAssertEqual(reportedFrame.width, initialExpandedFrame.width, accuracy: 0.5)
+        XCTAssertEqual(reportedFrame.height, initialExpandedFrame.height, accuracy: 0.5)
+
+        // Capture additional marks while expanded
+        questState.captureMark(
+            label: "Expanded mark",
+            imageData: Data([0x89, 0x50, 0x4E, 0x47]),
+            at: startDate.addingTimeInterval(25)
+        )
+        flushOverlayLayout()
+        XCTAssertEqual(reportedFrame.width, initialExpandedFrame.width, accuracy: 0.5)
+        XCTAssertEqual(reportedFrame.height, initialExpandedFrame.height, accuracy: 0.5)
+
+        // 4. Switch to a quest with a very long title and verify the collapsed pill keeps the exact same frame dimensions
+        if let activeId = questState.activeQuest?.id {
+            questState.completeSubmittedSession(id: activeId)
+        }
+        questState.startQuest(secondItem, startedAt: startDate)
+        flushOverlayLayout()
+        XCTAssertEqual(
+            reportedFrame.width,
+            initialCollapsedFrame.width,
+            accuracy: 0.5,
+            "Collapsed pill width must remain consistent between short and long quest titles"
+        )
+        XCTAssertEqual(
+            reportedFrame.height,
+            initialCollapsedFrame.height,
+            accuracy: 0.5,
+            "Collapsed pill height must remain consistent between short and long quest titles"
+        )
+
+        // 5. Verify accessibility Dynamic Type (.accessibility5) stacks controls cleanly inside maxOverlayWidth and window bounds
+        var a11yReportedFrame: CGRect = .zero
+        let a11yRootView = ZStack(alignment: .bottom) {
+            Color.clear
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+            QuestOverlayView(
+                questState: questState,
+                viewportSize: windowBounds.size,
+                onFrameChange: { frame in
+                    a11yReportedFrame = frame
+                }
+            )
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+        .environment(\.dynamicTypeSize, .accessibility5)
+
+        let a11yHost = UIHostingController(rootView: a11yRootView)
+        a11yHost.view.backgroundColor = .clear
+        window.rootViewController = a11yHost
+        a11yHost.view.frame = window.bounds
+        a11yHost.view.setNeedsLayout()
+        a11yHost.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        a11yHost.view.layoutIfNeeded()
+
+        let a11yCollapsedFrame = a11yReportedFrame
+        XCTAssertNotEqual(a11yCollapsedFrame, .zero)
+        XCTAssertLessThanOrEqual(
+            a11yCollapsedFrame.width,
+            QuestOverlayView.maxOverlayWidth + 1.0,
+            "Collapsed overlay at .accessibility5 must not overflow maxOverlayWidth"
+        )
+        XCTAssertGreaterThan(
+            a11yCollapsedFrame.height,
+            initialCollapsedFrame.height,
+            "Collapsed overlay at .accessibility5 should stack vertically to accommodate large controls"
+        )
+        XCTAssertTrue(window.bounds.contains(a11yCollapsedFrame))
+
+        questState.setOverlayExpanded(true)
+        a11yHost.view.setNeedsLayout()
+        a11yHost.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        a11yHost.view.layoutIfNeeded()
+
+        let a11yExpandedFrame = a11yReportedFrame
+        XCTAssertLessThanOrEqual(
+            a11yExpandedFrame.width,
+            QuestOverlayView.maxOverlayWidth + 1.0,
+            "Expanded overlay at .accessibility5 must not overflow maxOverlayWidth"
+        )
+        XCTAssertGreaterThan(a11yExpandedFrame.height, a11yCollapsedFrame.height)
+        XCTAssertTrue(window.bounds.contains(a11yExpandedFrame))
+        let a11yBottomActionPoint = CGPoint(x: a11yExpandedFrame.midX, y: a11yExpandedFrame.maxY - 20)
+        XCTAssertTrue(
+            OverlayHitPolicy.capturesTouch(at: a11yBottomActionPoint, interactiveFrame: a11yExpandedFrame),
+            "Stacked action controls at .accessibility5 must remain inside the hit-tested interactiveFrame"
+        )
+
+        // 6. Verify completeSubmittedSession(id:) with a stale session ID does not clear or end breadcrumbs for a newer active quest
+        let newSessionId = try XCTUnwrap(questState.activeQuest?.id)
+        let staleSessionId = UUID()
+        HollerKit.breadcrumb("Before stale completion", category: "test", date: startDate.addingTimeInterval(5))
+        questState.completeSubmittedSession(id: staleSessionId)
+        XCTAssertEqual(
+            questState.activeQuest?.id,
+            newSessionId,
+            "Stale completeSubmittedSession(id:) must not clear a newer active quest session"
+        )
+        HollerKit.breadcrumb("After stale completion", category: "test", date: startDate.addingTimeInterval(8))
+        let latestCrumb = HollerKit.currentBreadcrumbs.snapshot().last
+        XCTAssertEqual(latestCrumb?.message, "After stale completion")
+        XCTAssertEqual(
+            latestCrumb?.offsetSeconds ?? -1,
+            8.0,
+            accuracy: 0.001,
+            "Stale completeSubmittedSession(id:) must not end quest-relative breadcrumb tracking for the active quest"
         )
     }
     #endif
