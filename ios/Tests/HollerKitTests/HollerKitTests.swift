@@ -5598,7 +5598,7 @@ final class HollerKitTests: XCTestCase {
     }
 
     @MainActor
-    func testQuestOverlayMaintainsStableSizeAcrossStepAdvancementMarksAndQuests() {
+    func testQuestOverlayMaintainsStableSizeAcrossStepAdvancementMarksAndQuests() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("HollerKitOverlayStableSizeTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -5795,6 +5795,88 @@ final class HollerKitTests: XCTestCase {
             initialCollapsedFrame.height,
             accuracy: 0.5,
             "Collapsed pill height must remain consistent between short and long quest titles"
+        )
+
+        // 5. Verify accessibility Dynamic Type (.accessibility5) stacks controls cleanly inside maxOverlayWidth and window bounds
+        var a11yReportedFrame: CGRect = .zero
+        let a11yRootView = ZStack(alignment: .bottom) {
+            Color.clear
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+            QuestOverlayView(
+                questState: questState,
+                viewportSize: windowBounds.size,
+                onFrameChange: { frame in
+                    a11yReportedFrame = frame
+                }
+            )
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+        .environment(\.dynamicTypeSize, .accessibility5)
+
+        let a11yHost = UIHostingController(rootView: a11yRootView)
+        a11yHost.view.backgroundColor = .clear
+        window.rootViewController = a11yHost
+        a11yHost.view.frame = window.bounds
+        a11yHost.view.setNeedsLayout()
+        a11yHost.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        a11yHost.view.layoutIfNeeded()
+
+        let a11yCollapsedFrame = a11yReportedFrame
+        XCTAssertNotEqual(a11yCollapsedFrame, .zero)
+        XCTAssertLessThanOrEqual(
+            a11yCollapsedFrame.width,
+            QuestOverlayView.maxOverlayWidth + 1.0,
+            "Collapsed overlay at .accessibility5 must not overflow maxOverlayWidth"
+        )
+        XCTAssertGreaterThan(
+            a11yCollapsedFrame.height,
+            initialCollapsedFrame.height,
+            "Collapsed overlay at .accessibility5 should stack vertically to accommodate large controls"
+        )
+        XCTAssertTrue(window.bounds.contains(a11yCollapsedFrame))
+
+        questState.setOverlayExpanded(true)
+        a11yHost.view.setNeedsLayout()
+        a11yHost.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        a11yHost.view.layoutIfNeeded()
+
+        let a11yExpandedFrame = a11yReportedFrame
+        XCTAssertLessThanOrEqual(
+            a11yExpandedFrame.width,
+            QuestOverlayView.maxOverlayWidth + 1.0,
+            "Expanded overlay at .accessibility5 must not overflow maxOverlayWidth"
+        )
+        XCTAssertGreaterThan(a11yExpandedFrame.height, a11yCollapsedFrame.height)
+        XCTAssertTrue(window.bounds.contains(a11yExpandedFrame))
+        let a11yBottomActionPoint = CGPoint(x: a11yExpandedFrame.midX, y: a11yExpandedFrame.maxY - 20)
+        XCTAssertTrue(
+            OverlayHitPolicy.capturesTouch(at: a11yBottomActionPoint, interactiveFrame: a11yExpandedFrame),
+            "Stacked action controls at .accessibility5 must remain inside the hit-tested interactiveFrame"
+        )
+
+        // 6. Verify completeSubmittedSession(id:) with a stale session ID does not clear or end breadcrumbs for a newer active quest
+        let newSessionId = try XCTUnwrap(questState.activeQuest?.id)
+        let staleSessionId = UUID()
+        HollerKit.breadcrumb("Before stale completion", category: "test", date: startDate.addingTimeInterval(5))
+        questState.completeSubmittedSession(id: staleSessionId)
+        XCTAssertEqual(
+            questState.activeQuest?.id,
+            newSessionId,
+            "Stale completeSubmittedSession(id:) must not clear a newer active quest session"
+        )
+        HollerKit.breadcrumb("After stale completion", category: "test", date: startDate.addingTimeInterval(8))
+        let latestCrumb = HollerKit.currentBreadcrumbs.snapshot().last
+        XCTAssertEqual(latestCrumb?.message, "After stale completion")
+        XCTAssertEqual(
+            latestCrumb?.offsetSeconds ?? -1,
+            8.0,
+            accuracy: 0.001,
+            "Stale completeSubmittedSession(id:) must not end quest-relative breadcrumb tracking for the active quest"
         )
     }
     #endif

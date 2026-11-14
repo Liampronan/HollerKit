@@ -968,12 +968,14 @@ public final class HollerKitQuestState {
             throw error
         }
 
-        HollerKit.endQuestBreadcrumbs()
-        if clearActiveSessionImmediately {
-            completeSubmittedSession(id: session.id)
-        } else if var currentSession = activeQuest, currentSession.id == session.id {
-            currentSession.isSubmitted = true
-            activeQuest = currentSession
+        if activeQuest?.id == session.id {
+            HollerKit.endQuestBreadcrumbs()
+            if clearActiveSessionImmediately {
+                completeSubmittedSession(id: session.id)
+            } else if var currentSession = activeQuest, currentSession.id == session.id {
+                currentSession.isSubmitted = true
+                activeQuest = currentSession
+            }
         }
 
         return outcome
@@ -981,13 +983,10 @@ public final class HollerKitQuestState {
 
     /// Completes teardown of an active quest session after its result confirmation has been shown.
     public func completeSubmittedSession(id: UUID) {
-        if activeQuest?.id == id {
-            activeQuest = nil
-        }
+        guard activeQuest?.id == id else { return }
+        activeQuest = nil
         HollerKit.endQuestBreadcrumbs()
-        if activeQuest == nil {
-            QuestOverlayWindowManager.shared.hide(waitForPresentedSheet: true)
-        }
+        QuestOverlayWindowManager.shared.hide(waitForPresentedSheet: true)
     }
 
     /// Records a local quest run result optimistically so the board updates immediately (including when queued offline).
