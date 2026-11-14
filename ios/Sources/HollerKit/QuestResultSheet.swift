@@ -41,6 +41,9 @@ final class QuestResultDraft {
     var submissionError: String?
     var submissionOutcome: OutboxSubmissionOutcome?
     var submittedSessionId: UUID?
+    private(set) var submittedSessionSnapshot: ActiveQuestSession?
+    private(set) var submittedCommentSnapshot: String = ""
+    private(set) var submittedImagesSnapshot: [BugReportImage] = []
 
     /// Human-readable headline for the active quest result submission stage, if submitting.
     var submissionProgressTitle: String? {
@@ -635,13 +638,19 @@ final class QuestResultDraft {
         guard !isSubmitting, !isLoadingAttachments, let session = questState.activeQuest else { return }
         autoDismissTask?.cancel()
         autoDismissTask = nil
-        submissionOutcome = nil
-        submissionError = nil
-        isSubmitting = true
-        submissionStage = .preparing
+        withAnimation(.easeInOut(duration: 0.2)) {
+            submissionOutcome = nil
+            submissionError = nil
+            isSubmitting = true
+            submissionStage = .preparing
+        }
         defer {
-            isSubmitting = false
-            submissionStage = nil
+            if isSubmitting || submissionStage != nil {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isSubmitting = false
+                    submissionStage = nil
+                }
+            }
         }
 
         do {
@@ -681,19 +690,24 @@ final class QuestResultDraft {
             )
 
             submittedSessionId = session.id
+            submittedSessionSnapshot = questState.activeQuest ?? session
+            submittedCommentSnapshot = comment
+            submittedImagesSnapshot = images
             clearInputsAfterSubmission()
-            submissionOutcome = outcome
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                submissionOutcome = outcome
+                isSubmitting = false
+                submissionStage = nil
+            }
             SubmissionHaptics.notify(for: outcome)
 
-            if case .sent = outcome {
-                let delay = autoDismissDelaySeconds ?? 1.2
-                if delay > 0 {
-                    let delayNanoseconds = UInt64(delay * 1_000_000_000)
-                    autoDismissTask = Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: delayNanoseconds)
-                        guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
-                        onAutoDismiss?()
-                    }
+            let delay = autoDismissDelaySeconds ?? 1.2
+            if delay > 0 {
+                let delayNanoseconds = UInt64(delay * 1_000_000_000)
+                autoDismissTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: delayNanoseconds)
+                    guard !Task.isCancelled, let self, self.submissionOutcome != nil else { return }
+                    onAutoDismiss?()
                 }
             }
         } catch {
@@ -707,6 +721,7 @@ final class QuestResultDraft {
 public struct QuestResultSheet: View {
     private let questState: HollerKitQuestState
     @State private var draft: QuestResultDraft
+    @State private var capturedSession: ActiveQuestSession?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var activeAnnotationTarget: ActiveAnnotationTarget?
@@ -717,6 +732,21 @@ public struct QuestResultSheet: View {
     private static let selectableResults: [QuestResult] = [.pass, .fail, .unsure]
     /// High-contrast green fill used for checked icons so white checkmarks maintain >= 4.5:1 contrast in light and dark modes.
     private static let checkedStepColor = Color(red: 0.08, green: 0.50, blue: 0.24)
+
+    /// Returns the active quest session or the last captured/submitted session snapshot so the sheet never flashes an empty state during confirmation or dismissal.
+    var displayedSession: ActiveQuestSession? {
+        questState.activeQuest ?? draft.submittedSessionSnapshot ?? capturedSession
+    }
+
+    /// Returns the images to display in the form, preserving the pre-submit snapshot while the confirmation overlay is visible so the form layout does not jump.
+    var displayedImages: [BugReportImage] {
+        draft.submissionOutcome != nil ? draft.submittedImagesSnapshot : draft.images
+    }
+
+    /// Returns the comment text displayed in the form, preserving the pre-submit snapshot while the confirmation overlay is visible.
+    var displayedComment: String {
+        draft.submissionOutcome != nil ? draft.submittedCommentSnapshot : draft.comment
+    }
 
     var pasteAttachmentRow: ClipboardPasteAttachmentRow {
         ClipboardPasteAttachmentRow(
@@ -739,6 +769,7 @@ public struct QuestResultSheet: View {
         let defaultDraft = QuestResultDraft()
         self.questState = questState
         self._draft = State(initialValue: defaultDraft)
+        self._capturedSession = State(initialValue: questState.activeQuest)
     }
 
     init(
@@ -747,12 +778,13 @@ public struct QuestResultSheet: View {
     ) {
         self.questState = questState
         self._draft = State(initialValue: draft)
+        self._capturedSession = State(initialValue: questState.activeQuest)
     }
 
     public var body: some View {
         NavigationStack {
             Form {
-                if let session = questState.activeQuest {
+                if let session = displayedSession {
                     Section("Quest") {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(session.quest.definition.title)
@@ -858,17 +890,26 @@ public struct QuestResultSheet: View {
 
                     Section("Note (Optional)") {
                         ZStack(alignment: .topLeading) {
-                            if draft.comment.isEmpty {
+                            if displayedComment.isEmpty {
                                 Text("Add an optional note about this quest run...")
                                     .foregroundStyle(.tertiary)
                                     .padding(.top, 8)
                                     .padding(.leading, 5)
                                     .allowsHitTesting(false)
                             }
-                            TextEditor(text: $draft.comment)
-                                .frame(minHeight: 100)
-                                .disabled(draft.isSubmitting)
-                                .accessibilityIdentifier("HollerKitQuestResultCommentEditor")
+                            TextEditor(
+                                text: Binding(
+                                    get: { displayedComment },
+                                    set: { newValue in
+                                        if draft.submissionOutcome == nil {
+                                            draft.comment = newValue
+                                        }
+                                    }
+                                )
+                            )
+                            .frame(minHeight: 100)
+                            .disabled(draft.isSubmitting)
+                            .accessibilityIdentifier("HollerKitQuestResultCommentEditor")
                         }
 
                         if let audioConfig = HollerKit.currentConfiguration?.effectiveAudioConfiguration, audioConfig.isEnabled {
@@ -921,14 +962,14 @@ public struct QuestResultSheet: View {
                         }
                     }
 
-                    Section("Attachments (\(draft.images.count))") {
-                        if !draft.images.isEmpty {
+                    Section("Attachments (\(displayedImages.count))") {
+                        if !displayedImages.isEmpty {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 12) {
-                                    ForEach(draft.images) { image in
+                                    ForEach(displayedImages) { image in
                                         ImageAttachmentThumbnail(
                                             image: image,
-                                            isDisabled: draft.isSubmitting,
+                                            isDisabled: draft.isSubmitting || draft.submissionOutcome != nil,
                                             onTap: image.isVideo ? nil : {
                                                 draft.selectedImage = image
                                                 activeAnnotationTarget = .userImage(image)
@@ -1060,13 +1101,17 @@ public struct QuestResultSheet: View {
                     )
                 }
             }
+            .animation(.easeInOut(duration: 0.22), value: draft.isSubmitting)
+            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: draft.submissionOutcome != nil)
             .navigationTitle("Complete Quest")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Back") {
                         draft.cancelCapture()
-                        questState.dismissResultSheet()
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                            questState.dismissResultSheet()
+                        }
                         dismiss()
                     }
                     .disabled(draft.isSubmitting || draft.submissionOutcome != nil)
@@ -1089,8 +1134,17 @@ public struct QuestResultSheet: View {
                 }
             }
         }
+        .interactiveDismissDisabled(draft.isSubmitting)
         .onAppear {
+            if let activeSession = questState.activeQuest {
+                capturedSession = activeSession
+            }
             refreshClipboardImageAvailability()
+        }
+        .onChange(of: questState.activeQuest) { _, newSession in
+            if let newSession {
+                capturedSession = newSession
+            }
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {

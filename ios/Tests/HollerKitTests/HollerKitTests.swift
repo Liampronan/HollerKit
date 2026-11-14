@@ -5073,5 +5073,252 @@ final class HollerKitTests: XCTestCase {
         XCTAssertTrue(questDraft.images[0].isVideo)
         XCTAssertEqual(questDraft.images[0].title, "Pasted Video 1")
     }
+
+    @MainActor
+    /// Verifies that submitting a quest result preserves the displayed quest/note/attachments snapshot during
+    /// confirmation and sheet dismissal, hides the floating quest overlay while the result sheet is presented,
+    /// and cleanly completes the session on both auto-dismiss and manual swipe-dismiss after submit.
+    func testQuestResultSheetGracefulDismissalPreservesSnapshotAndCoordinatesOverlayTeardown() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hollerkit-quest-graceful-dismiss-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let questDef = QuestDefinition(
+            id: "graceful-quest",
+            title: "Verify smooth quest dismissal",
+            area: "quests",
+            steps: ["Step 1", "Step 2"],
+            expect: ["Dismisses in a single smooth transition"]
+        )
+
+        StubURLProtocol.setHandler { request, bodyData in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            if url.path.hasSuffix("/manifest") {
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "build": "1",
+                    "pendingCount": 1,
+                    "quests": [
+                        [
+                            "id": questDef.id,
+                            "version": 1,
+                            "contentHash": questDef.contentHash,
+                            "questStatus": "active",
+                            "boardStatus": "pending",
+                            "title": questDef.title,
+                            "area": questDef.area,
+                            "setup": [],
+                            "steps": questDef.steps,
+                            "expect": questDef.expect,
+                            "needs": [],
+                            "record": "optional",
+                            "counts": ["pass": 0, "fail": 0, "unsure": 0, "abandoned": 0]
+                        ]
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["hollerkit-protocol": "1"])!
+                return (response, data)
+            }
+            if url.path == "/v1/uploads", request.httpMethod == "POST" {
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "url": "https://upload.hollerkit.test/put/\(UUID().uuidString)",
+                    "key": "uploads/item-\(UUID().uuidString).png",
+                    "expiresAt": "2099-01-01T00:00:00Z"
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["hollerkit-protocol": "1"])!
+                return (response, data)
+            }
+            if url.host == "upload.hollerkit.test", request.httpMethod == "PUT" {
+                let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (response, Data())
+            }
+            if url.path == "/v1/feedback", request.httpMethod == "POST" {
+                let body = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                let id = (body["id"] as? String) ?? UUID().uuidString.lowercased()
+                let build = (body["build"] as? String) ?? "1"
+                let result = (body["result"] as? String) ?? "pass"
+                let questId = (body["questId"] as? String) ?? "graceful-quest"
+                let comment = body["comment"] as? String
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": id,
+                        "kind": "quest_run",
+                        "questId": questId,
+                        "questVersion": 1,
+                        "result": result,
+                        "build": build,
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-14T18:00:00Z",
+                        "updatedAt": "2026-11-14T18:00:00Z",
+                        "comment": comment as Any
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: ["hollerkit-protocol": "1"])!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let session = makeStubSession()
+        if let active = HollerKit.quests.activeQuest {
+            HollerKit.quests.completeSubmittedSession(id: active.id)
+        }
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            quests: .definitions([questDef]),
+            urlSession: session,
+            outboxDirectoryURL: tempDir
+        ))
+        defer {
+            if let active = HollerKit.quests.activeQuest {
+                HollerKit.quests.completeSubmittedSession(id: active.id)
+            }
+            QuestOverlayWindowManager.shared.hide()
+        }
+
+        let item = try XCTUnwrap(HollerKit.quests.quests.first)
+        HollerKit.quests.startQuest(item)
+        let firstSessionId = try XCTUnwrap(HollerKit.quests.activeQuest?.id)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.isPresentingResultSheet, false)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.isSubmitted, false)
+
+        let windowBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        var reportedOverlayFrame: CGRect = .zero
+        let overlayRootView = ZStack(alignment: .bottom) {
+            Color.clear.ignoresSafeArea().allowsHitTesting(false)
+            QuestOverlayView(
+                questState: HollerKit.quests,
+                viewportSize: windowBounds.size,
+                onFrameChange: { frame in
+                    reportedOverlayFrame = frame
+                }
+            )
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+        }
+        let hostingController = UIHostingController(rootView: overlayRootView)
+        let hostWindow = UIWindow(frame: windowBounds)
+        hostWindow.rootViewController = hostingController
+        hostWindow.isHidden = false
+        hostingController.view.frame = hostWindow.bounds
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertNotEqual(reportedOverlayFrame, .zero, "Active quest overlay must report non-zero interactive frame before presenting result sheet")
+
+        // 1. Present result sheet -> floating overlay hides and reports .zero interactive frame; Back before submit restores it
+        HollerKit.quests.presentResultSheet()
+        XCTAssertEqual(HollerKit.quests.activeQuest?.isPresentingResultSheet, true)
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(reportedOverlayFrame, .zero, "Floating quest overlay must hide and clear interactive frame while result sheet is presented")
+
+        HollerKit.quests.dismissResultSheet()
+        XCTAssertEqual(HollerKit.quests.activeQuest?.id, firstSessionId)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.isPresentingResultSheet, false)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.isSubmitted, false)
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertNotEqual(reportedOverlayFrame, .zero, "Floating quest overlay must reappear if result sheet is dismissed without submitting")
+
+        // 2. Present result sheet, attach an image & note, and submit with auto-dismiss delay
+        HollerKit.quests.presentResultSheet()
+        HollerKit.quests.toggleStep(at: 0)
+        let draft = QuestResultDraft(
+            initialResult: .pass,
+            initialComment: "Smooth dismissal verified",
+            tempDirectoryURL: tempDir.appendingPathComponent("draft-1", isDirectory: true)
+        )
+        draft.autoDismissDelaySeconds = 0.05
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24))
+        let testImage = renderer.image { ctx in
+            UIColor.systemGreen.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 24, height: 24))
+        }
+        XCTAssertTrue(draft.addImage(testImage, title: "Confirmation Shot"))
+
+        let sheet = QuestResultSheet(questState: HollerKit.quests, draft: draft)
+        XCTAssertEqual(sheet.displayedSession?.id, firstSessionId)
+        XCTAssertEqual(sheet.displayedComment, "Smooth dismissal verified")
+        XCTAssertEqual(sheet.displayedImages.count, 1)
+
+        let autoDismissFiredBox = LockedBox<Bool>(false)
+        await draft.submit(
+            questState: HollerKit.quests,
+            clearActiveSessionImmediately: false,
+            onAutoDismiss: {
+                if let submittedId = draft.submittedSessionId {
+                    HollerKit.quests.completeSubmittedSession(id: submittedId)
+                }
+                autoDismissFiredBox.withLock { $0 = true }
+            }
+        )
+
+        // Immediately after submit returns (while confirmation badge is displayed):
+        // - draft inputs are cleared, but snapshots on draft and QuestResultSheet remain intact
+        // - activeQuest is still present with isSubmitted == true
+        XCTAssertTrue(draft.comment.isEmpty)
+        XCTAssertTrue(draft.images.isEmpty)
+        XCTAssertNotNil(draft.submissionOutcome)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.id, firstSessionId)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.isSubmitted, true)
+        XCTAssertEqual(sheet.displayedSession?.id, firstSessionId)
+        XCTAssertEqual(sheet.displayedComment, "Smooth dismissal verified")
+        XCTAssertEqual(sheet.displayedImages.count, 1)
+
+        // Wait for auto-dismiss callback to complete session teardown
+        for _ in 0..<30 {
+            if autoDismissFiredBox.withLock({ $0 }) { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(autoDismissFiredBox.withLock { $0 }, "onAutoDismiss must fire after confirmation delay")
+        XCTAssertNil(HollerKit.quests.activeQuest, "Active quest session must be cleared when confirmation completes")
+
+        // Even after activeQuest is nil (while the sheet is animating out), QuestResultSheet preserves its snapshot
+        XCTAssertEqual(sheet.displayedSession?.id, firstSessionId)
+        XCTAssertEqual(sheet.displayedComment, "Smooth dismissal verified")
+        XCTAssertEqual(sheet.displayedImages.count, 1)
+
+        // 3. Verify manual swipe-dismiss during post-submit confirmation also completes the session immediately
+        HollerKit.quests.startQuest(item)
+        let secondSessionId = try XCTUnwrap(HollerKit.quests.activeQuest?.id)
+        XCTAssertNotEqual(firstSessionId, secondSessionId)
+        HollerKit.quests.presentResultSheet()
+
+        let swipeDraft = QuestResultDraft(
+            initialResult: .pass,
+            initialComment: "Swiped down during confirmation",
+            tempDirectoryURL: tempDir.appendingPathComponent("draft-2", isDirectory: true)
+        )
+        swipeDraft.autoDismissDelaySeconds = 5.0
+        await swipeDraft.submit(
+            questState: HollerKit.quests,
+            clearActiveSessionImmediately: false
+        )
+        defer { swipeDraft.cancelCapture() }
+
+        XCTAssertEqual(HollerKit.quests.activeQuest?.id, secondSessionId)
+        XCTAssertEqual(HollerKit.quests.activeQuest?.isSubmitted, true)
+
+        // Simulate user swiping down the result sheet while confirmation is displayed
+        HollerKit.quests.dismissResultSheet()
+        XCTAssertNil(
+            HollerKit.quests.activeQuest,
+            "Swiping down the result sheet after submission must complete and clear the active session"
+        )
+    }
     #endif
 }

@@ -789,7 +789,11 @@ public final class HollerKitQuestState {
     public func dismissResultSheet() {
         guard var session = activeQuest else { return }
         session.isPresentingResultSheet = false
-        activeQuest = session
+        if session.isSubmitted {
+            completeSubmittedSession(id: session.id)
+        } else {
+            activeQuest = session
+        }
     }
 
     @discardableResult
@@ -962,6 +966,9 @@ public final class HollerKitQuestState {
         HollerKit.endQuestBreadcrumbs()
         if clearActiveSessionImmediately {
             completeSubmittedSession(id: session.id)
+        } else if var currentSession = activeQuest, currentSession.id == session.id {
+            currentSession.isSubmitted = true
+            activeQuest = currentSession
         }
 
         return outcome
@@ -974,7 +981,7 @@ public final class HollerKitQuestState {
         }
         HollerKit.endQuestBreadcrumbs()
         if activeQuest == nil {
-            QuestOverlayWindowManager.shared.hide()
+            QuestOverlayWindowManager.shared.hide(waitForPresentedSheet: true)
         }
     }
 

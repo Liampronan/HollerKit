@@ -11,13 +11,25 @@ public final class QuestOverlayWindowManager {
     #if canImport(UIKit)
     private var overlayWindow: PassthroughOverlayWindow?
     private weak var boundWindowScene: UIWindowScene?
+    private var isPendingSheetDismissalTeardown = false
+    private var teardownGeneration: UInt64 = 0
+    private var pendingTeardownTask: Task<Void, Never>?
     #endif
 
     private init() {}
 
     public var isOverlayVisible: Bool {
         #if canImport(UIKit)
-        return overlayWindow?.isHidden == false
+        return overlayWindow?.isHidden == false && !isPendingSheetDismissalTeardown
+        #else
+        return false
+        #endif
+    }
+
+    /// Returns `true` while the overlay window is kept alive solely so the presented quest result sheet can complete its slide-down dismissal animation.
+    public var isAwaitingSheetDismissalTeardown: Bool {
+        #if canImport(UIKit)
+        return overlayWindow != nil && isPendingSheetDismissalTeardown
         #else
         return false
         #endif
@@ -26,6 +38,10 @@ public final class QuestOverlayWindowManager {
     #if canImport(UIKit)
     public func show(questState: HollerKitQuestState, in windowScene: UIWindowScene? = nil) {
         guard let targetScene = windowScene ?? activeWindowScene() else { return }
+        teardownGeneration &+= 1
+        pendingTeardownTask?.cancel()
+        pendingTeardownTask = nil
+        isPendingSheetDismissalTeardown = false
         boundWindowScene = targetScene
 
         let window: PassthroughOverlayWindow
@@ -46,18 +62,72 @@ public final class QuestOverlayWindowManager {
         let hostingController = UIHostingController(rootView: rootView)
         hostingController.view.backgroundColor = .clear
         window.rootViewController = hostingController
+        window.isUserInteractionEnabled = true
         window.isHidden = false
     }
     #else
     public func show(questState: HollerKitQuestState) {}
     #endif
 
-    public func hide() {
+    /// Hides and tears down the floating quest overlay window.
+    ///
+    /// When `waitForPresentedSheet` is `true` and the overlay window is currently presenting a modal sheet,
+    /// the window remains mounted until the sheet's dismissal transition finishes so the sheet slides down smoothly
+    /// instead of vanishing abruptly.
+    public func hide(waitForPresentedSheet: Bool = false) {
         #if canImport(UIKit)
+        teardownGeneration &+= 1
+        let generation = teardownGeneration
+        pendingTeardownTask?.cancel()
+        pendingTeardownTask = nil
+
+        if waitForPresentedSheet,
+           let window = overlayWindow,
+           let rootVC = window.rootViewController,
+           let presentedVC = rootVC.presentedViewController {
+            isPendingSheetDismissalTeardown = true
+            window.interactiveFrame = .zero
+            window.isUserInteractionEnabled = false
+
+            if let coordinator = presentedVC.transitionCoordinator {
+                coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.teardownGeneration == generation else { return }
+                        self.completePendingHideIfNeeded()
+                    }
+                }
+            }
+
+            pendingTeardownTask = Task { @MainActor [weak self] in
+                for _ in 0..<15 {
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    guard !Task.isCancelled, let self, self.teardownGeneration == generation else { return }
+                    if self.overlayWindow?.rootViewController?.presentedViewController == nil {
+                        self.completePendingHideIfNeeded()
+                        return
+                    }
+                }
+                guard !Task.isCancelled, let self, self.teardownGeneration == generation else { return }
+                self.hide(waitForPresentedSheet: false)
+            }
+            return
+        }
+
+        isPendingSheetDismissalTeardown = false
         overlayWindow?.isHidden = true
         overlayWindow?.rootViewController = nil
         overlayWindow = nil
         boundWindowScene = nil
+        #endif
+    }
+
+    /// Completes deferred overlay window teardown once any presented modal sheet has finished dismissing.
+    public func completePendingHideIfNeeded() {
+        #if canImport(UIKit)
+        guard isPendingSheetDismissalTeardown else { return }
+        if overlayWindow?.rootViewController?.presentedViewController == nil {
+            hide(waitForPresentedSheet: false)
+        }
         #endif
     }
 
@@ -232,7 +302,9 @@ public struct QuestOverlayView: View {
     }
 
     public var body: some View {
-        if let session = questState.activeQuest {
+        if let session = questState.activeQuest,
+           !session.isPresentingResultSheet,
+           !session.isSubmitted {
             VStack(spacing: 0) {
                 if session.isOverlayExpanded {
                     expandedCard(session: session)
@@ -269,6 +341,7 @@ public struct QuestOverlayView: View {
                 x: accumulatedOffset.width + dragOffset.width,
                 y: accumulatedOffset.height + dragOffset.height
             )
+            .transition(.move(edge: .bottom).combined(with: .opacity))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("HollerKitQuestOverlayView")
         }
@@ -337,7 +410,9 @@ public struct QuestOverlayView: View {
             .accessibilityValue("\(session.marks.count)")
 
             Button {
-                questState.presentResultSheet()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                    questState.presentResultSheet()
+                }
             } label: {
                 Text("Done")
                     .font(.caption.weight(.bold))
@@ -538,7 +613,9 @@ public struct QuestOverlayView: View {
                 Spacer()
 
                 Button {
-                    questState.presentResultSheet()
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                        questState.presentResultSheet()
+                    }
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "checkmark.circle.fill")
@@ -575,6 +652,7 @@ public struct QuestOverlayView: View {
 private struct QuestOverlayRootView: View {
     var questState: HollerKitQuestState
     var onFrameChange: (CGRect) -> Void
+    @State private var presentedSessionId: UUID?
 
     var body: some View {
         GeometryReader { proxy in
@@ -591,19 +669,36 @@ private struct QuestOverlayRootView: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 28)
             }
+            .animation(.spring(response: 0.28, dampingFraction: 0.84), value: questState.activeQuest?.isPresentingResultSheet)
+            .animation(.spring(response: 0.28, dampingFraction: 0.84), value: questState.activeQuest?.isSubmitted)
+        }
+        .onAppear {
+            if let activeId = questState.activeQuest?.id {
+                presentedSessionId = activeId
+            }
+        }
+        .onChange(of: questState.activeQuest?.id) { _, newId in
+            if let newId {
+                presentedSessionId = newId
+            }
         }
         .sheet(
             isPresented: Binding(
                 get: { questState.activeQuest?.isPresentingResultSheet == true },
                 set: { newValue in
                     if !newValue {
-                        questState.dismissResultSheet()
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                            questState.dismissResultSheet()
+                        }
                     }
                 }
-            )
+            ),
+            onDismiss: {
+                QuestOverlayWindowManager.shared.completePendingHideIfNeeded()
+            }
         ) {
             QuestResultSheet(questState: questState)
-                .id(questState.activeQuest?.id)
+                .id(presentedSessionId)
         }
     }
 }

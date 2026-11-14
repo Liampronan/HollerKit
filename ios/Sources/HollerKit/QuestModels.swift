@@ -589,6 +589,7 @@ public struct ActiveQuestSession: Equatable, Identifiable, Sendable {
     public var marks: [QuestMarkCapture]
     public var isOverlayExpanded: Bool
     public var isPresentingResultSheet: Bool
+    public var isSubmitted: Bool
 
     public init(
         id: UUID = UUID(),
@@ -597,7 +598,8 @@ public struct ActiveQuestSession: Equatable, Identifiable, Sendable {
         stepsChecked: [Bool]? = nil,
         marks: [QuestMarkCapture] = [],
         isOverlayExpanded: Bool = false,
-        isPresentingResultSheet: Bool = false
+        isPresentingResultSheet: Bool = false,
+        isSubmitted: Bool = false
     ) {
         self.id = id
         self.quest = quest
@@ -606,6 +608,7 @@ public struct ActiveQuestSession: Equatable, Identifiable, Sendable {
         self.marks = marks
         self.isOverlayExpanded = isOverlayExpanded
         self.isPresentingResultSheet = isPresentingResultSheet
+        self.isSubmitted = isSubmitted
     }
 
     public func elapsedSeconds(at date: Date = Date()) -> Double {
