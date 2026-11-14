@@ -306,11 +306,29 @@ private enum OverlayPalette {
 /// Floating quest overlay card and collapsed pill displayed while a quest is active.
 public struct QuestOverlayView: View {
     private let questState: HollerKitQuestState
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var dragOffset: CGSize = .zero
     @State private var accumulatedOffset: CGSize = .zero
     @State private var cardSize: CGSize = .zero
     private var viewportSize: CGSize
     private var onFrameChange: (CGRect) -> Void
+
+    /// Maximum width of the floating quest overlay card and collapsed pill.
+    public static let maxOverlayWidth: CGFloat = 340
+
+    /// Animation curve used when morphing between the collapsed pill and expanded card or updating step/mark state.
+    public static let overlayAnimation: Animation = .snappy(duration: 0.24, extraBounce: 0)
+
+    /// Formats the Mark button title for a given number of captured marks.
+    public static func markButtonTitle(for markCount: Int) -> String {
+        markCount <= 0 ? "Mark" : "Mark (\(markCount))"
+    }
+
+    /// Formats the compact step progress summary for the collapsed pill, or `nil` when the quest has no steps.
+    public static func stepProgressSummary(checkedCount: Int, totalSteps: Int) -> String? {
+        guard totalSteps > 0 else { return nil }
+        return "\(min(max(0, checkedCount), totalSteps))/\(totalSteps)"
+    }
 
     public init(
         questState: HollerKitQuestState = HollerKit.quests,
@@ -352,11 +370,16 @@ public struct QuestOverlayView: View {
             VStack(spacing: 0) {
                 if session.isOverlayExpanded {
                     expandedCard(session: session)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
                 } else {
                     collapsedPill(session: session)
                         .gesture(dragGesture)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
                 }
             }
+            .animation(Self.overlayAnimation, value: session.isOverlayExpanded)
+            .animation(Self.overlayAnimation, value: session.stepsChecked)
+            .animation(Self.overlayAnimation, value: session.marks.count)
             .background(
                 GeometryReader { proxy in
                     Color.clear
@@ -372,6 +395,24 @@ public struct QuestOverlayView: View {
                         }
                         .onChange(of: proxy.frame(in: .global)) { _, newFrame in
                             onFrameChange(newFrame)
+                        }
+                        .onChange(of: session.id) { _, _ in
+                            cardSize = proxy.size
+                            accumulatedOffset = clampOffset(accumulatedOffset, viewportSize: viewportSize, cardSize: proxy.size)
+                            onFrameChange(proxy.frame(in: .global))
+                        }
+                        .onChange(of: session.isOverlayExpanded) { _, _ in
+                            cardSize = proxy.size
+                            accumulatedOffset = clampOffset(accumulatedOffset, viewportSize: viewportSize, cardSize: proxy.size)
+                            onFrameChange(proxy.frame(in: .global))
+                        }
+                        .onChange(of: session.stepsChecked) { _, _ in
+                            cardSize = proxy.size
+                            onFrameChange(proxy.frame(in: .global))
+                        }
+                        .onChange(of: session.marks.count) { _, _ in
+                            cardSize = proxy.size
+                            onFrameChange(proxy.frame(in: .global))
                         }
                         .onDisappear {
                             onFrameChange(.zero)
@@ -409,75 +450,165 @@ public struct QuestOverlayView: View {
         )
     }
 
+    /// Renders a stable-width Mark button label so incrementing the mark count never resizes the button or shifts neighbor controls.
+    private func markButtonLabel(markCount: Int, iconSpacing: CGFloat) -> some View {
+        let visibleTitle = Self.markButtonTitle(for: markCount)
+        let reservationCount = max(99, markCount)
+        let reservationTitle = Self.markButtonTitle(for: reservationCount)
+
+        return HStack(spacing: iconSpacing) {
+            Image(systemName: "camera.viewfinder")
+                .symbolRenderingMode(.monochrome)
+
+            ZStack(alignment: .center) {
+                Text(reservationTitle)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .hidden()
+                    .accessibilityHidden(true)
+
+                Text(visibleTitle)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .contentTransition(.numericText(value: Double(markCount)))
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .fixedSize(horizontal: true, vertical: true)
+    }
+
     /// Renders the compact floating pill for the active quest session.
     private func collapsedPill(session: ActiveQuestSession) -> some View {
-        HStack(spacing: 10) {
-            Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                    questState.setOverlayExpanded(true)
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "flag.checkered")
-                        .symbolRenderingMode(.monochrome)
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(OverlayPalette.accentTeal)
+        let checkedCount = session.stepsChecked.filter { $0 }.count
+        let totalSteps = session.quest.definition.steps.count
+        let usesAccessibilityStack = dynamicTypeSize.isAccessibilitySize
 
-                    Text(session.quest.definition.title)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(OverlayPalette.primaryText)
-                        .lineLimit(1)
-
-                    ElapsedTimerText(startedAt: session.startedAt)
-                }
-                .contentShape(Rectangle())
+        let expandButton = Button {
+            withAnimation(Self.overlayAnimation) {
+                questState.setOverlayExpanded(true)
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("HollerKitQuestExpandButton")
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "flag.checkered")
+                    .symbolRenderingMode(.monochrome)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(OverlayPalette.accentTeal)
 
-            Divider()
-                .frame(height: 18)
+                Text(session.quest.definition.title)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(OverlayPalette.primaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
-            Button {
-                questState.captureMark()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "camera.viewfinder")
-                        .symbolRenderingMode(.monochrome)
-                    Text(session.marks.isEmpty ? "Mark" : "Mark (\(session.marks.count))")
+                Spacer(minLength: 0)
+
+                if let progressSummary = Self.stepProgressSummary(checkedCount: checkedCount, totalSteps: totalSteps) {
+                    ZStack(alignment: .trailing) {
+                        Text("\(totalSteps)/\(totalSteps)")
+                            .font(.caption2.weight(.semibold).monospacedDigit())
+                            .lineLimit(1)
+                            .hidden()
+                            .accessibilityHidden(true)
+
+                        Text(progressSummary)
+                            .font(.caption2.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(checkedCount == totalSteps ? OverlayPalette.checkedIcon : OverlayPalette.secondaryText)
+                            .lineLimit(1)
+                            .contentTransition(.numericText(value: Double(checkedCount)))
+                    }
+                    .fixedSize(horizontal: true, vertical: true)
+                    .accessibilityIdentifier("HollerKitQuestStepProgressText")
                 }
-                .font(.caption.weight(.semibold))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-            .accessibilityIdentifier("HollerKitQuestMarkButton")
-            .accessibilityValue("\(session.marks.count)")
 
-            Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                    questState.presentResultSheet()
-                }
-            } label: {
-                Text("Done")
-                    .font(.caption.weight(.bold))
+                ElapsedTimerText(startedAt: session.startedAt)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.mini)
-            .accessibilityIdentifier("HollerKitQuestDoneButton")
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("HollerKitQuestExpandButton")
+
+        let markButton = Button {
+            withAnimation(Self.overlayAnimation) {
+                _ = questState.captureMark()
+            }
+        } label: {
+            markButtonLabel(markCount: session.marks.count, iconSpacing: 4)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .fixedSize(horizontal: true, vertical: true)
+        .accessibilityIdentifier("HollerKitQuestMarkButton")
+        .accessibilityValue("\(session.marks.count)")
+
+        let doneButton = Button {
+            withAnimation(Self.overlayAnimation) {
+                questState.presentResultSheet()
+            }
+        } label: {
+            Text("Done")
+                .font(.caption.weight(.bold))
+                .lineLimit(1)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.mini)
+        .fixedSize(horizontal: true, vertical: true)
+        .accessibilityIdentifier("HollerKitQuestDoneButton")
+
+        return Group {
+            if usesAccessibilityStack {
+                VStack(alignment: .leading, spacing: 8) {
+                    expandButton
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            markButton
+                            Spacer(minLength: 0)
+                            doneButton
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            markButton
+                            doneButton
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: 10) {
+                    expandButton
+
+                    Divider()
+                        .frame(height: 18)
+
+                    markButton
+                    doneButton
+                }
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+        .frame(maxWidth: Self.maxOverlayWidth)
+        .fixedSize(horizontal: false, vertical: true)
         .background {
             ZStack {
-                Capsule()
-                    .fill(.ultraThinMaterial)
-                Capsule()
-                    .fill(OverlayPalette.surfaceFill.opacity(0.94))
+                if usesAccessibilityStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(OverlayPalette.surfaceFill.opacity(0.94))
+                } else {
+                    Capsule()
+                        .fill(.ultraThinMaterial)
+                    Capsule()
+                        .fill(OverlayPalette.surfaceFill.opacity(0.94))
+                }
             }
         }
         .overlay {
-            Capsule()
-                .stroke(OverlayPalette.strokeBorder.opacity(0.45), lineWidth: 1)
+            if usesAccessibilityStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(OverlayPalette.strokeBorder.opacity(0.45), lineWidth: 1)
+            } else {
+                Capsule()
+                    .stroke(OverlayPalette.strokeBorder.opacity(0.45), lineWidth: 1)
+            }
         }
         .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
     }
@@ -494,17 +625,21 @@ public struct QuestOverlayView: View {
                     Text(session.quest.definition.area.uppercased())
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(OverlayPalette.accentTeal)
+                        .lineLimit(1)
                     Text(session.quest.definition.title)
                         .font(.subheadline.weight(.bold))
                         .foregroundStyle(OverlayPalette.primaryText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer()
 
                 ElapsedTimerText(startedAt: session.startedAt)
+                    .fixedSize(horizontal: true, vertical: false)
 
                 Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                    withAnimation(Self.overlayAnimation) {
                         questState.setOverlayExpanded(false)
                     }
                 } label: {
@@ -551,9 +686,22 @@ public struct QuestOverlayView: View {
                         let checkedCount = session.stepsChecked.filter { $0 }.count
                         let totalSteps = session.quest.definition.steps.count
                         HStack {
-                            Text("Steps (\(checkedCount)/\(totalSteps))")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(OverlayPalette.secondaryText)
+                            ZStack(alignment: .leading) {
+                                Text("Steps (\(totalSteps)/\(totalSteps))")
+                                    .font(.caption.weight(.semibold).monospacedDigit())
+                                    .lineLimit(1)
+                                    .hidden()
+                                    .accessibilityHidden(true)
+
+                                Text("Steps (\(checkedCount)/\(totalSteps))")
+                                    .font(.caption.weight(.semibold).monospacedDigit())
+                                    .foregroundStyle(OverlayPalette.secondaryText)
+                                    .lineLimit(1)
+                                    .contentTransition(.numericText(value: Double(checkedCount)))
+                            }
+                            .fixedSize(horizontal: true, vertical: false)
+                            .accessibilityIdentifier("HollerKitQuestStepsHeader")
+
                             Spacer()
                             if totalSteps > 0 {
                                 Text("Tap to check off")
@@ -565,7 +713,9 @@ public struct QuestOverlayView: View {
                         ForEach(Array(session.quest.definition.steps.enumerated()), id: \.offset) { index, step in
                             let isChecked = session.stepsChecked.indices.contains(index) && session.stepsChecked[index]
                             Button {
-                                questState.toggleStep(at: index)
+                                withAnimation(Self.overlayAnimation) {
+                                    questState.toggleStep(at: index)
+                                }
                             } label: {
                                 HStack(alignment: .top, spacing: 8) {
                                     Group {
@@ -626,57 +776,12 @@ public struct QuestOverlayView: View {
             }
             .frame(maxHeight: maxInstructionsHeight)
 
-            HStack(spacing: 8) {
-                Button {
-                    questState.captureMark()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "camera.viewfinder")
-                            .symbolRenderingMode(.monochrome)
-                        Text(session.marks.isEmpty ? "Mark" : "Mark (\(session.marks.count))")
-                    }
-                    .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityIdentifier("HollerKitQuestMarkButton")
-                .accessibilityValue("\(session.marks.count)")
-
-                Button(role: .destructive) {
-                    Task {
-                        await questState.abandonActiveQuest()
-                    }
-                } label: {
-                    Text("Abandon")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityIdentifier("HollerKitQuestAbandonButton")
-
-                Spacer()
-
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                        questState.presentResultSheet()
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .symbolRenderingMode(.monochrome)
-                        Text("Done")
-                    }
-                    .font(.caption.weight(.bold))
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .accessibilityIdentifier("HollerKitQuestDoneButton")
-            }
-            .contentShape(Rectangle())
-            .gesture(dragGesture)
+            expandedActionRow(session: session)
+                .contentShape(Rectangle())
+                .gesture(dragGesture)
         }
         .padding(14)
-        .frame(maxWidth: 340)
+        .frame(maxWidth: Self.maxOverlayWidth)
         .background {
             ZStack {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -690,6 +795,89 @@ public struct QuestOverlayView: View {
                 .stroke(OverlayPalette.strokeBorder.opacity(0.45), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.2), radius: 14, y: 6)
+    }
+
+    @ViewBuilder
+    private func expandedActionRow(session: ActiveQuestSession) -> some View {
+        let markButton = Button {
+            withAnimation(Self.overlayAnimation) {
+                _ = questState.captureMark()
+            }
+        } label: {
+            markButtonLabel(markCount: session.marks.count, iconSpacing: 5)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityIdentifier("HollerKitQuestMarkButton")
+        .accessibilityValue("\(session.marks.count)")
+
+        let abandonButton = Button(role: .destructive) {
+            Task {
+                await questState.abandonActiveQuest()
+            }
+        } label: {
+            Text("Abandon")
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityIdentifier("HollerKitQuestAbandonButton")
+
+        let doneButton = Button {
+            withAnimation(Self.overlayAnimation) {
+                questState.presentResultSheet()
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark.circle.fill")
+                    .symbolRenderingMode(.monochrome)
+                Text("Done")
+                    .lineLimit(1)
+            }
+            .font(.caption.weight(.bold))
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityIdentifier("HollerKitQuestDoneButton")
+
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 8) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        markButton
+                        abandonButton
+                        Spacer(minLength: 0)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        markButton
+                        abandonButton
+                    }
+                }
+                doneButton
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    markButton
+                    abandonButton
+                    Spacer(minLength: 0)
+                    doneButton
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        markButton
+                        abandonButton
+                        Spacer(minLength: 0)
+                    }
+                    doneButton
+                }
+            }
+        }
     }
 }
 
@@ -755,9 +943,24 @@ private struct ElapsedTimerText: View {
             let seconds = max(0, Int(context.date.timeIntervalSince(startedAt)))
             let minutes = seconds / 60
             let remainder = seconds % 60
-            Text(String(format: "%d:%02d", minutes, remainder))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(OverlayPalette.secondaryText)
+            let formatted = String(format: "%d:%02d", minutes, remainder)
+            let reservation = minutes >= 100 ? String(format: "%d:00", minutes) : "99:59"
+
+            ZStack(alignment: .trailing) {
+                Text(reservation)
+                    .font(.caption2.monospacedDigit())
+                    .lineLimit(1)
+                    .hidden()
+                    .accessibilityHidden(true)
+
+                Text(formatted)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(OverlayPalette.secondaryText)
+                    .lineLimit(1)
+                    .contentTransition(.numericText(value: Double(seconds)))
+            }
+            .fixedSize(horizontal: true, vertical: true)
         }
+        .fixedSize(horizontal: true, vertical: true)
     }
 }
