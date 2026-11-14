@@ -574,6 +574,11 @@ public final class HollerKitQuestState {
         self.optimisticRuns = []
         self.localStatusOverrides = [:]
         self.localLatestRunOverrides = [:]
+        if self.activeQuest != nil {
+            self.activeQuest = nil
+            HollerKit.endQuestBreadcrumbs()
+            QuestOverlayWindowManager.shared.hide()
+        }
         guard let questsConfiguration else {
             reset()
             return
