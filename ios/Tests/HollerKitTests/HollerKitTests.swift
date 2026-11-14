@@ -5234,7 +5234,7 @@ final class HollerKitTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(80))
         XCTAssertNotEqual(reportedOverlayFrame, .zero, "Floating quest overlay must reappear if result sheet is dismissed without submitting")
 
-        // 2. Present result sheet, attach an image & note, and submit with auto-dismiss delay
+        // 2. Present result sheet on the manager's overlay window, attach an image & note, and submit with auto-dismiss delay
         HollerKit.quests.presentResultSheet()
         HollerKit.quests.toggleStep(at: 0)
         let draft = QuestResultDraft(
@@ -5254,6 +5254,10 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(sheet.displayedSession?.id, firstSessionId)
         XCTAssertEqual(sheet.displayedComment, "Smooth dismissal verified")
         XCTAssertEqual(sheet.displayedImages.count, 1)
+
+        XCTAssertNotNil(QuestOverlayWindowManager.shared.currentOverlayWindow?.rootViewController)
+        QuestOverlayWindowManager.shared.simulatedModalSheetPresentedForTesting = true
+        XCTAssertTrue(QuestOverlayWindowManager.shared.hasMountedOverlayWindow)
 
         let autoDismissFiredBox = LockedBox<Bool>(false)
         await draft.submit(
@@ -5279,7 +5283,7 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(sheet.displayedComment, "Smooth dismissal verified")
         XCTAssertEqual(sheet.displayedImages.count, 1)
 
-        // Wait for auto-dismiss callback to complete session teardown
+        // Wait for auto-dismiss callback to trigger session teardown while the sheet VC is still presented
         for _ in 0..<30 {
             if autoDismissFiredBox.withLock({ $0 }) { break }
             try await Task.sleep(nanoseconds: 10_000_000)
@@ -5287,12 +5291,24 @@ final class HollerKitTests: XCTestCase {
         XCTAssertTrue(autoDismissFiredBox.withLock { $0 }, "onAutoDismiss must fire after confirmation delay")
         XCTAssertNil(HollerKit.quests.activeQuest, "Active quest session must be cleared when confirmation completes")
 
+        // While the presented sheet is still animating out, the manager window stays mounted awaiting dismissal completion
+        QuestOverlayWindowManager.shared.completePendingHideIfNeeded()
+        XCTAssertTrue(QuestOverlayWindowManager.shared.hasMountedOverlayWindow)
+        XCTAssertTrue(QuestOverlayWindowManager.shared.isAwaitingSheetDismissalTeardown)
+        XCTAssertFalse(QuestOverlayWindowManager.shared.isOverlayVisible)
+
         // Even after activeQuest is nil (while the sheet is animating out), QuestResultSheet preserves its snapshot
         XCTAssertEqual(sheet.displayedSession?.id, firstSessionId)
         XCTAssertEqual(sheet.displayedComment, "Smooth dismissal verified")
         XCTAssertEqual(sheet.displayedImages.count, 1)
 
-        // 3. Verify manual swipe-dismiss during post-submit confirmation also completes the session immediately
+        // Finish dismissing the sheet and verify the manager tears down the overlay window via completePendingHideIfNeeded()
+        QuestOverlayWindowManager.shared.simulatedModalSheetPresentedForTesting = false
+        QuestOverlayWindowManager.shared.completePendingHideIfNeeded()
+        XCTAssertFalse(QuestOverlayWindowManager.shared.hasMountedOverlayWindow)
+        XCTAssertFalse(QuestOverlayWindowManager.shared.isAwaitingSheetDismissalTeardown)
+
+        // 3. Verify manual swipe-dismiss during post-submit confirmation also coordinates window teardown after sheet dismissal
         HollerKit.quests.startQuest(item)
         let secondSessionId = try XCTUnwrap(HollerKit.quests.activeQuest?.id)
         XCTAssertNotEqual(firstSessionId, secondSessionId)
@@ -5304,6 +5320,9 @@ final class HollerKitTests: XCTestCase {
             tempDirectoryURL: tempDir.appendingPathComponent("draft-2", isDirectory: true)
         )
         swipeDraft.autoDismissDelaySeconds = 5.0
+        XCTAssertNotNil(QuestOverlayWindowManager.shared.currentOverlayWindow?.rootViewController)
+        QuestOverlayWindowManager.shared.simulatedModalSheetPresentedForTesting = true
+
         await swipeDraft.submit(
             questState: HollerKit.quests,
             clearActiveSessionImmediately: false
@@ -5313,12 +5332,24 @@ final class HollerKitTests: XCTestCase {
         XCTAssertEqual(HollerKit.quests.activeQuest?.id, secondSessionId)
         XCTAssertEqual(HollerKit.quests.activeQuest?.isSubmitted, true)
 
-        // Simulate user swiping down the result sheet while confirmation is displayed
+        // Simulate user initiating an interactive swipe-down dismissal after submission:
+        // activeQuest clears immediately, but the overlay window stays mounted while the sheet finishes sliding down
         HollerKit.quests.dismissResultSheet()
         XCTAssertNil(
             HollerKit.quests.activeQuest,
             "Swiping down the result sheet after submission must complete and clear the active session"
         )
+        XCTAssertTrue(QuestOverlayWindowManager.shared.hasMountedOverlayWindow)
+        XCTAssertTrue(QuestOverlayWindowManager.shared.isAwaitingSheetDismissalTeardown)
+
+        // Complete the interactive dismissal and verify the background polling task tears down the overlay window
+        QuestOverlayWindowManager.shared.simulatedModalSheetPresentedForTesting = false
+        for _ in 0..<20 {
+            if !QuestOverlayWindowManager.shared.hasMountedOverlayWindow { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(QuestOverlayWindowManager.shared.hasMountedOverlayWindow)
+        XCTAssertFalse(QuestOverlayWindowManager.shared.isAwaitingSheetDismissalTeardown)
     }
     #endif
 }

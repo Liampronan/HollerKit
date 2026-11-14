@@ -14,6 +14,19 @@ public final class QuestOverlayWindowManager {
     private var isPendingSheetDismissalTeardown = false
     private var teardownGeneration: UInt64 = 0
     private var pendingTeardownTask: Task<Void, Never>?
+    var simulatedModalSheetPresentedForTesting: Bool?
+
+    private var hasPresentedModalSheet: Bool {
+        if let simulatedModalSheetPresentedForTesting {
+            return simulatedModalSheetPresentedForTesting
+        }
+        guard let window = overlayWindow,
+              window.windowScene != nil,
+              let rootVC = window.rootViewController else {
+            return false
+        }
+        return rootVC.presentedViewController != nil
+    }
     #endif
 
     private init() {}
@@ -35,9 +48,22 @@ public final class QuestOverlayWindowManager {
         #endif
     }
 
+    /// Returns `true` when an underlying overlay `UIWindow` instance is currently mounted in memory.
+    public var hasMountedOverlayWindow: Bool {
+        #if canImport(UIKit)
+        return overlayWindow != nil
+        #else
+        return false
+        #endif
+    }
+
     #if canImport(UIKit)
+    var currentOverlayWindow: UIWindow? {
+        overlayWindow
+    }
+
     public func show(questState: HollerKitQuestState, in windowScene: UIWindowScene? = nil) {
-        guard let targetScene = windowScene ?? activeWindowScene() else { return }
+        let targetScene = windowScene ?? activeWindowScene()
         teardownGeneration &+= 1
         pendingTeardownTask?.cancel()
         pendingTeardownTask = nil
@@ -45,11 +71,19 @@ public final class QuestOverlayWindowManager {
         boundWindowScene = targetScene
 
         let window: PassthroughOverlayWindow
-        if let existing = overlayWindow, existing.windowScene === targetScene {
+        if let targetScene {
+            if let existing = overlayWindow, existing.windowScene === targetScene {
+                window = existing
+            } else {
+                overlayWindow?.isHidden = true
+                window = PassthroughOverlayWindow(windowScene: targetScene)
+                overlayWindow = window
+            }
+        } else if let existing = overlayWindow, existing.windowScene == nil {
             window = existing
         } else {
             overlayWindow?.isHidden = true
-            window = PassthroughOverlayWindow(windowScene: targetScene)
+            window = PassthroughOverlayWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
             overlayWindow = window
         }
 
@@ -83,13 +117,12 @@ public final class QuestOverlayWindowManager {
 
         if waitForPresentedSheet,
            let window = overlayWindow,
-           let rootVC = window.rootViewController,
-           let presentedVC = rootVC.presentedViewController {
+           hasPresentedModalSheet {
             isPendingSheetDismissalTeardown = true
             window.interactiveFrame = .zero
             window.isUserInteractionEnabled = false
 
-            if let coordinator = presentedVC.transitionCoordinator {
+            if let coordinator = window.rootViewController?.presentedViewController?.transitionCoordinator {
                 coordinator.animate(alongsideTransition: nil) { [weak self] _ in
                     Task { @MainActor [weak self] in
                         guard let self, self.teardownGeneration == generation else { return }
@@ -99,20 +132,24 @@ public final class QuestOverlayWindowManager {
             }
 
             pendingTeardownTask = Task { @MainActor [weak self] in
-                for _ in 0..<15 {
+                while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 40_000_000)
-                    guard !Task.isCancelled, let self, self.teardownGeneration == generation else { return }
-                    if self.overlayWindow?.rootViewController?.presentedViewController == nil {
+                    guard !Task.isCancelled,
+                          let self,
+                          self.teardownGeneration == generation,
+                          self.isPendingSheetDismissalTeardown else {
+                        return
+                    }
+                    if !self.hasPresentedModalSheet {
                         self.completePendingHideIfNeeded()
                         return
                     }
                 }
-                guard !Task.isCancelled, let self, self.teardownGeneration == generation else { return }
-                self.hide(waitForPresentedSheet: false)
             }
             return
         }
 
+        simulatedModalSheetPresentedForTesting = nil
         isPendingSheetDismissalTeardown = false
         overlayWindow?.isHidden = true
         overlayWindow?.rootViewController = nil
@@ -125,7 +162,7 @@ public final class QuestOverlayWindowManager {
     public func completePendingHideIfNeeded() {
         #if canImport(UIKit)
         guard isPendingSheetDismissalTeardown else { return }
-        if overlayWindow?.rootViewController?.presentedViewController == nil {
+        if !hasPresentedModalSheet {
             hide(waitForPresentedSheet: false)
         }
         #endif
@@ -207,6 +244,13 @@ final class PassthroughOverlayWindow: UIWindow {
 
     override init(windowScene: UIWindowScene) {
         super.init(windowScene: windowScene)
+        windowLevel = .statusBar + 1
+        backgroundColor = .clear
+        isOpaque = false
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
         windowLevel = .statusBar + 1
         backgroundColor = .clear
         isOpaque = false
