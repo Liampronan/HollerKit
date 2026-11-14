@@ -11,10 +11,15 @@ final class HollerKitDemoUITests: XCTestCase {
         app.launchArguments = ["--skip-auto-report"]
         app.launch()
 
-        // 1. Open the Quest Board and start the checkout quest
+        // 1. Open the Quest Board, expand the checkout quest card, and start it
         let questsButton = app.buttons["DemoQuestsButton"]
         XCTAssertTrue(questsButton.waitForExistence(timeout: 5))
         questsButton.tap()
+
+        let disclosureButton = app.buttons["HollerKitQuestDisclosure_checkout-promo-math"]
+        if disclosureButton.waitForExistence(timeout: 5), !app.buttons["HollerKitStartQuestButton_checkout-promo-math"].exists {
+            disclosureButton.tap()
+        }
 
         let startQuestButton = app.buttons["HollerKitStartQuestButton_checkout-promo-math"]
         if !startQuestButton.waitForExistence(timeout: 5) {
