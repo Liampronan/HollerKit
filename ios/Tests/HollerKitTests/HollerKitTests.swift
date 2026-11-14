@@ -5545,10 +5545,11 @@ final class HollerKitTests: XCTestCase {
         let lastNeedsAttentionAttrs = try XCTUnwrap(
             collectionView.layoutAttributesForItem(at: IndexPath(item: 1, section: 2))
         )
+        let visibleListRect = collectionView.bounds.inset(by: collectionView.adjustedContentInset)
         XCTAssertLessThan(
             lastNeedsAttentionAttrs.frame.maxY,
-            viewportSize.height,
-            "All 6 collapsed quest cards should scan cleanly within a single screen (\(viewportSize.height)pt), got maxY=\(lastNeedsAttentionAttrs.frame.maxY)pt"
+            visibleListRect.maxY,
+            "All 6 collapsed quest cards should fit in the visible list region (maxY < \(visibleListRect.maxY)pt), got maxY=\(lastNeedsAttentionAttrs.frame.maxY)pt"
         )
 
         // Verify no Start Quest button capsule is rendered while all cards are collapsed
