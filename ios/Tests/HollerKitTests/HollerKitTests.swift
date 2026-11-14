@@ -2628,25 +2628,34 @@ final class HollerKitTests: XCTestCase {
         )
 
         let pendingCard = QuestCardView(item: pendingItem, isActive: false, onStart: {})
+        XCTAssertFalse(pendingCard.isExpanded)
+        XCTAssertEqual(pendingCard.disclosureChevronSystemImage, "chevron.right")
+        XCTAssertFalse(pendingCard.showsCollapsedStatusBadge)
         XCTAssertEqual(pendingCard.buttonTitle, "Start Quest")
         XCTAssertEqual(pendingCard.buttonSystemImage, "play.fill")
 
         let passedCard = QuestCardView(item: passedItem, isActive: false, onStart: {})
+        XCTAssertFalse(passedCard.isExpanded)
+        XCTAssertTrue(passedCard.showsCollapsedStatusBadge)
         XCTAssertEqual(passedCard.buttonTitle, "Re-run Quest")
         XCTAssertEqual(passedCard.buttonSystemImage, "play.fill")
 
         let failedCard = QuestCardView(item: failedItem, isActive: false, onStart: {})
+        XCTAssertFalse(failedCard.isExpanded)
+        XCTAssertTrue(failedCard.showsCollapsedStatusBadge)
         XCTAssertEqual(failedCard.buttonTitle, "Start Quest")
         XCTAssertEqual(failedCard.buttonSystemImage, "play.fill")
 
         let activeCard = QuestCardView(item: pendingItem, isActive: true, onStart: {})
+        XCTAssertFalse(activeCard.isExpanded)
+        XCTAssertTrue(activeCard.showsCollapsedStatusBadge)
         XCTAssertEqual(activeCard.buttonTitle, "Running...")
         XCTAssertEqual(activeCard.buttonSystemImage, "play.circle.fill")
 
-        // Render QuestCardView inside a List (as QuestBoardView does) and inspect the rendered pixels
+        // Render an expanded QuestCardView inside a List (as QuestBoardView does) and inspect the rendered pixels
         // to ensure List row Label icon-column alignment does not distort the Start Quest button or route row.
         let listHostedView = List {
-            QuestCardView(item: pendingItem, isActive: false, onStart: {})
+            QuestCardView(item: pendingItem, isActive: false, isExpanded: true, onStart: {})
         }
         .listStyle(.insetGrouped)
         .tint(.blue)
@@ -5350,6 +5359,239 @@ final class HollerKitTests: XCTestCase {
         }
         XCTAssertFalse(QuestOverlayWindowManager.shared.hasMountedOverlayWindow)
         XCTAssertFalse(QuestOverlayWindowManager.shared.isAwaitingSheetDismissalTeardown)
+    }
+
+    @MainActor
+    func testQuestBoardViewAndCardViewDefaultCollapsedDiscloseDetailsAndSpacing() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitQuestBoardCollapsibleTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { nil },
+            isEnabled: { false },
+            outboxDirectoryURL: tempDir.appendingPathComponent("Outbox", isDirectory: true)
+        ))
+
+        let definitions: [QuestDefinition] = (1...6).map { index in
+            QuestDefinition(
+                id: "quest-\(index)",
+                title: "Quest \(index): Verify workflow step \(index)",
+                area: "area-\(index)",
+                setup: ["Setup prerequisite \(index)"],
+                steps: ["Perform step 1 for quest \(index)", "Perform step 2 for quest \(index)"],
+                expect: ["Expected outcome for quest \(index)"],
+                needs: ["device"],
+                start: "trashapp://quest/\(index)"
+            )
+        }
+
+        let state = HollerKitQuestState()
+        state.configure(
+            questsConfiguration: .definitions(definitions),
+            build: "101",
+            cacheDirectoryURL: tempDir
+        )
+
+        let runDate = ISO8601DateFormatter().date(from: "2026-11-14T12:00:00Z")!
+        state.recordLocalResult(
+            .unsure,
+            forQuestId: "quest-5",
+            build: "101",
+            comment: "Slight jitter on scroll",
+            endedAt: runDate
+        )
+        state.recordLocalResult(
+            .fail,
+            forQuestId: "quest-6",
+            build: "101",
+            comment: "Button failed to open sheet",
+            endedAt: runDate
+        )
+
+        // 1. Verify status grouping from #30 remains intact with 6 pending quests (4 untried + 2 needs attention)
+        XCTAssertEqual(state.untriedQuests.map(\.id), ["quest-1", "quest-2", "quest-3", "quest-4"])
+        XCTAssertEqual(state.needsAttentionQuests.map(\.id), ["quest-5", "quest-6"])
+        XCTAssertEqual(
+            state.pendingQuests.map(\.id),
+            ["quest-1", "quest-2", "quest-3", "quest-4", "quest-5", "quest-6"]
+        )
+        XCTAssertGreaterThanOrEqual(QuestBoardView.cardRowSpacing, 8)
+        XCTAssertGreaterThanOrEqual(QuestBoardView.cardRowVerticalInset, 8)
+
+        // 2. Verify QuestCardView binding-driven disclosure state and chevron indicator
+        var isDisclosed = false
+        let binding = Binding<Bool>(
+            get: { isDisclosed },
+            set: { isDisclosed = $0 }
+        )
+        let firstItem = try XCTUnwrap(state.untriedQuests.first)
+        let collapsedBoundCard = QuestCardView(item: firstItem, isExpanded: binding, onStart: {})
+        XCTAssertFalse(collapsedBoundCard.isExpanded)
+        XCTAssertEqual(collapsedBoundCard.disclosureChevronSystemImage, "chevron.right")
+
+        binding.wrappedValue = true
+        let expandedBoundCard = QuestCardView(item: firstItem, isExpanded: binding, onStart: {})
+        XCTAssertTrue(expandedBoundCard.isExpanded)
+        XCTAssertEqual(expandedBoundCard.disclosureChevronSystemImage, "chevron.down")
+
+        // 3. Render QuestBoardView with 6 quests in a standard iPhone viewport (collapsed by default)
+        let viewportSize = CGSize(width: 390, height: 844)
+        let window = UIWindow(frame: CGRect(origin: .zero, size: viewportSize))
+        window.overrideUserInterfaceStyle = .light
+        defer { window.isHidden = true }
+
+        let collapsedBoard = QuestBoardView(questState: state)
+            .tint(.blue)
+            .environment(\.colorScheme, .light)
+        let controller = UIHostingController(rootView: collapsedBoard)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.view.frame = window.bounds
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        controller.view.layoutIfNeeded()
+
+        func findCollectionView(in root: UIView) -> UICollectionView? {
+            if let cv = root as? UICollectionView {
+                return cv
+            }
+            for subview in root.subviews {
+                if let found = findCollectionView(in: subview) {
+                    return found
+                }
+            }
+            return nil
+        }
+
+        func hasBlueStartButtonPixels(in view: UIView) -> Bool {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1.0
+            let image = UIGraphicsImageRenderer(size: view.bounds.size, format: format).image { ctx in
+                view.layer.render(in: ctx.cgContext)
+            }
+            guard let cgImage = image.cgImage else { return false }
+            let width = cgImage.width
+            let height = cgImage.height
+            let bytesPerRow = width * 4
+            var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+            guard let context = CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+            ) else {
+                return false
+            }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+            var bluePixelCount = 0
+            // Scan the right half below the top navigation bar / segmented control (y > 160)
+            let startY = min(height, 160)
+            for y in startY..<height {
+                for x in (width / 2)..<width {
+                    let offset = y * bytesPerRow + x * 4
+                    let r = Int(pixels[offset])
+                    let g = Int(pixels[offset + 1])
+                    let b = Int(pixels[offset + 2])
+                    if b > 180 && r < 80 && (b - r) > 120 && g > 80 {
+                        bluePixelCount += 1
+                    }
+                }
+            }
+            // The prominent Start Quest capsule button spans > 80x28pt (> 1,500 blue pixels at 1x scale).
+            return bluePixelCount > 600
+        }
+
+        let collectionView = try XCTUnwrap(
+            findCollectionView(in: controller.view),
+            "Expected UICollectionView backing SwiftUI List in QuestBoardView"
+        )
+        collectionView.layoutIfNeeded()
+
+        // Section 0 is the segmented filter Picker; Section 1 is "Untried (4)"; Section 2 is "Needs Attention (2)"
+        XCTAssertGreaterThanOrEqual(collectionView.numberOfSections, 3)
+        XCTAssertEqual(collectionView.numberOfItems(inSection: 1), 4)
+        XCTAssertEqual(collectionView.numberOfItems(inSection: 2), 2)
+
+        var untriedCellFrames: [CGRect] = []
+        for itemIndex in 0..<4 {
+            let indexPath = IndexPath(item: itemIndex, section: 1)
+            let attrs = try XCTUnwrap(collectionView.layoutAttributesForItem(at: indexPath))
+            untriedCellFrames.append(attrs.frame)
+            XCTAssertLessThan(
+                attrs.frame.height,
+                80,
+                "Collapsed quest card row \(itemIndex) should render as a compact title row (< 80pt), got \(attrs.frame.height)pt"
+            )
+        }
+
+        // Verify vertical spacing between consecutive quest cards in the Untried section
+        for idx in 1..<untriedCellFrames.count {
+            let verticalGap = untriedCellFrames[idx].minY - untriedCellFrames[idx - 1].maxY
+            XCTAssertGreaterThanOrEqual(
+                verticalGap,
+                QuestBoardView.cardRowSpacing - 1.0,
+                "Expected at least \(QuestBoardView.cardRowSpacing)pt vertical spacing between quest cards, got \(verticalGap)pt"
+            )
+        }
+
+        // Verify all 6 collapsed quest cards fit within the single 844pt screen height without scrolling
+        let lastNeedsAttentionAttrs = try XCTUnwrap(
+            collectionView.layoutAttributesForItem(at: IndexPath(item: 1, section: 2))
+        )
+        let visibleListRect = collectionView.bounds.inset(by: collectionView.adjustedContentInset)
+        XCTAssertLessThan(
+            lastNeedsAttentionAttrs.frame.maxY,
+            visibleListRect.maxY,
+            "All 6 collapsed quest cards should fit in the visible list region (maxY < \(visibleListRect.maxY)pt), got maxY=\(lastNeedsAttentionAttrs.frame.maxY)pt"
+        )
+
+        // Verify no Start Quest button capsule is rendered while all cards are collapsed
+        XCTAssertFalse(
+            hasBlueStartButtonPixels(in: controller.view),
+            "Collapsed quest cards must not render the Start Quest button capsule until disclosed"
+        )
+
+        // 4. Disclose quest-1 and verify its row expands to show details and the Start Quest button
+        let expandedBoard = QuestBoardView(
+            questState: state,
+            initiallyExpandedQuestIds: ["quest-1"]
+        )
+        .tint(.blue)
+        .environment(\.colorScheme, .light)
+        controller.rootView = expandedBoard
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        controller.view.layoutIfNeeded()
+        collectionView.layoutIfNeeded()
+
+        let expandedFirstAttrs = try XCTUnwrap(
+            collectionView.layoutAttributesForItem(at: IndexPath(item: 0, section: 1))
+        )
+        let stillCollapsedSecondAttrs = try XCTUnwrap(
+            collectionView.layoutAttributesForItem(at: IndexPath(item: 1, section: 1))
+        )
+        XCTAssertGreaterThan(
+            expandedFirstAttrs.frame.height,
+            untriedCellFrames[0].height + 120,
+            "Disclosing quest-1 must expand its card height to reveal setup, steps, expectations, needs, and Start button"
+        )
+        XCTAssertLessThan(
+            stillCollapsedSecondAttrs.frame.height,
+            80,
+            "Other quest cards must remain collapsed as compact title rows"
+        )
+        XCTAssertTrue(
+            hasBlueStartButtonPixels(in: controller.view),
+            "Disclosing quest-1 must render the prominent blue Start Quest button capsule"
+        )
     }
     #endif
 }
