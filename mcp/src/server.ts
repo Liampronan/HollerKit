@@ -3,10 +3,12 @@ import type { Readable, Writable } from 'node:stream'
 import {
   createHollerKitMcpClient,
   HollerKitMcpError,
+  resolveHollerKitMcpConfig,
   type HollerKitMcpClient,
 } from './client.js'
 import { HOLLERKIT_MCP_TOOLS } from './tools.js'
 import type {
+  FeedbackAttachmentView,
   FeedbackGetInput,
   FeedbackInboxInput,
   FeedbackTriageInput,
@@ -16,6 +18,8 @@ import type {
   JsonRpcId,
   JsonRpcResponse,
   McpCallToolResult,
+  McpContentBlock,
+  McpImageContent,
   McpToolDefinition,
   QuestsPendingInput,
   QuestsRetirableInput,
@@ -24,12 +28,14 @@ import type {
 
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05'
 const DEFAULT_MAX_PENDING_REQUESTS = 64
+const DEFAULT_MAX_INLINE_IMAGES = 4
 export const HOLLERKIT_MCP_VERSION = '1.0.0-beta.4'
 const SUPPORTED_MCP_PROTOCOL_VERSIONS = new Set([
   '2024-11-05',
   '2025-03-26',
   '2025-06-18',
 ])
+const IMAGE_ATTACHMENT_KINDS = new Set(['image', 'keyframe', 'mark'])
 
 export interface HollerKitMcpServer {
   readonly tools: readonly McpToolDefinition[]
@@ -89,7 +95,7 @@ export function createHollerKitMcpServer(
   }
 
   /**
-   * Executes one of the 5 HollerKit MCP tools by name and formats the response as an MCP CallToolResult.
+   * Executes one of the 6 HollerKit MCP tools by name and formats the response as an MCP CallToolResult.
    */
   async function callTool(
     name: string,
@@ -117,13 +123,32 @@ export function createHollerKitMcpServer(
         ? result
         : ({ ok: true, data: result } as Record<string, unknown>)
 
+      const contentBlocks: McpContentBlock[] = [
+        {
+          type: 'text',
+          text: JSON.stringify(structured, null, 2),
+        },
+      ]
+
+      if (
+        toolDef.name === 'feedback_get' &&
+        resolvedArgs.includeImages === true &&
+        Array.isArray(structured.attachments)
+      ) {
+        const maxImages =
+          typeof resolvedArgs.maxImages === 'number' && Number.isInteger(resolvedArgs.maxImages)
+            ? resolvedArgs.maxImages
+            : DEFAULT_MAX_INLINE_IMAGES
+        const imageBlocks = await fetchFeedbackImageBlocks(
+          structured.attachments as FeedbackAttachmentView[],
+          maxImages,
+          config,
+        )
+        contentBlocks.push(...imageBlocks)
+      }
+
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(structured, null, 2),
-          },
-        ],
+        content: contentBlocks,
         structuredContent: structured,
         isError: false,
       }
@@ -481,6 +506,128 @@ export function createHollerKitMcpServer(
     handleJsonRpcLine,
     connectStdio,
   }
+}
+
+/**
+ * Fetches up to `maxImages` visual attachments (`image`, `keyframe`, `mark`) and encodes them as MCP `ImageContent` blocks.
+ */
+async function fetchFeedbackImageBlocks(
+  attachments: ReadonlyArray<FeedbackAttachmentView>,
+  maxImages: number,
+  config: HollerKitMcpConfig,
+): Promise<McpImageContent[]> {
+  const resolved = resolveHollerKitMcpConfig(config)
+  const candidates = attachments
+    .filter(
+      (att) =>
+        att &&
+        typeof att.url === 'string' &&
+        att.url.trim().length > 0 &&
+        (IMAGE_ATTACHMENT_KINDS.has(att.kind) ||
+          (typeof att.mimeType === 'string' && att.mimeType.toLowerCase().startsWith('image/'))),
+    )
+    .slice(0, maxImages)
+
+  const blocks: McpImageContent[] = []
+  for (const att of candidates) {
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          reject(new Error('Attachment fetch timed out'))
+        }, resolved.timeoutMs)
+      })
+      const fetchAndRead = (async () => {
+        const response = await resolved.fetchFn(att.url, {
+          method: 'GET',
+          signal: controller.signal,
+        })
+        if (!response.ok) {
+          return null
+        }
+        const bytes = await readBoundedBytesFromResponse(response, resolved.maxResponseBytes)
+        if (bytes.byteLength === 0) {
+          return null
+        }
+        const contentType = response.headers.get('content-type')?.split(';')[0]?.trim()
+        const mimeType =
+          contentType && contentType.startsWith('image/')
+            ? contentType
+            : att.mimeType && att.mimeType.startsWith('image/')
+              ? att.mimeType
+              : 'image/png'
+        return {
+          type: 'image' as const,
+          data: Buffer.from(bytes).toString('base64'),
+          mimeType,
+        }
+      })()
+
+      const block = await Promise.race([fetchAndRead, timeoutPromise])
+      if (block) {
+        blocks.push(block)
+      }
+    } catch {
+      // Skip individual failed/timed-out image fetches so the primary JSON feedback response still succeeds.
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer)
+      }
+    }
+  }
+  return blocks
+}
+
+/**
+ * Reads an HTTP response body into a Uint8Array up to `maxBytes`.
+ */
+async function readBoundedBytesFromResponse(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const contentLengthHeader = response.headers.get('content-length')
+  if (contentLengthHeader !== null) {
+    const declaredLength = Number(contentLengthHeader)
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      if (response.body) {
+        await response.body.cancel().catch(() => {})
+      }
+      throw new Error('Attachment response exceeded maximum byte limit.')
+    }
+  }
+
+  if (!response.body) {
+    const ab = await response.arrayBuffer()
+    if (ab.byteLength > maxBytes) {
+      throw new Error('Attachment response exceeded maximum byte limit.')
+    }
+    return new Uint8Array(ab)
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        totalBytes += value.byteLength
+        if (totalBytes > maxBytes) {
+          await reader.cancel().catch(() => {})
+          throw new Error('Attachment response exceeded maximum byte limit.')
+        }
+        chunks.push(value)
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  return new Uint8Array(Buffer.concat(chunks))
 }
 
 /**

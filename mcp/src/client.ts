@@ -44,7 +44,7 @@ const FEEDBACK_INBOX_ALLOWED_KEYS = new Set([
   'limit',
   'cursor',
 ])
-const FEEDBACK_GET_ALLOWED_KEYS = new Set(['id'])
+const FEEDBACK_GET_ALLOWED_KEYS = new Set(['id', 'includeImages', 'maxImages'])
 const FEEDBACK_TRIAGE_ALLOWED_KEYS = new Set(['id', 'status', 'summary', 'links', 'actor'])
 const QUESTS_PENDING_ALLOWED_KEYS = new Set(['build'])
 const QUESTS_RETIRABLE_ALLOWED_KEYS = new Set(['area'])
@@ -448,6 +448,27 @@ export function createHollerKitMcpClient(config: HollerKitMcpConfig = {}): Holle
     async feedbackGet(input: FeedbackGetInput): Promise<FeedbackGetOutput> {
       const normalized = requireArgumentObject(input, 'feedback_get', FEEDBACK_GET_ALLOWED_KEYS)
       const id = requireUuid(normalized.id, 'id')
+      if (normalized.includeImages !== undefined && typeof normalized.includeImages !== 'boolean') {
+        throw new HollerKitMcpError(
+          400,
+          'invalid_arguments',
+          'includeImages must be a boolean.',
+        )
+      }
+      if (normalized.maxImages !== undefined) {
+        if (
+          typeof normalized.maxImages !== 'number' ||
+          !Number.isInteger(normalized.maxImages) ||
+          normalized.maxImages < 1 ||
+          normalized.maxImages > 12
+        ) {
+          throw new HollerKitMcpError(
+            400,
+            'invalid_arguments',
+            'maxImages must be an integer between 1 and 12.',
+          )
+        }
+      }
       const raw = await requestJson('GET', `/v1/feedback/${encodeURIComponent(id)}`)
 
       if (

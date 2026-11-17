@@ -57,13 +57,25 @@ export const HOLLERKIT_MCP_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'feedback_get',
     description:
-      'Get full details for a single feedback item, including its associated quest version, timeline events sorted by offsetSeconds, triage history, and attachments with freshly signed 1-hour read URLs.',
+      'Get full details for a single feedback item, including its associated quest version, timeline events sorted by offsetSeconds, triage history, and attachments with freshly signed 1-hour read URLs. Pass includeImages=true to also inline attached screenshots/marks/keyframes as native MCP image content blocks.',
     inputSchema: {
       type: 'object',
       properties: {
         id: {
           type: 'string',
           description: 'UUID of the feedback item to retrieve.',
+        },
+        includeImages: {
+          type: 'boolean',
+          description:
+            'When true, fetches attached image/mark/keyframe URLs and returns them as native MCP image content blocks alongside the JSON payload.',
+        },
+        maxImages: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 12,
+          description:
+            'Maximum number of image attachments to fetch and inline when includeImages=true (1-12, default 4).',
         },
       },
       required: ['id'],

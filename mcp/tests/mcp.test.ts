@@ -645,8 +645,9 @@ test('exercises full JSON-RPC 2.0 stdio protocol (initialize, notifications/init
     for (let i = 2; i <= 7; i++) {
       const callResult = responses[i]?.result as McpCallToolResult
       assert.equal(callResult.isError, false)
-      assert.equal(callResult.content[0]?.type, 'text')
-      const parsedText = JSON.parse(callResult.content[0]?.text ?? '{}') as { ok: boolean }
+      const firstBlock = callResult.content[0]
+      assert.ok(firstBlock && firstBlock.type === 'text')
+      const parsedText = JSON.parse(firstBlock.text) as { ok: boolean }
       assert.equal(parsedText.ok, true)
     }
   } finally {
@@ -1120,4 +1121,95 @@ test('connectStdio returns explicit -32000 overload error with request id when p
   assert.equal(overloadResp.id, 6)
   assert.equal(overloadResp.error.code, -32000)
   assert.match(overloadResp.error.message, /queue is full/i)
+})
+
+test('feedback_get with includeImages=true fetches signed image attachments and returns MCP image content blocks', async () => {
+  const harness = await createSeededTestHarness()
+  const pngBytes = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  )
+
+  const mcp = createHollerKitMcpServer({
+    baseUrl: BASE_URL,
+    apiKey: harness.agentFullKey,
+    fetch: async (input, init) => {
+      const req = new Request(input, init)
+      if (req.url.startsWith('https://storage.hollerkit.test/read/')) {
+        return new Response(pngBytes, {
+          status: 200,
+          headers: {
+            'content-type': 'image/png',
+            'content-length': String(pngBytes.byteLength),
+          },
+        })
+      }
+      return harness.inProcessFetch(input, init)
+    },
+  })
+
+  // Without includeImages, only the text block is returned
+  const textOnly = await mcp.callTool('feedback_get', {
+    id: harness.failedQuestFeedbackId,
+  })
+  assert.equal(textOnly.isError, false)
+  assert.equal(textOnly.content.length, 1)
+  assert.equal(textOnly.content[0]?.type, 'text')
+
+  // With includeImages=true, the signed image is fetched and appended as an image content block
+  const withImages = await mcp.callTool('feedback_get', {
+    id: harness.failedQuestFeedbackId,
+    includeImages: true,
+    maxImages: 2,
+  })
+  assert.equal(withImages.isError, false)
+  assert.equal(withImages.content.length, 2)
+  assert.equal(withImages.content[0]?.type, 'text')
+  const imgBlock = withImages.content[1]
+  assert.ok(imgBlock && imgBlock.type === 'image')
+  assert.equal(imgBlock.mimeType, 'image/png')
+  assert.equal(imgBlock.data, pngBytes.toString('base64'))
+
+  // Invalid includeImages or maxImages arguments are rejected with 400 invalid_arguments
+  const badIncludeImages = await mcp.callTool('feedback_get', {
+    id: harness.failedQuestFeedbackId,
+    includeImages: 'yes' as unknown as boolean,
+  })
+  assert.equal(badIncludeImages.isError, true)
+  assert.equal(badIncludeImages.structuredContent.status, 400)
+  assert.equal((badIncludeImages.structuredContent.error as { code: string }).code, 'invalid_arguments')
+
+  const badMaxImages = await mcp.callTool('feedback_get', {
+    id: harness.failedQuestFeedbackId,
+    includeImages: true,
+    maxImages: 99,
+  })
+  assert.equal(badMaxImages.isError, true)
+  assert.equal(badMaxImages.structuredContent.status, 400)
+  assert.equal((badMaxImages.structuredContent.error as { code: string }).code, 'invalid_arguments')
+})
+
+test('feedback_get with includeImages=true gracefully skips failed or oversized image fetches without failing tool call', async () => {
+  const harness = await createSeededTestHarness()
+
+  const mcp = createHollerKitMcpServer({
+    baseUrl: BASE_URL,
+    apiKey: harness.agentFullKey,
+    fetch: async (input, init) => {
+      const req = new Request(input, init)
+      if (req.url.startsWith('https://storage.hollerkit.test/read/')) {
+        return new Response('Storage error', { status: 503 })
+      }
+      return harness.inProcessFetch(input, init)
+    },
+  })
+
+  const res = await mcp.callTool('feedback_get', {
+    id: harness.failedQuestFeedbackId,
+    includeImages: true,
+  })
+  assert.equal(res.isError, false)
+  assert.equal(res.content.length, 1)
+  assert.equal(res.content[0]?.type, 'text')
+  assert.equal(res.structuredContent.ok, true)
 })
