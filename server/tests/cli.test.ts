@@ -129,6 +129,7 @@ test('CLI: quests validate succeeds on valid manifest and fails on invalid manif
     assert.equal(demoErr.length, 0)
     assert.ok(demoOut.some((line) => line.startsWith('checkout-promo-math\t')))
     assert.ok(demoOut.some((line) => line.startsWith('profile-avatar-upload\t')))
+    assert.ok(demoOut.some((line) => line.startsWith('dictate-voice-note\t')))
 
     // Valid manifest with quest captures
     const capturePath = join(tempDir, 'capture-quests.json')

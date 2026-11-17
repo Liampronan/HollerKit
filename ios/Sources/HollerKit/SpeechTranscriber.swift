@@ -58,12 +58,23 @@ public actor SpeechTranscriber {
         self.options = options
     }
 
+    #if canImport(Speech)
+    /// Builds a `nonisolated` `@Sendable` completion handler for `SFSpeechRecognizer.requestAuthorization`
+    /// so callbacks delivered on arbitrary TCC/Speech queues never assert actor isolation.
+    nonisolated static func makeAuthorizationHandler(
+        continuation: CheckedContinuation<SpeechTranscriberAuthorizationStatus, Never>
+    ) -> @Sendable (SFSpeechRecognizerAuthorizationStatus) -> Void {
+        { @Sendable status in
+            continuation.resume(returning: SpeechTranscriberAuthorizationStatus(status))
+        }
+    }
+    #endif
+
     public static func requestAuthorization() async -> SpeechTranscriberAuthorizationStatus {
         #if canImport(Speech)
         await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
-                continuation.resume(returning: SpeechTranscriberAuthorizationStatus(status))
-            }
+            let handler = makeAuthorizationHandler(continuation: continuation)
+            SFSpeechRecognizer.requestAuthorization(handler)
         }
         #else
         .unavailable
@@ -109,6 +120,62 @@ public actor SpeechTranscriber {
         let options = self.options
         let resolvedLocaleIdentifier = recognizer.locale.identifier
 
+        return try await Self.performFileRecognition(
+            recognizer: recognizer,
+            request: request,
+            localeIdentifier: resolvedLocaleIdentifier,
+            requireOnDeviceRecognition: options.requireOnDeviceRecognition
+        )
+        #else
+        throw SpeechTranscriberError.unavailable
+        #endif
+    }
+
+    #if canImport(Speech)
+    /// Builds a `nonisolated` `@Sendable` recognition result handler for file-based transcription
+    /// so callbacks delivered on Speech's queue never assert `SpeechTranscriber` actor isolation.
+    nonisolated static func makeFileRecognitionResultHandler(
+        state: RecognitionState,
+        continuation: CheckedContinuation<HollerKitTranscript, Error>,
+        localeIdentifier: String,
+        requireOnDeviceRecognition: Bool
+    ) -> @Sendable (SFSpeechRecognitionResult?, Error?) -> Void {
+        { @Sendable result, error in
+            if let error {
+                state.resumeOnce {
+                    continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
+                        SpeechNoteCaptureError.describeError(error)
+                    ))
+                }
+                return
+            }
+
+            if let result {
+                guard result.isFinal else { return }
+                let completedTranscript = Self.transcript(
+                    from: result,
+                    localeIdentifier: localeIdentifier,
+                    requireOnDeviceRecognition: requireOnDeviceRecognition
+                )
+                state.resumeOnce {
+                    continuation.resume(returning: completedTranscript)
+                }
+            } else {
+                state.resumeOnce {
+                    continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
+                        SpeechNoteCaptureError.noTranscript.errorDescription ?? "No speech was detected."
+                    ))
+                }
+            }
+        }
+    }
+
+    private nonisolated static func performFileRecognition(
+        recognizer: SFSpeechRecognizer,
+        request: SFSpeechURLRecognitionRequest,
+        localeIdentifier: String,
+        requireOnDeviceRecognition: Bool
+    ) async throws -> HollerKitTranscript {
         let state = RecognitionState()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -118,45 +185,21 @@ public actor SpeechTranscriber {
                     }
                     return
                 }
-                let task = recognizer.recognitionTask(with: request) { result, error in
-                    if let error {
-                        state.resumeOnce {
-                            continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
-                                SpeechNoteCaptureError.describeError(error)
-                            ))
-                        }
-                        return
-                    }
-
-                    if let result {
-                        guard result.isFinal else { return }
-                        state.resumeOnce {
-                            continuation.resume(returning: Self.transcript(
-                                from: result,
-                                localeIdentifier: resolvedLocaleIdentifier,
-                                requireOnDeviceRecognition: options.requireOnDeviceRecognition
-                            ))
-                        }
-                    } else {
-                        state.resumeOnce {
-                            continuation.resume(throwing: SpeechTranscriberError.transcriptionFailed(
-                                SpeechNoteCaptureError.noTranscript.errorDescription ?? "No speech was detected."
-                            ))
-                        }
-                    }
-                }
+                let handler = makeFileRecognitionResultHandler(
+                    state: state,
+                    continuation: continuation,
+                    localeIdentifier: localeIdentifier,
+                    requireOnDeviceRecognition: requireOnDeviceRecognition
+                )
+                let task = recognizer.recognitionTask(with: request, resultHandler: handler)
                 state.setTask(task)
             }
         } onCancel: {
             state.cancelTask()
         }
-        #else
-        throw SpeechTranscriberError.unavailable
-        #endif
     }
 
-    #if canImport(Speech)
-    private static func transcript(
+    private nonisolated static func transcript(
         from result: SFSpeechRecognitionResult,
         localeIdentifier: String,
         requireOnDeviceRecognition: Bool
@@ -198,7 +241,7 @@ private extension SpeechTranscriberAuthorizationStatus {
     }
 }
 
-private final class RecognitionState: @unchecked Sendable {
+final class RecognitionState: @unchecked Sendable {
     private let lock = NSLock()
     private var didResume = false
     private var isCancelled = false

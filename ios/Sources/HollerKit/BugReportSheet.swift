@@ -871,11 +871,66 @@ final class BugReportDraft {
         return "video/quicktime"
     }
 
-    static func nextFallbackImage(from fallbackImages: [UIImage]?, index: inout Int) -> UIImage? {
+    nonisolated static func nextFallbackImage(from fallbackImages: [UIImage]?, index: inout Int) -> UIImage? {
         guard let fallbackImages, index < fallbackImages.count else { return nil }
         let img = fallbackImages[index]
         index += 1
         return img
+    }
+
+    private nonisolated static func startLoadFileRepresentation(
+        from provider: NSItemProvider,
+        typeIdentifier: String,
+        into directoryURL: URL,
+        continuation: CheckedContinuation<URL?, Never>
+    ) {
+        provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { @Sendable fileURL, _ in
+            guard let fileURL else {
+                continuation.resume(returning: nil)
+                return
+            }
+            do {
+                try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+                let ext = fileURL.pathExtension.isEmpty ? "mov" : fileURL.pathExtension
+                let copiedURL = directoryURL.appendingPathComponent("paste-\(UUID().uuidString).\(ext)", isDirectory: false)
+                try FileManager.default.copyItem(at: fileURL, to: copiedURL)
+                continuation.resume(returning: copiedURL)
+            } catch {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    private nonisolated static func startLoadDataRepresentation(
+        from provider: NSItemProvider,
+        typeIdentifier: String,
+        continuation: CheckedContinuation<Data?, Never>
+    ) {
+        provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { @Sendable data, _ in
+            continuation.resume(returning: data)
+        }
+    }
+
+    private nonisolated static func startLoadUIImageObject(
+        from provider: NSItemProvider,
+        continuation: CheckedContinuation<UIImage?, Never>
+    ) {
+        _ = provider.loadObject(ofClass: UIImage.self) { @Sendable object, _ in
+            if let image = object as? UIImage {
+                continuation.resume(returning: image)
+            } else {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    private nonisolated static func startLoadNSURLObject(
+        from provider: NSItemProvider,
+        continuation: CheckedContinuation<URL?, Never>
+    ) {
+        _ = provider.loadObject(ofClass: NSURL.self) { @Sendable object, _ in
+            continuation.resume(returning: (object as? NSURL) as URL?)
+        }
     }
 
     static func loadTemporaryFile(
@@ -884,21 +939,12 @@ final class BugReportDraft {
         into directoryURL: URL
     ) async -> URL? {
         await withCheckedContinuation { continuation in
-            provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { fileURL, _ in
-                guard let fileURL else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                do {
-                    try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-                    let ext = fileURL.pathExtension.isEmpty ? "mov" : fileURL.pathExtension
-                    let copiedURL = directoryURL.appendingPathComponent("paste-\(UUID().uuidString).\(ext)", isDirectory: false)
-                    try FileManager.default.copyItem(at: fileURL, to: copiedURL)
-                    continuation.resume(returning: copiedURL)
-                } catch {
-                    continuation.resume(returning: nil)
-                }
-            }
+            startLoadFileRepresentation(
+                from: provider,
+                typeIdentifier: typeIdentifier,
+                into: directoryURL,
+                continuation: continuation
+            )
         }
     }
 
@@ -909,9 +955,11 @@ final class BugReportDraft {
         let typeId = imageTypeIdentifier ?? UTType.image.identifier
         if provider.hasItemConformingToTypeIdentifier(typeId) {
             let data: Data? = await withCheckedContinuation { continuation in
-                provider.loadDataRepresentation(forTypeIdentifier: typeId) { data, _ in
-                    continuation.resume(returning: data)
-                }
+                startLoadDataRepresentation(
+                    from: provider,
+                    typeIdentifier: typeId,
+                    continuation: continuation
+                )
             }
             if let data, let image = BugReportAttachment.downsampledImage(from: data) {
                 return image
@@ -919,13 +967,7 @@ final class BugReportDraft {
         }
         if provider.canLoadObject(ofClass: UIImage.self) {
             return await withCheckedContinuation { continuation in
-                _ = provider.loadObject(ofClass: UIImage.self) { object, _ in
-                    if let image = object as? UIImage {
-                        continuation.resume(returning: image)
-                    } else {
-                        continuation.resume(returning: nil)
-                    }
-                }
+                startLoadUIImageObject(from: provider, continuation: continuation)
             }
         }
         return nil
@@ -937,9 +979,11 @@ final class BugReportDraft {
     ) async -> URL? {
         if provider.hasItemConformingToTypeIdentifier(typeIdentifier) {
             let data: Data? = await withCheckedContinuation { continuation in
-                provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
-                    continuation.resume(returning: data)
-                }
+                startLoadDataRepresentation(
+                    from: provider,
+                    typeIdentifier: typeIdentifier,
+                    continuation: continuation
+                )
             }
             if let data {
                 if let url = URL(dataRepresentation: data, relativeTo: nil) {
@@ -953,9 +997,7 @@ final class BugReportDraft {
         }
         if provider.canLoadObject(ofClass: NSURL.self) {
             return await withCheckedContinuation { continuation in
-                _ = provider.loadObject(ofClass: NSURL.self) { object, _ in
-                    continuation.resume(returning: (object as? NSURL) as URL?)
-                }
+                startLoadNSURLObject(from: provider, continuation: continuation)
             }
         }
         return nil
@@ -2042,7 +2084,7 @@ struct BugReportAttachment: Identifiable, Hashable {
 
         let box = UncheckedSendableBox(value: exportSession)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            box.value.exportAsynchronously {
+            box.value.exportAsynchronously { @Sendable in
                 continuation.resume()
             }
         }

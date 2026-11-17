@@ -4,6 +4,14 @@ import Observation
 #if canImport(AVFoundation) && canImport(Speech) && os(iOS)
 import AVFoundation
 import Speech
+
+private struct SpeechBufferRequestBox: @unchecked Sendable {
+    let request: SFSpeechAudioBufferRecognitionRequest
+}
+
+private struct AudioSessionBox: @unchecked Sendable {
+    let audioSession: AVAudioSession
+}
 #endif
 
 /// Errors thrown during live microphone speech note capture.
@@ -239,7 +247,7 @@ public final class SpeechNoteCapture {
         if let microphonePermissionProvider {
             microphoneAllowed = await microphonePermissionProvider()
         } else {
-            microphoneAllowed = await requestMicrophonePermission(audioSession: audioSession)
+            microphoneAllowed = await Self.requestMicrophonePermission(audioSession: audioSession)
         }
         guard !Task.isCancelled, startGeneration == currentGeneration else {
             throw CancellationError()
@@ -276,15 +284,7 @@ public final class SpeechNoteCapture {
             request.shouldReportPartialResults = true
             request.requiresOnDeviceRecognition = options.requireOnDeviceRecognition
 
-            let inputNode = engine.inputNode
-            inputNode.removeTap(onBus: 0)
-            let outputFormat = inputNode.outputFormat(forBus: 0)
-            let tapFormat: AVAudioFormat? = (outputFormat.sampleRate > 0 && outputFormat.channelCount > 0)
-                ? outputFormat
-                : nil
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: tapFormat) { buffer, _ in
-                request.append(buffer)
-            }
+            try Self.installAudioTap(on: engine.inputNode, request: request)
 
             self.options = options
             self.resolvedLocaleIdentifier = sessionLocaleIdentifier
@@ -293,35 +293,29 @@ public final class SpeechNoteCapture {
             self.confidence = nil
             self.startedAt = sessionStartedAt
             self.recognitionRequest = request
-            self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                if let result {
-                    let text = result.bestTranscription.formattedString
-                    let confidenceValues = result.bestTranscription.segments.map(\.confidence).filter { $0 > 0 }
-                    let confidence = confidenceValues.isEmpty
-                        ? nil
-                        : Double(confidenceValues.reduce(0, +) / Float(confidenceValues.count))
-                    state.recordResult(text: text, confidence: confidence, isFinal: result.isFinal)
-
-                    Task { @MainActor [weak self] in
-                        guard let self, self.liveState === state, self.isCapturing else { return }
-                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            self.transcriptText = text
-                            self.confidence = confidence
-                            self.onStateChange?()
-                        }
+            self.recognitionTask = Self.startRecognitionTask(
+                recognizer: recognizer,
+                request: request,
+                state: state,
+                onPartialResult: { [weak self] text, confidence in
+                    guard let self, self.liveState === state, self.isCapturing else { return }
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.transcriptText = text
+                        self.confidence = confidence
+                        self.onStateChange?()
                     }
+                },
+                onError: { [weak self] in
+                    self?.handleRecognitionCallbackError(for: state)
                 }
-                if let error {
-                    state.recordError(error)
-                    Task { @MainActor [weak self] in
-                        self?.handleRecognitionCallbackError(for: state)
-                    }
-                }
-            }
+            )
 
             engine.prepare()
             try engine.start()
             isCapturing = true
+        } catch let captureError as SpeechNoteCaptureError {
+            cleanupCaptureState(deactivateSession: true)
+            throw captureError
         } catch {
             cleanupCaptureState(deactivateSession: true)
             throw SpeechNoteCaptureError.recognitionFailed(SpeechNoteCaptureError.describeError(error))
@@ -430,7 +424,7 @@ public final class SpeechNoteCapture {
     }
 
     /// Selects an available `SFSpeechRecognizer` for `locale`, falling back to the default recognizer only if its language matches.
-    static func selectRecognizer(
+    nonisolated static func selectRecognizer(
         for locale: Locale,
         requireOnDeviceRecognition: Bool
     ) throws -> SFSpeechRecognizer {
@@ -459,8 +453,103 @@ public final class SpeechNoteCapture {
         return available[0]
     }
 
+    /// Returns `true` when `format` has a positive sample rate and at least one channel.
+    nonisolated static func isValidAudioFormat(_ format: AVAudioFormat) -> Bool {
+        format.sampleRate > 0 && format.sampleRate.isFinite && format.channelCount > 0
+    }
+
+    /// Builds a `nonisolated` `@Sendable` audio tap callback that appends captured PCM buffers
+    /// to `request` on CoreAudio's real-time render thread without asserting `@MainActor` isolation.
+    nonisolated static func makeAudioTapBlock(
+        request: SFSpeechAudioBufferRecognitionRequest,
+        onBufferAppended: (@Sendable (AVAudioPCMBuffer) -> Void)? = nil
+    ) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        let requestBox = SpeechBufferRequestBox(request: request)
+        return { @Sendable buffer, _ in
+            requestBox.request.append(buffer)
+            onBufferAppended?(buffer)
+        }
+    }
+
+    /// Removes any prior tap on bus 0, validates the hardware recording format, and installs a `nonisolated` tap block.
+    private nonisolated static func installAudioTap(
+        on inputNode: AVAudioInputNode,
+        request: SFSpeechAudioBufferRecognitionRequest
+    ) throws {
+        inputNode.removeTap(onBus: 0)
+        let outputFormat = inputNode.outputFormat(forBus: 0)
+        let inputFormat = inputNode.inputFormat(forBus: 0)
+        guard isValidAudioFormat(outputFormat), isValidAudioFormat(inputFormat) else {
+            throw SpeechNoteCaptureError.audioSessionFailed(
+                "Audio input format has invalid sample rate (\(outputFormat.sampleRate)) or channel count (\(outputFormat.channelCount))."
+            )
+        }
+        let tapBlock = makeAudioTapBlock(request: request)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: outputFormat, block: tapBlock)
+    }
+
+    /// Extracts the formatted string and average positive segment confidence from a transcription result.
+    nonisolated static func extractTranscriptionMetrics(
+        from result: SFSpeechRecognitionResult
+    ) -> (text: String, confidence: Double?, isFinal: Bool) {
+        let text = result.bestTranscription.formattedString
+        let confidenceValues = result.bestTranscription.segments.map(\.confidence).filter { $0 > 0 }
+        let confidence = confidenceValues.isEmpty
+            ? nil
+            : Double(confidenceValues.reduce(0, +) / Float(confidenceValues.count))
+        return (text, confidence, result.isFinal)
+    }
+
+    /// Builds a `nonisolated` `@Sendable` recognition callback that records results/errors in `state`
+    /// on Speech's queue before hopping to `@MainActor`.
+    nonisolated static func makeRecognitionResultHandler(
+        state: LiveRecognitionState,
+        onPartialResult: @escaping @Sendable @MainActor (String, Double?) -> Void,
+        onError: @escaping @Sendable @MainActor () -> Void
+    ) -> @Sendable (SFSpeechRecognitionResult?, Error?) -> Void {
+        return { @Sendable result, error in
+            if let result {
+                let metrics = extractTranscriptionMetrics(from: result)
+                state.recordResult(
+                    text: metrics.text,
+                    confidence: metrics.confidence,
+                    isFinal: metrics.isFinal
+                )
+
+                let text = metrics.text
+                let confidence = metrics.confidence
+                Task { @MainActor in
+                    onPartialResult(text, confidence)
+                }
+            }
+            if let error {
+                state.recordError(error)
+                Task { @MainActor in
+                    onError()
+                }
+            }
+        }
+    }
+
+    /// Starts a recognition task on `recognizer` from a `nonisolated` context so the Objective-C
+    /// result handler block never inherits `@MainActor` isolation.
+    private nonisolated static func startRecognitionTask(
+        recognizer: SFSpeechRecognizer,
+        request: SFSpeechAudioBufferRecognitionRequest,
+        state: LiveRecognitionState,
+        onPartialResult: @escaping @Sendable @MainActor (String, Double?) -> Void,
+        onError: @escaping @Sendable @MainActor () -> Void
+    ) -> SFSpeechRecognitionTask {
+        let handler = makeRecognitionResultHandler(
+            state: state,
+            onPartialResult: onPartialResult,
+            onError: onError
+        )
+        return recognizer.recognitionTask(with: request, resultHandler: handler)
+    }
+
     /// Configures and activates the shared `AVAudioSession` for speech capture with safe category fallbacks.
-    private static func configureAudioSession(_ audioSession: AVAudioSession) throws {
+    private nonisolated static func configureAudioSession(_ audioSession: AVAudioSession) throws {
         do {
             try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
         } catch {
@@ -550,17 +639,27 @@ public final class SpeechNoteCapture {
         throw SpeechNoteCaptureError.noTranscript
     }
 
-    /// Requests microphone recording permission from the user.
-    private func requestMicrophonePermission(audioSession: AVAudioSession) async -> Bool {
-        await withCheckedContinuation { continuation in
+    /// Builds a `nonisolated` `@Sendable` completion handler for microphone record permission requests
+    /// so callbacks invoked on background TCC/AVFAudio queues never assert `@MainActor` isolation.
+    nonisolated static func makeRecordPermissionHandler(
+        continuation: CheckedContinuation<Bool, Never>
+    ) -> @Sendable (Bool) -> Void {
+        { @Sendable allowed in
+            continuation.resume(returning: allowed)
+        }
+    }
+
+    /// Requests microphone recording permission from the user off the main actor.
+    private nonisolated static func requestMicrophonePermission(
+        audioSession: AVAudioSession
+    ) async -> Bool {
+        let sessionBox = AudioSessionBox(audioSession: audioSession)
+        return await withCheckedContinuation { continuation in
+            let handler = makeRecordPermissionHandler(continuation: continuation)
             if #available(iOS 17.0, *) {
-                AVAudioApplication.requestRecordPermission { allowed in
-                    continuation.resume(returning: allowed)
-                }
+                AVAudioApplication.requestRecordPermission(completionHandler: handler)
             } else {
-                audioSession.requestRecordPermission { allowed in
-                    continuation.resume(returning: allowed)
-                }
+                sessionBox.audioSession.requestRecordPermission(handler)
             }
         }
     }

@@ -51,6 +51,23 @@ struct HollerKitDemoApp: App {
                 record: .optional,
                 start: "hollerkitdemo://profile",
                 source: QuestManifestSource(pr: 43, added: "2026-11-07")
+            ),
+            QuestDefinition(
+                id: "dictate-voice-note",
+                title: "Dictate and stop a voice note in a bug report",
+                area: "dictation",
+                steps: [
+                    "Tap Report in the navigation bar to open Report a Bug",
+                    "Tap Dictate Note and speak a short test phrase",
+                    "Tap Stop Dictation"
+                ],
+                expect: [
+                    "App does not crash when starting or stopping dictation",
+                    "Transcribed text populates the bug report description field"
+                ],
+                needs: ["device"],
+                record: .optional,
+                source: QuestManifestSource(pr: 62, added: "2026-11-17")
             )
         ]
 
