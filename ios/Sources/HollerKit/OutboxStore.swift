@@ -555,6 +555,10 @@ actor OutboxDirectoryEngine {
                 if let apiError = error as? HollerKitAPIError {
                     if apiError.isAuthenticationError {
                         result.isAuthenticationError = true
+                    } else if apiError.isAuthorizationError,
+                              let currentReason = result.lastError,
+                              !SubmissionFeedbackOverlayView.isAuthorizationFailureReason(currentReason) {
+                        result.lastError = "Forbidden (403): \(currentReason)"
                     }
                     if apiError.isPermanentValidationError {
                         try? FileManager.default.removeItem(at: item.directoryURL)

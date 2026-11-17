@@ -258,6 +258,32 @@ public struct QuestStore: Sendable {
         isSimulator: Bool = Self.isRunningOnSimulator,
         persistToCache: Bool = true
     ) async throws -> [QuestBoardItem] {
+        let (items, limits) = try await syncWithServerAndLimits(
+            definitions: definitions,
+            build: build,
+            appVersion: appVersion,
+            client: client,
+            isSimulator: isSimulator,
+            persistToCache: persistToCache
+        )
+        let capturedServerIdentity = serverIdentity
+        if let limits {
+            await MainActor.run {
+                guard Self.matchesActiveServerIdentity(capturedServerIdentity) else { return }
+                HollerKit.quests.applyServerLimits(limits)
+            }
+        }
+        return items
+    }
+
+    func syncWithServerAndLimits(
+        definitions: [QuestDefinition],
+        build: String,
+        appVersion: String?,
+        client: APIClient,
+        isSimulator: Bool = Self.isRunningOnSimulator,
+        persistToCache: Bool = true
+    ) async throws -> (items: [QuestBoardItem], limits: ServerAttachmentLimits?) {
         try Self.validateUniqueQuestIds(in: definitions)
         let entries = definitions.map { $0.toManifestEntry() }
         let response = try await client.syncBuildManifest(
@@ -265,11 +291,6 @@ public struct QuestStore: Sendable {
             appVersion: appVersion,
             quests: entries
         )
-        if let maxVideoBytes = response.limits?.maxVideoBytes, maxVideoBytes > 0 {
-            await MainActor.run {
-                HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
-            }
-        }
 
         let definitionsById = Dictionary(
             definitions.map { ($0.id.jsTrimmed, $0) },
@@ -316,7 +337,7 @@ public struct QuestStore: Sendable {
         if persistToCache {
             saveCachedBoardItems(items, forBuild: build)
         }
-        return items
+        return (items, response.limits)
     }
 
     public func boardItems(
@@ -387,9 +408,11 @@ public struct QuestStore: Sendable {
         persistToCache: Bool = false
     ) async throws -> [QuestBoardItem] {
         let response = try await client.fetchPendingQuestsResponse(build: build)
-        if let maxVideoBytes = response.limits?.maxVideoBytes, maxVideoBytes > 0 {
+        let capturedServerIdentity = serverIdentity
+        if let limits = response.limits {
             await MainActor.run {
-                HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+                guard Self.matchesActiveServerIdentity(capturedServerIdentity) else { return }
+                HollerKit.quests.applyServerLimits(limits)
             }
         }
         let items = boardItems(
@@ -401,6 +424,19 @@ public struct QuestStore: Sendable {
             saveCachedBoardItems(items, forBuild: build)
         }
         return items
+    }
+
+    @MainActor
+    private static func matchesActiveServerIdentity(_ candidateIdentity: String?) -> Bool {
+        guard let candidateIdentity, !candidateIdentity.isEmpty else {
+            return true
+        }
+        guard let activeServer = HollerKit.currentConfiguration?.server.absoluteString else {
+            return true
+        }
+        let normalizedCandidate = candidateIdentity.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        let normalizedActive = activeServer.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        return normalizedCandidate == normalizedActive
     }
 
     public func saveCachedBoardPayload(_ payload: QuestBoardCachePayload, forBuild build: String) {
@@ -500,6 +536,8 @@ public final class HollerKitQuestState {
     public private(set) var isBackendReachable: Bool = true
     public private(set) var lastSyncError: String?
     public internal(set) var serverMaxVideoBytes: Int?
+    public internal(set) var serverMaxImageBytes: Int?
+    public internal(set) var serverMaxImages: Int?
 
     @ObservationIgnored
     private var definitions: [QuestDefinition] = []
@@ -550,12 +588,27 @@ public final class HollerKitQuestState {
         isBackendReachable = true
         lastSyncError = nil
         serverMaxVideoBytes = nil
+        serverMaxImageBytes = nil
+        serverMaxImages = nil
         definitions = []
         confirmedBoardItemsByQuestKey = [:]
         optimisticRuns = []
         localStatusOverrides = [:]
         localLatestRunOverrides = [:]
         QuestOverlayWindowManager.shared.hide()
+    }
+
+    func applyServerLimits(_ limits: ServerAttachmentLimits?) {
+        guard let limits else { return }
+        if let maxVideoBytes = limits.maxVideoBytes, maxVideoBytes > 0 {
+            serverMaxVideoBytes = maxVideoBytes
+        }
+        if let maxImageBytes = limits.maxImageBytes, maxImageBytes > 0 {
+            serverMaxImageBytes = maxImageBytes
+        }
+        if let maxImages = limits.maxImages, maxImages > 0 {
+            serverMaxImages = maxImages
+        }
     }
 
     func configure(
@@ -565,6 +618,11 @@ public final class HollerKitQuestState {
         serverURL: URL? = nil
     ) {
         configurationGeneration &+= 1
+        if store.serverIdentity != serverURL?.absoluteString {
+            serverMaxVideoBytes = nil
+            serverMaxImageBytes = nil
+            serverMaxImages = nil
+        }
         self.currentBuild = build
         self.store = QuestStore(
             cacheDirectoryURL: cacheDirectoryURL,
@@ -647,7 +705,7 @@ public final class HollerKitQuestState {
 
         let client = APIClient(configuration: config)
         do {
-            let syncedItems = try await storeSnapshot.syncWithServer(
+            let (syncedItems, syncedLimits) = try await storeSnapshot.syncWithServerAndLimits(
                 definitions: definitionsSnapshot,
                 build: build,
                 appVersion: appVersion,
@@ -657,6 +715,7 @@ public final class HollerKitQuestState {
             guard configurationGeneration == generation, HollerKit.isEnabled else {
                 return
             }
+            applyServerLimits(syncedLimits)
             isBackendReachable = true
             lastSyncError = nil
             applyServerConfirmedBoardItems(syncedItems, build: build)

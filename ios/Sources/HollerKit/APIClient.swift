@@ -36,8 +36,17 @@ public enum HollerKitAPIError: Error, LocalizedError, Sendable, Equatable {
         case .missingAuthToken:
             return true
         case .serverError(let statusCode, _, _), .httpError(let statusCode, _):
-            return statusCode == 401 || statusCode == 403
+            return statusCode == 401
         case .invalidURL, .invalidResponse:
+            return false
+        }
+    }
+
+    public var isAuthorizationError: Bool {
+        switch self {
+        case .serverError(let statusCode, _, _), .httpError(let statusCode, _):
+            return statusCode == 403
+        case .missingAuthToken, .invalidURL, .invalidResponse:
             return false
         }
     }
