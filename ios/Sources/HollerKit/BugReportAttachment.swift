@@ -161,7 +161,7 @@ struct BugReportAttachment: Identifiable, Hashable {
 
         let box = UncheckedSendableBox(value: exportSession)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            box.value.exportAsynchronously {
+            box.value.exportAsynchronously { @Sendable in
                 continuation.resume()
             }
         }

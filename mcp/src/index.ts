@@ -33,6 +33,8 @@ export type {
   JsonRpcResponse,
   JsonRpcSuccessResponse,
   McpCallToolResult,
+  McpContentBlock,
+  McpImageContent,
   McpTextContent,
   McpToolDefinition,
   QuestBoardStatus,
