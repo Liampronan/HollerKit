@@ -219,6 +219,41 @@ test('defaultV1Limits matches Stage 2 spec constants and upload route enforces m
     limits?: { maxVideoBytes?: number; maxImageBytes?: number; maxImages?: number }
   }
   assert.equal(pendingBody.limits?.maxVideoBytes, defaultV1Limits.maxVideoBytes)
+
+  // Verify chunked ReadableStream body without Content-Length aborts immediately once cumulative bytes exceed maxJsonBytes
+  let chunksPulled = 0
+  let streamCancelled = false
+  const chunkBytes = new Uint8Array(100_000).fill(0x61) // 100 KB per chunk; 3rd chunk exceeds 262,144 bytes
+  const streamingBody = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      chunksPulled += 1
+      if (chunksPulled <= 10) {
+        controller.enqueue(chunkBytes)
+      } else {
+        controller.close()
+      }
+    },
+    cancel() {
+      streamCancelled = true
+    },
+  })
+
+  const streamOversizedRes = await handler(
+    new Request('http://hollerkit.local/v1/feedback', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: streamingBody,
+      duplex: 'half',
+    } as RequestInit),
+  )
+  assert.equal(streamOversizedRes.status, 413)
+  const streamErrBody = (await streamOversizedRes.json()) as { error: { code: string } }
+  assert.equal(streamErrBody.error.code, 'body_too_large')
+  assert.equal(streamCancelled, true, 'Oversized request stream must be cancelled immediately')
+  assert.ok(chunksPulled <= 4, `Expected stream to abort after 3 chunks, pulled ${chunksPulled}`)
 })
 
 test('getApiKeyPrefix preserves random suffix entropy for long custom prefixes', () => {

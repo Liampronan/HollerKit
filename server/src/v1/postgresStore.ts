@@ -49,8 +49,10 @@ import {
   type TriageStatus,
   type UploadGrantRecord,
   type UpsertTesterInput,
+  type ValueGroupSummary,
   type ValueRecord,
   type ValueSource,
+  type ValueStats,
 } from './store.js'
 
 export interface PostgresStoreOptions {
@@ -1041,7 +1043,152 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
 
     async queryValues(filter: QueryValuesFilter = {}): Promise<QueryValuesResult> {
       const targetQuestId = filter.quest ?? filter.questId ?? null
-      const rows = await sql<any[]>`
+      const groupBy = filter.groupBy && filter.groupBy !== 'none' ? filter.groupBy : null
+      const limit = Math.min(Math.max(filter.limit ?? 100, 1), 500)
+
+      const summaryRows = await sql<any[]>`
+        WITH filtered AS (
+          SELECT *
+          FROM hollerkit.values
+          WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
+            AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
+            AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
+            AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
+            AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
+            AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
+            AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
+            AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
+            AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
+        )
+        SELECT
+          COUNT(value)::int AS n,
+          MIN(value) AS min,
+          MAX(value) AS max,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY value) AS median,
+          percentile_cont(0.9) WITHIN GROUP (ORDER BY value) AS p90,
+          COUNT(DISTINCT unit)::int AS unit_count,
+          MIN(unit) AS single_unit,
+          (SELECT unit FROM filtered ORDER BY created_at DESC, id DESC LIMIT 1) AS first_unit
+        FROM filtered
+      `
+
+      const sRow = summaryRows[0]
+      const resolvedUnit: QuestCaptureUnit | null =
+        sRow && Number(sRow.unit_count) === 1
+          ? (sRow.single_unit as QuestCaptureUnit)
+          : ((sRow?.first_unit as QuestCaptureUnit | null | undefined) ?? null)
+
+      const summary: ValueStats = {
+        n: Number(sRow?.n ?? 0),
+        median: toRoundedStat(sRow?.median),
+        p90: toRoundedStat(sRow?.p90),
+        min: toRoundedStat(sRow?.min),
+        max: toRoundedStat(sRow?.max),
+        unit: resolvedUnit,
+      }
+
+      const groupRows = await sql<any[]>`
+        WITH filtered AS (
+          SELECT
+            *,
+            CASE ${groupBy}::text
+              WHEN 'build' THEN build
+              WHEN 'version' THEN quest_version::text
+              WHEN 'appVersion' THEN COALESCE(app_version, 'unknown')
+              WHEN 'device' THEN COALESCE(device, 'unknown')
+              WHEN 'os' THEN COALESCE(os, 'unknown')
+              WHEN 'label' THEN label
+              ELSE quest_id || ':' || label
+            END AS group_bucket
+          FROM hollerkit.values
+          WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
+            AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
+            AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
+            AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
+            AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
+            AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
+            AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
+            AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
+            AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
+        )
+        SELECT
+          group_bucket,
+          COUNT(value)::int AS n,
+          MIN(value) AS min,
+          MAX(value) AS max,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY value) AS median,
+          percentile_cont(0.9) WITHIN GROUP (ORDER BY value) AS p90,
+          COUNT(DISTINCT unit)::int AS unit_count,
+          MIN(unit) AS single_unit,
+          (ARRAY_AGG(unit ORDER BY created_at DESC, id DESC))[1] AS first_unit,
+          COUNT(DISTINCT quest_id)::int AS quest_count,
+          MIN(quest_id) AS single_quest_id,
+          (ARRAY_AGG(quest_id ORDER BY created_at DESC, id DESC))[1] AS first_quest_id,
+          COUNT(DISTINCT label)::int AS label_count,
+          MIN(label) AS single_label,
+          (ARRAY_AGG(label ORDER BY created_at DESC, id DESC))[1] AS first_label,
+          (ARRAY_AGG(app_version ORDER BY created_at DESC, id DESC))[1] AS first_app_version,
+          (ARRAY_AGG(device ORDER BY created_at DESC, id DESC))[1] AS first_device,
+          (ARRAY_AGG(os ORDER BY created_at DESC, id DESC))[1] AS first_os,
+          MAX(created_at) AS latest_created_at,
+          MAX(id) AS latest_id
+        FROM filtered
+        GROUP BY group_bucket
+        ORDER BY latest_created_at DESC, latest_id DESC
+      `
+
+      const groups: ValueGroupSummary[] = []
+      if (groupBy) {
+        for (const gRow of groupRows) {
+          const key = String(gRow.group_bucket)
+          const groupUnit: QuestCaptureUnit | null =
+            Number(gRow.unit_count) === 1
+              ? (gRow.single_unit as QuestCaptureUnit)
+              : ((gRow.first_unit as QuestCaptureUnit | null | undefined) ?? resolvedUnit)
+          const item: ValueGroupSummary = {
+            key,
+            quest:
+              Number(gRow.quest_count) === 1
+                ? String(gRow.single_quest_id)
+                : targetQuestId,
+            label:
+              Number(gRow.label_count) === 1
+                ? String(gRow.single_label)
+                : (filter.label ?? null),
+            n: Number(gRow.n ?? 0),
+            median: toRoundedStat(gRow.median),
+            p90: toRoundedStat(gRow.p90),
+            min: toRoundedStat(gRow.min),
+            max: toRoundedStat(gRow.max),
+            unit: groupUnit,
+          }
+          if (groupBy === 'build') item.build = key
+          else if (groupBy === 'version') item.version = Number(key)
+          else if (groupBy === 'appVersion') item.appVersion = gRow.first_app_version ?? null
+          else if (groupBy === 'device') item.device = gRow.first_device ?? null
+          else if (groupBy === 'os') item.os = gRow.first_os ?? null
+          groups.push(item)
+        }
+      } else {
+        for (const gRow of groupRows) {
+          const firstLabel = String(gRow.first_label)
+          const firstQuestId = String(gRow.first_quest_id)
+          const firstUnit = (gRow.first_unit as QuestCaptureUnit | null | undefined) ?? resolvedUnit
+          groups.push({
+            key: firstLabel,
+            quest: firstQuestId,
+            label: firstLabel,
+            n: Number(gRow.n ?? 0),
+            median: toRoundedStat(gRow.median),
+            p90: toRoundedStat(gRow.p90),
+            min: toRoundedStat(gRow.min),
+            max: toRoundedStat(gRow.max),
+            unit: firstUnit,
+          })
+        }
+      }
+
+      const valueRows = await sql<any[]>`
         SELECT *
         FROM hollerkit.values
         WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
@@ -1054,9 +1201,18 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
           AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
         ORDER BY created_at DESC, id DESC
+        LIMIT ${limit}
       `
-      const records = rows.map(toValueRecord)
-      return buildQueryValuesResult(records, filter)
+
+      return {
+        quest: targetQuestId,
+        label: filter.label ?? null,
+        groupBy: filter.groupBy ?? null,
+        ...summary,
+        summary,
+        groups,
+        values: valueRows.map(toValueRecord),
+      }
     },
 
     async triageFeedback(
@@ -1570,6 +1726,13 @@ function asQuestCaptures(value: unknown): QuestCapture[] {
     return normalizeQuestCaptures(value as QuestCapture[])
   }
   return []
+}
+
+function toRoundedStat(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const num = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(num)) return null
+  return Math.round(num * 1_000_000) / 1_000_000
 }
 
 function toValueRecord(row: any): ValueRecord {
