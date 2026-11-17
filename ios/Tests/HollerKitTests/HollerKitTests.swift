@@ -4,6 +4,9 @@ import Observation
 #if canImport(PhotosUI)
 import PhotosUI
 #endif
+#if canImport(Speech)
+import Speech
+#endif
 import SwiftUI
 import UniformTypeIdentifiers
 #if canImport(UIKit)
@@ -1563,6 +1566,136 @@ final class HollerKitTests: XCTestCase {
         XCTAssertFalse(controller.isCapturing)
         XCTAssertFalse(controller.capture.isCapturing)
         XCTAssertNil(controller.errorMessage)
+    }
+
+    @MainActor
+    func testSpeechCaptureCallbacksExecuteSafelyOffMainThread() async throws {
+        // 1. Validate audio format guard helper
+        let validFormat = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1))
+        XCTAssertTrue(SpeechNoteCapture.isValidAudioFormat(validFormat))
+
+        var zeroSampleRateStreamDesc = AudioStreamBasicDescription(
+            mSampleRate: 0,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        if let invalidFormat = AVAudioFormat(streamDescription: &zeroSampleRateStreamDesc) {
+            XCTAssertFalse(SpeechNoteCapture.isValidAudioFormat(invalidFormat))
+        }
+
+        // 2. Audio tap block created from @MainActor context must not trap when invoked on background audio queue
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        let pcmBuffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: validFormat, frameCapacity: 256))
+        pcmBuffer.frameLength = 256
+        let audioTime = AVAudioTime(sampleTime: 0, atRate: 44_100)
+        let appendedFrameCount = LockedBox<AVAudioFrameCount>(0)
+        let tapRanOffMainThread = LockedBox<Bool>(false)
+
+        let tapBlock = SpeechNoteCapture.makeAudioTapBlock(request: request) { buffer in
+            appendedFrameCount.withLock { $0 += buffer.frameLength }
+        }
+
+        let tapDone = expectation(description: "Audio tap callback invoked on background queue")
+        DispatchQueue.global(qos: .userInitiated).async {
+            tapRanOffMainThread.withLock { $0 = !Thread.isMainThread }
+            tapBlock(pcmBuffer, audioTime)
+            tapDone.fulfill()
+        }
+        await fulfillment(of: [tapDone], timeout: 2.0)
+        XCTAssertTrue(tapRanOffMainThread.withLock { $0 })
+        XCTAssertEqual(appendedFrameCount.withLock { $0 }, 256)
+        request.endAudio()
+
+        // 3. Recognition result/error callback created from @MainActor context must not trap on background Speech queue
+        let capture = SpeechNoteCapture()
+        let state = LiveRecognitionState()
+        capture.startForTesting(
+            state: state,
+            options: SpeechTranscriberOptions(locale: Locale(identifier: "en_US"))
+        )
+        state.recordResult(text: "Dictated on background queue", confidence: 0.91, isFinal: false)
+
+        let errorHandledOnMainActor = expectation(description: "Recognition error hopped to MainActor")
+        let recognitionRanOffMainThread = LockedBox<Bool>(false)
+        let recognitionHandler = SpeechNoteCapture.makeRecognitionResultHandler(
+            state: state,
+            onPartialResult: { [weak capture] text, _ in
+                capture?.updatePartialTranscriptForTesting(text)
+            },
+            onError: { [weak capture] in
+                capture?.handleRecognitionCallbackError(for: state)
+                errorHandledOnMainActor.fulfill()
+            }
+        )
+
+        let sampleError = NSError(
+            domain: "kAFAssistantErrorDomain",
+            code: 1101,
+            userInfo: [NSLocalizedDescriptionKey: "Background speech queue failure"]
+        )
+        DispatchQueue.global(qos: .userInitiated).async {
+            recognitionRanOffMainThread.withLock { $0 = !Thread.isMainThread }
+            recognitionHandler(nil, sampleError)
+        }
+        await fulfillment(of: [errorHandledOnMainActor], timeout: 2.0)
+        XCTAssertTrue(recognitionRanOffMainThread.withLock { $0 })
+        XCTAssertFalse(capture.isCapturing)
+        XCTAssertEqual(capture.transcriptText, "Dictated on background queue")
+        XCTAssertTrue(capture.lastError?.contains("kAFAssistantErrorDomain code 1101") == true)
+
+        // 4. Microphone permission callback created from @MainActor context must not trap on background TCC queue
+        let micPermRanOffMainThread = LockedBox<Bool>(false)
+        let granted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let handler = SpeechNoteCapture.makeRecordPermissionHandler(continuation: continuation)
+            DispatchQueue.global(qos: .userInitiated).async {
+                micPermRanOffMainThread.withLock { $0 = !Thread.isMainThread }
+                handler(true)
+            }
+        }
+        XCTAssertTrue(micPermRanOffMainThread.withLock { $0 })
+        XCTAssertTrue(granted)
+
+        // 5. Speech authorization callback and file recognition callback must not trap on background queue
+        let speechAuthRanOffMainThread = LockedBox<Bool>(false)
+        let authStatus = await withCheckedContinuation { (continuation: CheckedContinuation<SpeechTranscriberAuthorizationStatus, Never>) in
+            let handler = SpeechTranscriber.makeAuthorizationHandler(continuation: continuation)
+            DispatchQueue.global(qos: .userInitiated).async {
+                speechAuthRanOffMainThread.withLock { $0 = !Thread.isMainThread }
+                handler(.authorized)
+            }
+        }
+        XCTAssertTrue(speechAuthRanOffMainThread.withLock { $0 })
+        XCTAssertEqual(authStatus, .authorized)
+
+        let fileRecogRanOffMainThread = LockedBox<Bool>(false)
+        let fileRecogState = RecognitionState()
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HollerKitTranscript, Error>) in
+                let handler = SpeechTranscriber.makeFileRecognitionResultHandler(
+                    state: fileRecogState,
+                    continuation: continuation,
+                    localeIdentifier: "en_US",
+                    requireOnDeviceRecognition: false
+                )
+                DispatchQueue.global(qos: .userInitiated).async {
+                    fileRecogRanOffMainThread.withLock { $0 = !Thread.isMainThread }
+                    handler(nil, nil)
+                }
+            }
+            XCTFail("Expected empty recognition callback to throw transcriptionFailed")
+        } catch let error as SpeechTranscriberError {
+            XCTAssertTrue(fileRecogRanOffMainThread.withLock { $0 })
+            guard case .transcriptionFailed = error else {
+                XCTFail("Expected .transcriptionFailed, got \(error)")
+                return
+            }
+        }
     }
     #endif
 
