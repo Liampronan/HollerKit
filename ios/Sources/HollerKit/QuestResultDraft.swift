@@ -686,6 +686,11 @@ final class QuestResultDraft {
 
             comment = speechCapture.consumeTranscriptForCommentMerge(into: comment)
             let userAttachments = imageAttachments()
+            if userAttachments.count != images.count {
+                submissionError = "Some attachments could not be prepared within the server limits. Remove them and try again."
+                SubmissionHaptics.notifyError()
+                return
+            }
             let markCount = session.marks.filter { !$0.imageData.isEmpty }.count
             let totalAttachmentCount = markCount + userAttachments.count
             let userImageCount = userAttachments.filter { $0.kind != "video" }.count

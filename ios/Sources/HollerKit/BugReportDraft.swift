@@ -1032,6 +1032,11 @@ final class BugReportDraft {
                 }
             }
             let attachmentsToUpload = audioOnly ? [] : imageAttachments()
+            if !audioOnly, attachmentsToUpload.count != min(images.count, Self.maxAttachments) {
+                submissionError = "Some attachments could not be prepared within the server limits. Remove them and try again."
+                SubmissionHaptics.notifyError()
+                return
+            }
             let transcriptToSubmit = speechCapture.transcript
             if let transcriptText = transcriptToSubmit?.text,
                transcriptText.utf16.count > SpeechCaptureController.maxCommentCharacters
