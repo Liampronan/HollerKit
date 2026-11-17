@@ -57,3 +57,18 @@ Point your MCP client at the built `mcp/dist/cli.js` entrypoint (or `npx -y holl
 | `quests_pending` | `agent:read` | Lists untested active quests for a given `build` (quests without a passing run on their current version). |
 | `quests_retirable` | `agent:read` | Lists active quests that have at least one passing run on their current definition (optional `area` filter). Review any failing runs before removing a quest from `hollerkit-quests.json`. |
 | `values_query` | `agent:read` | Queries aggregated measurements and quest captures (`n`, `median`, `p90`, `min`, `max`, and optional `groupBy` breakdowns) across feedback runs and builds. |
+
+---
+
+## 4. Available MCP Prompts & Agent Skill
+
+`hollerkit-mcp` also exposes reusable MCP prompts (`prompts/list` & `prompts/get`):
+
+| Prompt | Arguments | Purpose |
+| :--- | :--- | :--- |
+| `triage-inbox` | `area?`, `build?` | Step-by-step workflow to inspect untriaged reports/quest runs, fix issues, and record triage decisions. |
+| `author-quest` | `area` (required), `summary` (required), `start?` | Drafts a new `hollerkit-quests.json` entry (including optional `capture` telemetry rules) for a feature or fix. |
+| `retire-passed-quests` | `area?` | Identifies active quests that have passed on their current content version and retires them from `hollerkit-quests.json`. |
+| `analyze-values` | `quest` (required), `label?`, `groupBy?` | Queries and summarizes `median`/`p90` telemetry measurements across builds or devices. |
+
+For agents that support `SKILL.md` discovery, see [`skills/hollerkit/SKILL.md`](../skills/hollerkit/SKILL.md).

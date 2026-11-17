@@ -15,6 +15,7 @@ import {
 } from '../../server/dist/index.js'
 import {
   createHollerKitMcpServer,
+  HOLLERKIT_MCP_PROMPTS,
   HOLLERKIT_MCP_TOOLS,
   HOLLERKIT_MCP_VERSION,
   type FeedbackGetOutput,
@@ -23,6 +24,7 @@ import {
   type JsonRpcErrorResponse,
   type JsonRpcSuccessResponse,
   type McpCallToolResult,
+  type McpGetPromptResult,
   type QuestsPendingOutput,
   type QuestsRetirableOutput,
 } from '../dist/index.js'
@@ -1234,4 +1236,115 @@ test('feedback_get with includeImages=true gracefully skips failed or oversized 
   })
   assert.equal(htmlRes.isError, false)
   assert.equal(htmlRes.content.length, 1)
+})
+
+test('exposes MCP prompts capability (prompts/list and prompts/get) and validates prompt arguments', async () => {
+  const harness = await createSeededTestHarness()
+
+  const mcp = createHollerKitMcpServer({
+    baseUrl: BASE_URL,
+    apiKey: harness.agentFullKey,
+    fetch: harness.inProcessFetch,
+  })
+
+  assert.equal(mcp.prompts.length, 4)
+  assert.deepEqual(
+    mcp.prompts.map((p) => p.name),
+    ['triage-inbox', 'author-quest', 'retire-passed-quests', 'analyze-values'],
+  )
+
+  // 1. initialize advertises prompts capability
+  const initRes = (await mcp.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2024-11-05' },
+  })) as JsonRpcSuccessResponse
+  const initResult = initRes.result as {
+    capabilities: { tools?: unknown; prompts?: { listChanged: boolean } }
+  }
+  assert.deepEqual(initResult.capabilities.prompts, { listChanged: false })
+
+  // 2. prompts/list returns all 4 prompts
+  const listRes = (await mcp.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'prompts/list',
+  })) as JsonRpcSuccessResponse
+  const listResult = listRes.result as { prompts: typeof HOLLERKIT_MCP_PROMPTS }
+  assert.equal(listResult.prompts.length, 4)
+
+  // 3. prompts/get resolves each prompt
+  const authorRes = (await mcp.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'prompts/get',
+    params: {
+      name: 'author-quest',
+      arguments: {
+        area: 'checkout',
+        summary: 'Apply promo code and verify total',
+        start: 'hollerkitdemo://checkout',
+      },
+    },
+  })) as JsonRpcSuccessResponse
+  const authorPrompt = authorRes.result as McpGetPromptResult
+  assert.equal(authorPrompt.messages.length, 1)
+  assert.equal(authorPrompt.messages[0]?.role, 'user')
+  assert.match(String(authorPrompt.messages[0]?.content.type === 'text' ? authorPrompt.messages[0]?.content.text : ''), /hollerkitdemo:\/\/checkout/)
+
+  const triagePrompt = mcp.getPrompt('triage-inbox', { area: 'feed', build: '105' })
+  assert.match(String(triagePrompt.messages[0]?.content.type === 'text' ? triagePrompt.messages[0]?.content.text : ''), /area="feed"/)
+  assert.match(String(triagePrompt.messages[0]?.content.type === 'text' ? triagePrompt.messages[0]?.content.text : ''), /build="105"/)
+
+  const retirePrompt = mcp.getPrompt('retire-passed-quests', { area: 'camera' })
+  assert.match(String(retirePrompt.messages[0]?.content.type === 'text' ? retirePrompt.messages[0]?.content.text : ''), /quests_retirable/)
+
+  const analyzePrompt = mcp.getPrompt('analyze-values', {
+    quest: 'feed-scroll-restore',
+    label: 'restore_latency',
+    groupBy: 'build',
+  })
+  assert.match(String(analyzePrompt.messages[0]?.content.type === 'text' ? analyzePrompt.messages[0]?.content.text : ''), /values_query/)
+
+  // 4. Missing required argument or unknown prompt returns -32602
+  const missingRequiredRpc = (await mcp.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 4,
+    method: 'prompts/get',
+    params: {
+      name: 'author-quest',
+      arguments: { area: 'checkout' },
+    },
+  })) as JsonRpcErrorResponse
+  assert.equal(missingRequiredRpc.error.code, -32602)
+  assert.match(missingRequiredRpc.error.message, /Missing required argument "summary"/)
+
+  const unknownPromptRpc = (await mcp.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 5,
+    method: 'prompts/get',
+    params: {
+      name: 'nonexistent-prompt',
+      arguments: {},
+    },
+  })) as JsonRpcErrorResponse
+  assert.equal(unknownPromptRpc.error.code, -32602)
+  assert.match(unknownPromptRpc.error.message, /Unknown MCP prompt/)
+
+  // 5. Unsupported groupBy in analyze-values returns -32602
+  const invalidGroupByRpc = (await mcp.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 6,
+    method: 'prompts/get',
+    params: {
+      name: 'analyze-values',
+      arguments: {
+        quest: 'feed-scroll-restore',
+        groupBy: 'devices',
+      },
+    },
+  })) as JsonRpcErrorResponse
+  assert.equal(invalidGroupByRpc.error.code, -32602)
+  assert.match(invalidGroupByRpc.error.message, /groupBy must be one of/)
 })
