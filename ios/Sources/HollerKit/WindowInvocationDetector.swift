@@ -372,6 +372,7 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
     private var onTrigger: (HollerKitTrigger, HollerKitInvocationAction) -> Void
 
     private weak var currentWindow: UIWindow?
+    private var isMountedInHierarchy = false
     private var strokeRecognizer: HollerKitStrokeGestureRecognizer?
     private var drawingView: StrokeDrawingView?
     private var twoFingerLongPressRecognizer: HollerKitMultiFingerLongPressGestureRecognizer?
@@ -441,21 +442,30 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
     override func didMoveToSuperview() {
         super.didMoveToSuperview()
         if superview != nil {
+            isMountedInHierarchy = true
             reconcileWithResolvedWindow()
+        } else if window == nil {
+            isMountedInHierarchy = false
+            detachFromWindow()
         }
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if let window {
+            isMountedInHierarchy = true
             attachToWindow(window)
         } else {
+            isMountedInHierarchy = false
             detachFromWindow()
         }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if superview != nil || window != nil {
+            isMountedInHierarchy = true
+        }
         if currentWindow == nil || (window != nil && window !== currentWindow) {
             reconcileWithResolvedWindow()
         }
@@ -476,6 +486,9 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
     }
 
     func resolveTargetWindow() -> UIWindow? {
+        guard isMountedInHierarchy, superview != nil || window != nil else {
+            return nil
+        }
         if let window = self.window, !(window is PassthroughOverlayWindow) {
             return window
         }
@@ -490,7 +503,9 @@ final class WindowInvocationHostingView: UIView, UIGestureRecognizerDelegate {
     }
 
     func reconcileWithResolvedWindow() {
-        guard HollerKitEnvironment.isDebugOrTestFlight else {
+        guard HollerKitEnvironment.isDebugOrTestFlight,
+              isMountedInHierarchy,
+              superview != nil || window != nil else {
             detachFromWindow()
             return
         }

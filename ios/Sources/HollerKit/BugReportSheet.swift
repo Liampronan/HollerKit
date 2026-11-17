@@ -1548,8 +1548,12 @@ public struct BugReportSheet: View {
             configuration: configuration,
             invocationAttachments: []
         )
-        HollerKit.presenterState.isBugReportSheetVisible = false
-        HollerKit.presenterState.activeVisiblePresentationId = nil
+        guard HollerKit.presenterState.presentationId == presentationId else { return }
+        if HollerKit.presenterState.activeVisiblePresentationId == nil
+            || HollerKit.presenterState.activeVisiblePresentationId == presentationId {
+            HollerKit.presenterState.isBugReportSheetVisible = false
+            HollerKit.presenterState.activeVisiblePresentationId = nil
+        }
         if HollerKit.presenterState.isPresented {
             HollerKit.presenterState.isPresented = false
         }
@@ -1564,8 +1568,12 @@ public struct BugReportSheet: View {
             breadcrumbs: breadcrumbs,
             outboxStore: outboxStore,
             onDisabled: {
-                HollerKit.presenterState.isBugReportSheetVisible = false
-                HollerKit.presenterState.activeVisiblePresentationId = nil
+                guard HollerKit.presenterState.presentationId == presentationId else { return }
+                if HollerKit.presenterState.activeVisiblePresentationId == nil
+                    || HollerKit.presenterState.activeVisiblePresentationId == presentationId {
+                    HollerKit.presenterState.isBugReportSheetVisible = false
+                    HollerKit.presenterState.activeVisiblePresentationId = nil
+                }
                 if HollerKit.presenterState.isPresented {
                     HollerKit.presenterState.isPresented = false
                 }

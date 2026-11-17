@@ -97,6 +97,19 @@ final class HollerKitTests: XCTestCase {
         super.tearDown()
     }
 
+    @MainActor
+    private func resetInvocationPresentationState() {
+        HollerKit.presenterState.isPresented = false
+        HollerKit.presenterState.isBugReportSheetVisible = false
+        HollerKit.presenterState.isQuestsPresented = false
+        HollerKit.presenterState.isQuestsSheetVisible = false
+        HollerKit.presenterState.presentQuestsAfterBugReportDismiss = false
+        HollerKit.presenterState.activeVisiblePresentationId = nil
+        HollerKit.presenterState.lastPresentationRequestedAt = nil
+        HollerKit.presenterState.lastQuestsPresentationRequestedAt = nil
+        HollerKit.clearPresentationAttachments()
+    }
+
     private func makeStubSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubURLProtocol.self]
@@ -3930,12 +3943,14 @@ final class HollerKitTests: XCTestCase {
 
     @MainActor
     func testBugReportToQuestBoardSheetPresentationCoordination() throws {
+        defer { resetInvocationPresentationState() }
         let config = HollerKitConfiguration(
             server: URL(string: "https://api.hollerkit.test")!,
             auth: { "tester-jwt" },
             isEnabled: { true }
         )
         HollerKit.configure(config)
+        resetInvocationPresentationState()
 
         HollerKit.present()
         XCTAssertTrue(HollerKit.presenterState.isPresented)
@@ -6027,9 +6042,8 @@ final class HollerKitTests: XCTestCase {
             urlSession: makeStubSession(),
             outboxDirectoryURL: tempDir
         ))
-        HollerKit.presenterState.isPresented = false
-        HollerKit.presenterState.isBugReportSheetVisible = false
-        HollerKit.clearPresentationAttachments()
+        resetInvocationPresentationState()
+        defer { resetInvocationPresentationState() }
 
         let rootView = Text("Host App Root")
             .frame(width: 390, height: 844)
@@ -6136,9 +6150,8 @@ final class HollerKitTests: XCTestCase {
             urlSession: makeStubSession(),
             outboxDirectoryURL: tempDir
         ))
-        HollerKit.presenterState.isPresented = false
-        HollerKit.presenterState.isBugReportSheetVisible = false
-        HollerKit.clearPresentationAttachments()
+        resetInvocationPresentationState()
+        defer { resetInvocationPresentationState() }
 
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.isHidden = false
@@ -6279,9 +6292,8 @@ final class HollerKitTests: XCTestCase {
             outboxDirectoryURL: tempDir
         )
         HollerKit.configure(config)
-        HollerKit.presenterState.isPresented = false
-        HollerKit.presenterState.isBugReportSheetVisible = false
-        HollerKit.clearPresentationAttachments()
+        resetInvocationPresentationState()
+        defer { resetInvocationPresentationState() }
 
         // 1. Trigger via twoFingerLongPress -> presents sheet
         HollerKitPresenterModifier.handleTrigger(.twoFingerLongPress, action: .bugReport)
