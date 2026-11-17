@@ -6012,5 +6012,351 @@ final class HollerKitTests: XCTestCase {
             "Stale completeSubmittedSession(id:) must not end quest-relative breadcrumb tracking for the active quest"
         )
     }
+
+    @MainActor
+    func testWindowInvocationRuntimeSwitchAttachesTwoFingerLongPressAndReconcilesLiveWindow() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitTwoFingerRuntimeSwitch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "token" },
+            isEnabled: { true },
+            invocation: [.shake: .bugReport, .stroke(.leftToCenter): .bugReport],
+            urlSession: makeStubSession(),
+            outboxDirectoryURL: tempDir
+        ))
+        HollerKit.presenterState.isPresented = false
+        HollerKit.presenterState.isBugReportSheetVisible = false
+        HollerKit.clearPresentationAttachments()
+
+        let rootView = Text("Host App Root")
+            .frame(width: 390, height: 844)
+            .hollerKitPresenter()
+        let hostingController = UIHostingController(rootView: rootView)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = hostingController
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+
+        hostingController.view.frame = window.bounds
+        hostingController.view.setNeedsLayout()
+        hostingController.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        hostingController.view.layoutIfNeeded()
+
+        let hostingView = try XCTUnwrap(
+            WindowInvocationHostingView.registeredHostingViewsForTesting.first(where: { $0.currentAttachedWindow === window }),
+            "Expected WindowInvocationHostingView attached to live host window"
+        )
+        XCTAssertNotNil(hostingView.currentStrokeRecognizer)
+        XCTAssertNil(hostingView.currentTwoFingerLongPressRecognizer)
+
+        // Switch triggers at runtime from [.shake, .stroke(.leftToCenter)] to [.shake, .twoFingerLongPress]
+        // without forcing a manual SwiftUI view rebuild.
+        HollerKit.setInvocation([.shake: .bugReport, .twoFingerLongPress: .bugReport])
+
+        XCTAssertNil(hostingView.currentStrokeRecognizer, "Stroke recognizer must be detached after switching to twoFingerLongPress")
+        let twoFingerRecognizer = try XCTUnwrap(
+            hostingView.currentTwoFingerLongPressRecognizer,
+            "Two-finger long press recognizer must be attached to the live window immediately on setInvocation"
+        )
+        XCTAssertTrue(window.gestureRecognizers?.contains(twoFingerRecognizer) == true)
+        XCTAssertEqual(twoFingerRecognizer.numberOfTouchesRequired, 2)
+        XCTAssertEqual(twoFingerRecognizer.minimumPressDuration, 0.5, accuracy: 0.01)
+        XCTAssertEqual(twoFingerRecognizer.allowableMovement, 28.0, accuracy: 0.01)
+        XCTAssertFalse(twoFingerRecognizer.cancelsTouchesInView)
+        XCTAssertFalse(twoFingerRecognizer.delaysTouchesBegan)
+        XCTAssertFalse(twoFingerRecognizer.delaysTouchesEnded)
+
+        // Verify simultaneous recognition and non-blocking failure requirements against competing Mapbox / ScrollView gestures
+        let competingPinch = UIPinchGestureRecognizer()
+        let competingRotate = UIRotationGestureRecognizer()
+        let competingTwoFingerPan = UIPanGestureRecognizer()
+        competingTwoFingerPan.minimumNumberOfTouches = 2
+        let competingThreeFingerLongPress = UILongPressGestureRecognizer()
+        competingThreeFingerLongPress.numberOfTouchesRequired = 3
+
+        for competing in [competingPinch, competingRotate, competingTwoFingerPan, competingThreeFingerLongPress] {
+            XCTAssertFalse(twoFingerRecognizer.canPrevent(competing))
+            XCTAssertFalse(twoFingerRecognizer.canBePrevented(by: competing))
+            XCTAssertFalse(twoFingerRecognizer.shouldRequireFailure(of: competing))
+            XCTAssertFalse(twoFingerRecognizer.shouldBeRequiredToFail(by: competing))
+            XCTAssertTrue(hostingView.gestureRecognizer(twoFingerRecognizer, shouldRecognizeSimultaneouslyWith: competing))
+            XCTAssertFalse(hostingView.gestureRecognizer(twoFingerRecognizer, shouldRequireFailureOf: competing))
+            XCTAssertFalse(hostingView.gestureRecognizer(twoFingerRecognizer, shouldBeRequiredToFailBy: competing))
+        }
+
+        // Recognizing the two-finger long press presents the bug report and logs the invocation breadcrumb
+        twoFingerRecognizer.recognizeForTesting()
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+        XCTAssertEqual(HollerKit.currentBugReportDraft.invokingTrigger, "twoFingerLongPress")
+        XCTAssertTrue(
+            HollerKit.currentBreadcrumbs.snapshot().contains(where: {
+                $0.category == "invocation" && $0.message == "Invoked bug report via twoFingerLongPress"
+            }),
+            "Expected 'Invoked bug report via twoFingerLongPress' breadcrumb when two-finger long press fires"
+        )
+
+        HollerKit.presenterState.isPresented = false
+        HollerKit.clearPresentationAttachments()
+    }
+
+    @MainActor
+    func testMultiFingerLongPressTouchTrackingOverCompetingMapAndScrollRecognizers() async throws {
+        final class StubTouch: UITouch {
+            var stubLocation: CGPoint
+            var stubPhase: UITouch.Phase
+
+            init(location: CGPoint, phase: UITouch.Phase = .began) {
+                self.stubLocation = location
+                self.stubPhase = phase
+                super.init()
+            }
+
+            override var phase: UITouch.Phase {
+                stubPhase
+            }
+
+            override func location(in view: UIView?) -> CGPoint {
+                stubLocation
+            }
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitMultiFingerTouchTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        HollerKit.configure(HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "token" },
+            isEnabled: { true },
+            invocation: [.shake: .bugReport, .twoFingerLongPress: .bugReport],
+            urlSession: makeStubSession(),
+            outboxDirectoryURL: tempDir
+        ))
+        HollerKit.presenterState.isPresented = false
+        HollerKit.presenterState.isBugReportSheetVisible = false
+        HollerKit.clearPresentationAttachments()
+
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.isHidden = false
+        defer { window.isHidden = true }
+
+        var triggeredActions: [(HollerKitTrigger, HollerKitInvocationAction)] = []
+        let hostingView = WindowInvocationHostingView(
+            invocation: [.shake: .bugReport, .twoFingerLongPress: .bugReport],
+            onTrigger: { trigger, action in
+                triggeredActions.append((trigger, action))
+                HollerKitPresenterModifier.handleTrigger(trigger, action: action)
+            }
+        )
+        window.addSubview(hostingView)
+        hostingView.layoutIfNeeded()
+
+        let recognizer = try XCTUnwrap(hostingView.currentTwoFingerLongPressRecognizer)
+        recognizer.minimumPressDuration = 0.08
+        let dummyEvent = UIEvent()
+
+        // 1. Ordinary 1-finger tap must not trigger and must NOT log any failure breadcrumb
+        let singleTouch = StubTouch(location: CGPoint(x: 120, y: 300), phase: .began)
+        recognizer.touchesBegan([singleTouch], with: dummyEvent)
+        singleTouch.stubPhase = .ended
+        recognizer.touchesEnded([singleTouch], with: dummyEvent)
+        XCTAssertTrue(triggeredActions.isEmpty)
+        XCTAssertFalse(
+            HollerKit.currentBreadcrumbs.snapshot().contains(where: { $0.message.contains("twoFingerLongPress failed") }),
+            "Single-finger taps must never record twoFingerLongPress failure breadcrumbs"
+        )
+
+        // 2. Three-finger press (e.g. trash-app dev menu) must abort twoFingerLongPress without firing or logging a failure breadcrumb
+        let threeTouchA = StubTouch(location: CGPoint(x: 100, y: 300), phase: .began)
+        let threeTouchB = StubTouch(location: CGPoint(x: 160, y: 300), phase: .began)
+        let threeTouchC = StubTouch(location: CGPoint(x: 220, y: 300), phase: .began)
+        recognizer.touchesBegan([threeTouchA, threeTouchB, threeTouchC], with: dummyEvent)
+        XCTAssertTrue(recognizer.exceededRequiredTouches)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(triggeredActions.isEmpty, "Three-finger press must not trigger two-finger long press")
+        threeTouchA.stubPhase = .ended
+        threeTouchB.stubPhase = .ended
+        threeTouchC.stubPhase = .ended
+        recognizer.touchesEnded([threeTouchA, threeTouchB, threeTouchC], with: dummyEvent)
+        XCTAssertFalse(
+            HollerKit.currentBreadcrumbs.snapshot().contains(where: { $0.message.contains("twoFingerLongPress failed") }),
+            "Three-finger dev menu press must not record twoFingerLongPress failure breadcrumbs"
+        )
+
+        // 3. Active two-finger map pinch/pan exceeding allowableMovement (> 28pt) fails and logs a diagnostic breadcrumb
+        let pinchTouchA = StubTouch(location: CGPoint(x: 140, y: 400), phase: .began)
+        let pinchTouchB = StubTouch(location: CGPoint(x: 240, y: 400), phase: .began)
+        recognizer.touchesBegan([pinchTouchA, pinchTouchB], with: dummyEvent)
+        pinchTouchA.stubPhase = .moved
+        pinchTouchA.stubLocation = CGPoint(x: 100, y: 400) // moved 40pt (> 28pt allowableMovement)
+        recognizer.touchesMoved([pinchTouchA], with: dummyEvent)
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(triggeredActions.isEmpty, "Map pinch exceeding allowableMovement must not trigger bug report")
+        pinchTouchA.stubPhase = .ended
+        pinchTouchB.stubPhase = .ended
+        recognizer.touchesEnded([pinchTouchA, pinchTouchB], with: dummyEvent)
+
+        let pinchFailureCrumb = HollerKit.currentBreadcrumbs.snapshot().first(where: {
+            $0.category == "invocation" && $0.message == "Gesture twoFingerLongPress failed (movement_exceeded)"
+        })
+        XCTAssertNotNil(pinchFailureCrumb, "Expected diagnostic breadcrumb when a 2-finger press fails due to movement")
+        XCTAssertEqual(pinchFailureCrumb?.fields["reason"], .string("movement_exceeded"))
+        XCTAssertEqual(pinchFailureCrumb?.fields["touches"], .int(2))
+
+        // 4. Asynchronous 2-finger placement with natural pad jitter (<= 28pt) and premature UIKit reset() from a competing
+        // Mapbox gesture recognizer still succeeds after minimumPressDuration!
+        let holdTouch1 = StubTouch(location: CGPoint(x: 150, y: 420), phase: .began)
+        recognizer.touchesBegan([holdTouch1], with: dummyEvent)
+        // Finger 1 shifts by 16pt while Finger 2 is landing
+        holdTouch1.stubPhase = .moved
+        holdTouch1.stubLocation = CGPoint(x: 166, y: 420)
+        let holdTouch2 = StubTouch(location: CGPoint(x: 230, y: 420), phase: .began)
+        recognizer.touchesBegan([holdTouch2], with: dummyEvent)
+
+        // Simulate slight 14pt two-finger jitter on a map and a competing Mapbox recognizer causing UIKit to call reset()
+        holdTouch1.stubLocation = CGPoint(x: 176, y: 426)
+        holdTouch2.stubPhase = .stationary
+        recognizer.touchesMoved([holdTouch1], with: dummyEvent)
+        recognizer.reset()
+
+        try await Task.sleep(nanoseconds: 140_000_000)
+        XCTAssertEqual(triggeredActions.count, 1, "Two-finger hold within allowableMovement must trigger even if a competing recognizer called reset()")
+        XCTAssertEqual(triggeredActions.first?.0, .twoFingerLongPress)
+        XCTAssertEqual(triggeredActions.first?.1, .bugReport)
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+        XCTAssertEqual(HollerKit.currentBugReportDraft.invokingTrigger, "twoFingerLongPress")
+
+        holdTouch1.stubPhase = .ended
+        holdTouch2.stubPhase = .ended
+        recognizer.touchesEnded([holdTouch1, holdTouch2], with: dummyEvent)
+        HollerKit.presenterState.isPresented = false
+        HollerKit.clearPresentationAttachments()
+    }
+
+    @MainActor
+    func testTwoFingerLongPressReTriggersAfterStayOpenDismissalAndStalePresentationRecovery() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HollerKitTwoFingerStayOpen-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        StubURLProtocol.setHandler { request, bodyData in
+            guard let url = request.url else { throw URLError(.badURL) }
+            if url.path == "/v1/feedback", request.httpMethod == "POST" {
+                let body = (try? JSONSerialization.jsonObject(with: bodyData ?? Data())) as? [String: Any] ?? [:]
+                let id = (body["id"] as? String) ?? UUID().uuidString.lowercased()
+                let responseJSON: [String: Any] = [
+                    "ok": true,
+                    "idempotent": false,
+                    "feedback": [
+                        "id": id,
+                        "kind": "report",
+                        "build": "109",
+                        "submitterId": "tester-1",
+                        "createdAt": "2026-11-15T02:58:00Z",
+                        "updatedAt": "2026-11-15T02:58:00Z",
+                        "comment": (body["comment"] as? String) as Any
+                    ]
+                ]
+                let data = try JSONSerialization.data(withJSONObject: responseJSON)
+                let response = HTTPURLResponse(url: url, statusCode: 201, httpVersion: nil, headerFields: nil)!
+                return (response, data)
+            }
+            let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        let config = HollerKitConfiguration(
+            server: URL(string: "https://api.hollerkit.test")!,
+            auth: { "tester-jwt" },
+            isEnabled: { true },
+            invocation: [.shake: .bugReport, .twoFingerLongPress: .bugReport],
+            afterSend: .stayOpen(resetDelay: 0),
+            urlSession: makeStubSession(),
+            outboxDirectoryURL: tempDir
+        )
+        HollerKit.configure(config)
+        HollerKit.presenterState.isPresented = false
+        HollerKit.presenterState.isBugReportSheetVisible = false
+        HollerKit.clearPresentationAttachments()
+
+        // 1. Trigger via twoFingerLongPress -> presents sheet
+        HollerKitPresenterModifier.handleTrigger(.twoFingerLongPress, action: .bugReport)
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+        HollerKit.presenterState.isBugReportSheetVisible = true
+
+        // While the sheet is actively visible on screen, non-shake triggers are ignored and log a diagnostic breadcrumb
+        HollerKitPresenterModifier.handleTrigger(.twoFingerLongPress, action: .bugReport)
+        XCTAssertTrue(
+            HollerKit.currentBreadcrumbs.snapshot().contains(where: {
+                $0.category == "invocation" && $0.message == "Ignored twoFingerLongPress trigger while sheet already presented"
+            })
+        )
+
+        // 2. Submit report with afterSend: .stayOpen, then close the sheet via finishAndDismiss()
+        let firstDraft = HollerKit.currentBugReportDraft
+        firstDraft.comment = "First report before closing stayOpen sheet"
+        await firstDraft.submit(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore
+        )
+        XCTAssertTrue(HollerKit.isPresentationRequested, "Sheet stays open immediately after send when afterSend == .stayOpen")
+
+        let sheetView = BugReportSheet(
+            configuration: config,
+            breadcrumbs: HollerKit.currentBreadcrumbs,
+            outboxStore: HollerKit.currentOutboxStore,
+            draft: firstDraft,
+            presentationId: HollerKit.currentPresentationId
+        )
+        sheetView.finishAndDismiss()
+        HollerKit.clearPresentationAttachments()
+
+        XCTAssertFalse(HollerKit.isPresentationRequested, "finishAndDismiss() must reset isPresented to false")
+        XCTAssertFalse(HollerKit.presenterState.isBugReportSheetVisible)
+
+        // 3. Trigger via twoFingerLongPress again after closing -> must present again cleanly
+        HollerKitPresenterModifier.handleTrigger(.twoFingerLongPress, action: .bugReport)
+        XCTAssertTrue(HollerKit.isPresentationRequested)
+        let invokeCrumbs = HollerKit.currentBreadcrumbs.snapshot().filter {
+            $0.category == "invocation" && $0.message == "Invoked bug report via twoFingerLongPress"
+        }
+        XCTAssertEqual(invokeCrumbs.count, 2, "twoFingerLongPress must present again after stayOpen sheet is dismissed")
+
+        // 4. Verify stale isPresented recovery when an earlier presentation failed to mount (e.g. blocked by host Dev Menu sheet)
+        let rootVC = UIViewController()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = rootVC
+        window.isHidden = false
+        defer { window.isHidden = true }
+
+        let hostingView = WindowInvocationHostingView(
+            invocation: [.shake: .bugReport, .twoFingerLongPress: .bugReport],
+            onTrigger: { _, _ in }
+        )
+        window.addSubview(hostingView)
+        hostingView.layoutIfNeeded()
+
+        HollerKit.presenterState.isPresented = true
+        HollerKit.presenterState.isBugReportSheetVisible = false
+        HollerKit.presenterState.lastPresentationRequestedAt = Date().addingTimeInterval(-2.0)
+
+        HollerKitPresenterModifier.handleTrigger(.twoFingerLongPress, action: .bugReport)
+        let invokeCrumbsAfterRecovery = HollerKit.currentBreadcrumbs.snapshot().filter {
+            $0.category == "invocation" && $0.message == "Invoked bug report via twoFingerLongPress"
+        }
+        XCTAssertEqual(
+            invokeCrumbsAfterRecovery.count,
+            3,
+            "Stale isPresented state (when no sheet is mounted on the window) must heal and allow twoFingerLongPress to present"
+        )
+
+        HollerKit.presenterState.isPresented = false
+        HollerKit.clearPresentationAttachments()
+    }
     #endif
 }
