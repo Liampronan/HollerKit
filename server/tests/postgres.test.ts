@@ -345,6 +345,72 @@ test('runs full v1 conformance suite and Postgres-specific invariants against po
       nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
     })
     assert.equal(lateFailureResult, null)
+
+    // Verify SQL-backed queryValues computes exact summary & group percentiles across all matching rows even when limit truncates raw values
+    const perfQuestId = 'sql-percentile-quest'
+    await store.syncQuests({
+      quests: [
+        {
+          id: perfQuestId,
+          title: 'SQL percentile aggregation verification',
+          area: 'perf',
+          steps: ['Measure render'],
+          expect: ['Under threshold'],
+          capture: [
+            {
+              event: 'perf.render',
+              value: 'durationMs',
+              unit: 'ms',
+              label: 'render_ms',
+              min: 10,
+              max: 500,
+            },
+          ],
+        },
+      ],
+    })
+    const sampleMeasurements = [100, 200, 300, 400, 500]
+    for (let i = 0; i < sampleMeasurements.length; i++) {
+      await store.createFeedback({
+        id: randomUUID(),
+        kind: 'quest_run',
+        questId: perfQuestId,
+        questVersion: 1,
+        result: 'pass',
+        build: i < 2 ? 'build-A' : 'build-B',
+        submitterId: 'tester-alice',
+        events: [
+          {
+            kind: 'breadcrumb',
+            offsetSeconds: i + 1,
+            payload: {
+              message: 'perf.render',
+              durationMs: sampleMeasurements[i],
+            },
+          },
+        ],
+      })
+    }
+
+    const sqlValuesRes = await store.queryValues({
+      quest: perfQuestId,
+      label: 'render_ms',
+      groupBy: 'build',
+      limit: 2,
+    })
+    assert.equal(sqlValuesRes.n, 5, 'Summary n must aggregate all 5 matching rows despite limit=2')
+    assert.equal(sqlValuesRes.min, 100)
+    assert.equal(sqlValuesRes.max, 500)
+    assert.equal(sqlValuesRes.median, 300)
+    assert.equal(sqlValuesRes.p90, 460)
+    assert.equal(sqlValuesRes.values.length, 2, 'Raw values array must respect limit=2')
+    assert.equal(sqlValuesRes.groups.length, 2)
+    const groupA = sqlValuesRes.groups.find((g) => g.build === 'build-A')
+    const groupB = sqlValuesRes.groups.find((g) => g.build === 'build-B')
+    assert.equal(groupA?.n, 2)
+    assert.equal(groupA?.median, 150)
+    assert.equal(groupB?.n, 3)
+    assert.equal(groupB?.median, 400)
   } finally {
     await secondStore.close()
     await store.close()

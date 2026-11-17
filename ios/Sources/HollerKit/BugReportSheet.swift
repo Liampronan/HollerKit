@@ -300,6 +300,8 @@ public struct BugReportSheet: View {
             #endif
         }
         .onAppear {
+            HollerKit.presenterState.activeVisiblePresentationId = presentationId
+            HollerKit.presenterState.isBugReportSheetVisible = true
             refreshClipboardImageAvailability()
             if draft.submissionOutcome != nil {
                 draft.resetForAnotherReport(
@@ -313,7 +315,9 @@ public struct BugReportSheet: View {
                 )
             }
         }
-        .onChange(of: presentationId) { _, _ in
+        .onChange(of: presentationId) { _, newPresentationId in
+            HollerKit.presenterState.activeVisiblePresentationId = newPresentationId
+            HollerKit.presenterState.isBugReportSheetVisible = true
             if let externalDraft {
                 draft = externalDraft
             }
@@ -360,6 +364,17 @@ public struct BugReportSheet: View {
                     invocationAttachments: []
                 )
             }
+            if HollerKit.presenterState.activeVisiblePresentationId == nil
+                || HollerKit.presenterState.activeVisiblePresentationId == presentationId {
+                HollerKit.presenterState.isBugReportSheetVisible = false
+                HollerKit.presenterState.activeVisiblePresentationId = nil
+                if draft.selectedImage == nil,
+                   HollerKit.presenterState.presentationId == presentationId,
+                   HollerKit.presenterState.isPresented,
+                   !HollerKit.presenterState.presentQuestsAfterBugReportDismiss {
+                    HollerKit.presenterState.isPresented = false
+                }
+            }
         }
         .accessibilityIdentifier("HollerKitBugReportSheet")
     }
@@ -378,11 +393,20 @@ public struct BugReportSheet: View {
 
     /// Resets the draft and dismisses the bug report sheet.
     @MainActor
-    private func finishAndDismiss() {
+    func finishAndDismiss() {
         draft.resetForAnotherReport(
             configuration: configuration,
             invocationAttachments: []
         )
+        guard HollerKit.presenterState.presentationId == presentationId else { return }
+        if HollerKit.presenterState.activeVisiblePresentationId == nil
+            || HollerKit.presenterState.activeVisiblePresentationId == presentationId {
+            HollerKit.presenterState.isBugReportSheetVisible = false
+            HollerKit.presenterState.activeVisiblePresentationId = nil
+        }
+        if HollerKit.presenterState.isPresented {
+            HollerKit.presenterState.isPresented = false
+        }
         dismiss()
     }
 
@@ -394,6 +418,15 @@ public struct BugReportSheet: View {
             breadcrumbs: breadcrumbs,
             outboxStore: outboxStore,
             onDisabled: {
+                guard HollerKit.presenterState.presentationId == presentationId else { return }
+                if HollerKit.presenterState.activeVisiblePresentationId == nil
+                    || HollerKit.presenterState.activeVisiblePresentationId == presentationId {
+                    HollerKit.presenterState.isBugReportSheetVisible = false
+                    HollerKit.presenterState.activeVisiblePresentationId = nil
+                }
+                if HollerKit.presenterState.isPresented {
+                    HollerKit.presenterState.isPresented = false
+                }
                 dismiss()
             },
             onAutoDismiss: {

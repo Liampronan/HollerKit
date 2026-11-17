@@ -127,6 +127,10 @@ public struct QuestBoardView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") {
+                        HollerKit.presenterState.isQuestsSheetVisible = false
+                        if HollerKit.presenterState.isQuestsPresented {
+                            HollerKit.presenterState.isQuestsPresented = false
+                        }
                         dismiss()
                     }
                 }
@@ -144,6 +148,15 @@ public struct QuestBoardView: View {
                     }
                     .disabled(questState.isSyncing)
                     .accessibilityLabel("Refresh Quests")
+                }
+            }
+            .onAppear {
+                HollerKit.presenterState.isQuestsSheetVisible = true
+            }
+            .onDisappear {
+                HollerKit.presenterState.isQuestsSheetVisible = false
+                if HollerKit.presenterState.isQuestsPresented {
+                    HollerKit.presenterState.isQuestsPresented = false
                 }
             }
             .task {
