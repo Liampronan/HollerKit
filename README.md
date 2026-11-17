@@ -94,7 +94,7 @@ struct MyApp: App {
 
 - **[`ios/README.md`](./ios/README.md)** — iOS SDK setup, TestFlight gating, `Info.plist` keys, offline queueing, and protocol wrapper pattern.
 - **[`server/README.md`](./server/README.md)** — Database migration, private storage bucket, tester allowlist, Supabase/Node deployment, and `hollerkit` CLI commands.
-- **[`mcp/README.md`](./mcp/README.md)** & **[`skills/hollerkit/SKILL.md`](./skills/hollerkit/SKILL.md)** — MCP client configuration, tool & prompt reference, and coding agent skill.
+- **[`mcp/README.md`](./mcp/README.md)** — MCP client configuration and tool reference.
 - **[`QUEST_PROTOCOL.md`](./QUEST_PROTOCOL.md)** & **[`quest-protocol.yaml`](./quest-protocol.yaml)** — HTTP `/v1` wire specification and OpenAPI 3.1 schema.
 - **[`PRIVACY.md`](./PRIVACY.md)** & **[`SECURITY.md`](./SECURITY.md)** — Privacy guarantees and security model.
 

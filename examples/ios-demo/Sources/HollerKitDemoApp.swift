@@ -67,7 +67,7 @@ struct HollerKitDemoApp: App {
                 ],
                 needs: ["device"],
                 record: .optional,
-                source: QuestManifestSource(pr: 62, added: "2026-11-17")
+                source: QuestManifestSource(pr: 63, added: "2026-11-17")
             )
         ]
 
