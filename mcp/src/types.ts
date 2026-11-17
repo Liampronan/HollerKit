@@ -156,6 +156,8 @@ export interface FeedbackCaptureView {
 
 export interface FeedbackGetInput {
   id: string
+  includeImages?: boolean | undefined
+  maxImages?: number | undefined
 }
 
 export interface FeedbackGetOutput {
@@ -292,6 +294,14 @@ export interface McpTextContent {
   text: string
 }
 
+export interface McpImageContent {
+  type: 'image'
+  data: string
+  mimeType: string
+}
+
+export type McpContentBlock = McpTextContent | McpImageContent
+
 export type HollerKitPromptName =
   | 'triage-inbox'
   | 'author-quest'
@@ -312,7 +322,7 @@ export interface McpPromptDefinition {
 
 export interface McpPromptMessage {
   role: 'user' | 'assistant'
-  content: McpTextContent
+  content: McpTextContent | McpImageContent
 }
 
 export interface McpGetPromptResult {
@@ -321,7 +331,7 @@ export interface McpGetPromptResult {
 }
 
 export interface McpCallToolResult<T = Record<string, unknown>> {
-  content: McpTextContent[]
+  content: McpContentBlock[]
   structuredContent: T
   isError: boolean
 }

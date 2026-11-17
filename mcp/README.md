@@ -52,7 +52,7 @@ Point your MCP client at the built `mcp/dist/cli.js` entrypoint (or `npx -y holl
 | Tool | Scope | What it does |
 | :--- | :--- | :--- |
 | `feedback_inbox` | `agent:read` | Lists bug reports and quest runs. Defaults to `triage="new"`; pass `triage="all"` (with `cursor` pagination) to retrieve all items. Supports filtering by `triage`, `kind`, `result`, `area`, `since`, `build`, `questId`, `limit`, and `cursor`. |
-| `feedback_get` | `agent:read` | Fetches full details for a single report or quest run (`id`), including timeline events, triage history, and 1-hour signed screenshot URLs. |
+| `feedback_get` | `agent:read` | Fetches full details for a single report or quest run (`id`), including timeline events, triage history, and 1-hour signed screenshot URLs. Pass `includeImages: true` (and optional `maxImages: 1..12`, default `4`) to inline attached screenshots/marks/keyframes as native MCP `image` content blocks. |
 | `feedback_triage` | `agent:triage` | Records a triage decision. Every call requires `id`, `status` (`new`, `triaged`, `resolved`, `wontfix`, or `duplicate`), and a non-empty `summary` (plus optional `links` and `actor`). |
 | `quests_pending` | `agent:read` | Lists untested active quests for a given `build` (quests without a passing run on their current version). |
 | `quests_retirable` | `agent:read` | Lists active quests that have at least one passing run on their current definition (optional `area` filter). Review any failing runs before removing a quest from `hollerkit-quests.json`. |
