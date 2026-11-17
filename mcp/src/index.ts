@@ -10,6 +10,10 @@ export {
   HOLLERKIT_MCP_VERSION,
   type HollerKitMcpServer,
 } from './server.js'
+export {
+  HOLLERKIT_MCP_PROMPTS,
+  resolveHollerKitPrompt,
+} from './prompts.js'
 export { HOLLERKIT_MCP_TOOLS } from './tools.js'
 export type {
   AttachmentKind,
@@ -25,6 +29,7 @@ export type {
   FeedbackTriageOutput,
   FetchLike,
   HollerKitMcpConfig,
+  HollerKitPromptName,
   HollerKitToolName,
   JsonRpcErrorObject,
   JsonRpcErrorResponse,
@@ -33,6 +38,10 @@ export type {
   JsonRpcResponse,
   JsonRpcSuccessResponse,
   McpCallToolResult,
+  McpGetPromptResult,
+  McpPromptArgument,
+  McpPromptDefinition,
+  McpPromptMessage,
   McpTextContent,
   McpToolDefinition,
   QuestBoardStatus,

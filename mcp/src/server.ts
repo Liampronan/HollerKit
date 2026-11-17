@@ -5,6 +5,7 @@ import {
   HollerKitMcpError,
   type HollerKitMcpClient,
 } from './client.js'
+import { HOLLERKIT_MCP_PROMPTS, resolveHollerKitPrompt } from './prompts.js'
 import { HOLLERKIT_MCP_TOOLS } from './tools.js'
 import type {
   FeedbackGetInput,
@@ -16,6 +17,8 @@ import type {
   JsonRpcId,
   JsonRpcResponse,
   McpCallToolResult,
+  McpGetPromptResult,
+  McpPromptDefinition,
   McpToolDefinition,
   QuestsPendingInput,
   QuestsRetirableInput,
@@ -33,11 +36,16 @@ const SUPPORTED_MCP_PROTOCOL_VERSIONS = new Set([
 
 export interface HollerKitMcpServer {
   readonly tools: readonly McpToolDefinition[]
+  readonly prompts: readonly McpPromptDefinition[]
   readonly client: HollerKitMcpClient
   callTool(
     name: string,
     args?: Record<string, unknown> | undefined,
   ): Promise<McpCallToolResult>
+  getPrompt(
+    name: string,
+    args?: Record<string, unknown> | undefined,
+  ): McpGetPromptResult
   handleJsonRpc(
     message: unknown,
   ): Promise<JsonRpcResponse | JsonRpcResponse[] | null>
@@ -151,6 +159,16 @@ export function createHollerKitMcpServer(
   }
 
   /**
+   * Resolves a HollerKit MCP prompt template by name and validates its arguments.
+   */
+  function getPrompt(
+    name: string,
+    args?: Record<string, unknown> | undefined,
+  ): McpGetPromptResult {
+    return resolveHollerKitPrompt(name, args)
+  }
+
+  /**
    * Processes a single JSON-RPC 2.0 request or notification object.
    */
   async function handleSingleRpc(
@@ -212,6 +230,9 @@ export function createHollerKitMcpServer(
                 tools: {
                   listChanged: false,
                 },
+                prompts: {
+                  listChanged: false,
+                },
               },
               serverInfo: {
                 name: 'hollerkit-mcp',
@@ -227,6 +248,38 @@ export function createHollerKitMcpServer(
             id,
             result: {},
           }
+
+        case 'prompts/list':
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              prompts: HOLLERKIT_MCP_PROMPTS,
+            },
+          }
+
+        case 'prompts/get': {
+          if (!isPlainObject(params) || typeof params.name !== 'string' || params.name.trim().length === 0) {
+            return jsonRpcError(id, -32602, 'Invalid params: prompts/get requires a non-empty string "name".')
+          }
+          const rawPromptArgs = params.arguments === undefined ? {} : params.arguments
+          if (!isPlainObject(rawPromptArgs)) {
+            return jsonRpcError(id, -32602, 'Invalid params: prompts/get "arguments" must be an object.')
+          }
+          try {
+            const promptResult = getPrompt(params.name, rawPromptArgs)
+            return {
+              jsonrpc: '2.0',
+              id,
+              result: promptResult,
+            }
+          } catch (error) {
+            if (error instanceof HollerKitMcpError) {
+              return jsonRpcError(id, -32602, error.message, error.toJSON())
+            }
+            throw error
+          }
+        }
 
         case 'tools/list':
           return {
@@ -475,8 +528,10 @@ export function createHollerKitMcpServer(
 
   return {
     tools: HOLLERKIT_MCP_TOOLS,
+    prompts: HOLLERKIT_MCP_PROMPTS,
     client,
     callTool,
+    getPrompt,
     handleJsonRpc,
     handleJsonRpcLine,
     connectStdio,

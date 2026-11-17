@@ -292,6 +292,34 @@ export interface McpTextContent {
   text: string
 }
 
+export type HollerKitPromptName =
+  | 'triage-inbox'
+  | 'author-quest'
+  | 'retire-passed-quests'
+  | 'analyze-values'
+
+export interface McpPromptArgument {
+  name: string
+  description: string
+  required?: boolean | undefined
+}
+
+export interface McpPromptDefinition {
+  name: HollerKitPromptName
+  description: string
+  arguments?: readonly McpPromptArgument[] | undefined
+}
+
+export interface McpPromptMessage {
+  role: 'user' | 'assistant'
+  content: McpTextContent
+}
+
+export interface McpGetPromptResult {
+  description: string
+  messages: McpPromptMessage[]
+}
+
 export interface McpCallToolResult<T = Record<string, unknown>> {
   content: McpTextContent[]
   structuredContent: T
