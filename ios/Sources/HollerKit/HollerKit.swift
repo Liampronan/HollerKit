@@ -106,6 +106,9 @@ public enum HollerKit {
         if presenterState.currentInvocation != activeInvocation {
             presenterState.currentInvocation = activeInvocation
         }
+        #if canImport(UIKit)
+        WindowInvocationHostingView.synchronizeActiveViews(with: activeInvocation)
+        #endif
         if enabled {
             if !state.configuredWhileEnabled, let configuration = state.configuration {
                 state.configuredWhileEnabled = true
@@ -119,6 +122,9 @@ public enum HollerKit {
             quests.reset()
             state.breadcrumbs = BreadcrumbStore(capacity: state.configuration?.maxBreadcrumbs ?? 500)
             presenterState.presentQuestsAfterBugReportDismiss = false
+            presenterState.isBugReportSheetVisible = false
+            presenterState.isQuestsSheetVisible = false
+            presenterState.activeVisiblePresentationId = nil
             if presenterState.isPresented {
                 presenterState.isPresented = false
                 presenterState.handleSheetDismissed(configuration: nil)
@@ -308,7 +314,7 @@ public enum HollerKit {
         guard reconcileEnablement() else { return }
         let triggerName = trigger?.description ?? "manual"
         breadcrumb("Invoked quests via \(triggerName)", category: "invocation")
-        presenterState.isQuestsPresented = true
+        presenterState.presentQuests()
     }
 
     static func requestQuestsAfterBugReportDismiss() {
@@ -424,11 +430,20 @@ final class HollerKitPresenterState {
     var isRuntimeEnabled = false
     var isPresented = false
     var isQuestsPresented = false
+    var isBugReportSheetVisible = false
+    var isQuestsSheetVisible = false
     var presentQuestsAfterBugReportDismiss = false
     var currentInvocation: HollerKitInvocation = []
     var presentationId = UUID()
     var activeDraft = BugReportDraft()
     var pendingAttachments: [HollerKitAttachment] = []
+
+    @ObservationIgnored
+    var activeVisiblePresentationId: UUID?
+    @ObservationIgnored
+    var lastPresentationRequestedAt: Date?
+    @ObservationIgnored
+    var lastQuestsPresentationRequestedAt: Date?
 
     /// Resets the active draft and presents the bug report sheet with fresh state.
     func presentBugReport(
@@ -446,11 +461,69 @@ final class HollerKitPresenterState {
             invocationAttachments: attachments,
             invokingTrigger: triggerName
         )
+        lastPresentationRequestedAt = Date()
         isPresented = true
+    }
+
+    /// Presents the quest board sheet and records the presentation timestamp.
+    func presentQuests() {
+        lastQuestsPresentationRequestedAt = Date()
+        isQuestsPresented = true
+    }
+
+    /// Evaluates whether a non-shake/screenshot trigger should be ignored because a HollerKit sheet is actively presented,
+    /// healing stale presentation flags if an earlier presentation never mounted on the host window.
+    func shouldIgnoreTriggerWhilePresented(_ trigger: HollerKitTrigger) -> Bool {
+        switch trigger.kind {
+        case .shake, .screenshot:
+            return false
+        default:
+            break
+        }
+
+        if isPresented {
+            if isBugReportSheetVisible {
+                return true
+            }
+            #if canImport(UIKit)
+            if let window = WindowInvocationHostingView.registeredHostingViewsForTesting.compactMap(\.currentAttachedWindow).first,
+               window.rootViewController?.presentedViewController == nil,
+               let requestedAt = lastPresentationRequestedAt,
+               Date().timeIntervalSince(requestedAt) > 0.5 {
+                isPresented = false
+            } else {
+                return true
+            }
+            #else
+            return true
+            #endif
+        }
+
+        if isQuestsPresented {
+            if isQuestsSheetVisible {
+                return true
+            }
+            #if canImport(UIKit)
+            if let window = WindowInvocationHostingView.registeredHostingViewsForTesting.compactMap(\.currentAttachedWindow).first,
+               window.rootViewController?.presentedViewController == nil,
+               let requestedAt = lastQuestsPresentationRequestedAt,
+               Date().timeIntervalSince(requestedAt) > 0.5 {
+                isQuestsPresented = false
+            } else {
+                return true
+            }
+            #else
+            return true
+            #endif
+        }
+
+        return false
     }
 
     /// Cleans up attachments and resets the draft when the bug report sheet is dismissed.
     func handleSheetDismissed(configuration: HollerKitConfiguration?) {
+        isBugReportSheetVisible = false
+        activeVisiblePresentationId = nil
         activeDraft.cancelCapture()
         activeDraft.cleanupTempFiles()
         pendingAttachments = []
@@ -463,7 +536,7 @@ final class HollerKitPresenterState {
         if presentQuestsAfterBugReportDismiss {
             presentQuestsAfterBugReportDismiss = false
             if isRuntimeEnabled && enabledConfiguration != nil {
-                isQuestsPresented = true
+                presentQuests()
             }
         }
     }
