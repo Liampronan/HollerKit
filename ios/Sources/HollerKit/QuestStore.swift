@@ -265,9 +265,17 @@ public struct QuestStore: Sendable {
             appVersion: appVersion,
             quests: entries
         )
-        if let maxVideoBytes = response.limits?.maxVideoBytes, maxVideoBytes > 0 {
+        if let limits = response.limits {
             await MainActor.run {
-                HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+                if let maxVideoBytes = limits.maxVideoBytes, maxVideoBytes > 0 {
+                    HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+                }
+                if let maxImageBytes = limits.maxImageBytes, maxImageBytes > 0 {
+                    HollerKit.quests.serverMaxImageBytes = maxImageBytes
+                }
+                if let maxImages = limits.maxImages, maxImages > 0 {
+                    HollerKit.quests.serverMaxImages = maxImages
+                }
             }
         }
 
@@ -387,9 +395,17 @@ public struct QuestStore: Sendable {
         persistToCache: Bool = false
     ) async throws -> [QuestBoardItem] {
         let response = try await client.fetchPendingQuestsResponse(build: build)
-        if let maxVideoBytes = response.limits?.maxVideoBytes, maxVideoBytes > 0 {
+        if let limits = response.limits {
             await MainActor.run {
-                HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+                if let maxVideoBytes = limits.maxVideoBytes, maxVideoBytes > 0 {
+                    HollerKit.quests.serverMaxVideoBytes = maxVideoBytes
+                }
+                if let maxImageBytes = limits.maxImageBytes, maxImageBytes > 0 {
+                    HollerKit.quests.serverMaxImageBytes = maxImageBytes
+                }
+                if let maxImages = limits.maxImages, maxImages > 0 {
+                    HollerKit.quests.serverMaxImages = maxImages
+                }
             }
         }
         let items = boardItems(
@@ -500,6 +516,8 @@ public final class HollerKitQuestState {
     public private(set) var isBackendReachable: Bool = true
     public private(set) var lastSyncError: String?
     public internal(set) var serverMaxVideoBytes: Int?
+    public internal(set) var serverMaxImageBytes: Int?
+    public internal(set) var serverMaxImages: Int?
 
     @ObservationIgnored
     private var definitions: [QuestDefinition] = []
@@ -550,6 +568,8 @@ public final class HollerKitQuestState {
         isBackendReachable = true
         lastSyncError = nil
         serverMaxVideoBytes = nil
+        serverMaxImageBytes = nil
+        serverMaxImages = nil
         definitions = []
         confirmedBoardItemsByQuestKey = [:]
         optimisticRuns = []

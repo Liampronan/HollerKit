@@ -21,6 +21,8 @@ final class SpeechCaptureController {
     @ObservationIgnored
     private var startGeneration: UInt64 = 0
     @ObservationIgnored
+    private var stopGeneration: UInt64 = 0
+    @ObservationIgnored
     private var consumedTranscriptForCommentMerge: HollerKitTranscript?
 
     init() {
@@ -84,6 +86,7 @@ final class SpeechCaptureController {
     /// Cancels any pending or active dictation session immediately.
     func cancelCapture() {
         startGeneration &+= 1
+        stopGeneration &+= 1
         autoStopTask?.cancel()
         autoStopTask = nil
         activeStopTask?.cancel()
@@ -122,6 +125,7 @@ final class SpeechCaptureController {
             handleCaptureStateChange()
             scheduleAutoStop(after: configuration.maxDuration)
         } catch is CancellationError {
+            guard startGeneration == generation else { return }
             isStopping = false
             isCapturing = false
         } catch {
@@ -150,20 +154,42 @@ final class SpeechCaptureController {
         errorMessage = nil
         isStopping = true
 
+        stopGeneration &+= 1
+        let capturedStartGeneration = startGeneration
+        let capturedStopGeneration = stopGeneration
+
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.activeStopTask = nil }
+            defer {
+                if self.stopGeneration == capturedStopGeneration {
+                    self.activeStopTask = nil
+                }
+            }
             do {
                 let completedTranscript = try await self.capture.stopAsync()
+                guard !Task.isCancelled,
+                      self.startGeneration == capturedStartGeneration,
+                      self.stopGeneration == capturedStopGeneration else {
+                    return
+                }
                 self.transcript = completedTranscript
                 self.partialTranscript = ""
                 self.isStopping = false
                 self.isCapturing = false
             } catch is CancellationError {
+                guard self.startGeneration == capturedStartGeneration,
+                      self.stopGeneration == capturedStopGeneration else {
+                    return
+                }
                 self.partialTranscript = ""
                 self.isStopping = false
                 self.isCapturing = false
             } catch {
+                guard !Task.isCancelled,
+                      self.startGeneration == capturedStartGeneration,
+                      self.stopGeneration == capturedStopGeneration else {
+                    return
+                }
                 if !self.capture.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.partialTranscript = self.capture.transcriptText
                 } else {

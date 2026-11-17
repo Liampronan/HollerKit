@@ -90,14 +90,27 @@ final class BugReportDraft {
     @ObservationIgnored
     private var autoDismissTask: Task<Void, Never>?
 
-    /// Returns `true` when additional attachments can be added to the draft.
-    var canAddMoreImages: Bool {
-        images.count < Self.maxAttachments
+    /// Returns the number of image (non-video) attachments currently in the draft.
+    var imageCount: Int {
+        images.filter { !$0.isVideo }.count
     }
 
-    /// Returns the number of remaining attachment slots before hitting `maxAttachments`.
+    /// Returns the effective maximum number of image attachments allowed per report, preferring the server-advertised `maxImages` limit.
+    var effectiveMaxImages: Int {
+        if let serverLimit = HollerKit.quests.serverMaxImages, serverLimit > 0 {
+            return min(serverLimit, Self.maxAttachments)
+        }
+        return Self.maxAttachments
+    }
+
+    /// Returns `true` when additional image attachments can be added to the draft.
+    var canAddMoreImages: Bool {
+        images.count < Self.maxAttachments && imageCount < effectiveMaxImages
+    }
+
+    /// Returns the number of remaining image attachment slots before hitting `effectiveMaxImages` or `maxAttachments`.
     var remainingImageSlots: Int {
-        max(0, Self.maxAttachments - images.count)
+        min(max(0, Self.maxAttachments - images.count), max(0, effectiveMaxImages - imageCount))
     }
 
     /// Returns the number of video attachments currently in the draft.
@@ -107,12 +120,20 @@ final class BugReportDraft {
 
     /// Returns `true` when additional video attachments can be added (fewer than 3 videos and fewer than 12 total attachments).
     var canAddMoreVideos: Bool {
-        canAddMoreImages && videoCount < Self.maxVideoAttachments
+        images.count < Self.maxAttachments && videoCount < Self.maxVideoAttachments
     }
 
     /// Returns the number of remaining video attachment slots before hitting `maxVideoAttachments` or `maxAttachments`.
     var remainingVideoSlots: Int {
-        min(remainingImageSlots, max(0, Self.maxVideoAttachments - videoCount))
+        min(max(0, Self.maxAttachments - images.count), max(0, Self.maxVideoAttachments - videoCount))
+    }
+
+    /// Returns the effective maximum image size in bytes, preferring the server-reported limit before falling back to 10 MB.
+    var effectiveMaxImageBytes: Int {
+        if let serverLimit = HollerKit.quests.serverMaxImageBytes, serverLimit > 0 {
+            return serverLimit
+        }
+        return Self.maxAttachmentBytes
     }
 
     /// Returns the effective maximum video size in bytes, preferring any test override or server-reported limit before falling back to 50 MB.
@@ -198,11 +219,21 @@ final class BugReportDraft {
         guard !Self.isAudioOnly(configuration: configuration) else { return }
         #if canImport(UIKit)
         let configuredImages = configuration?.initialImages() ?? []
+        let activeMaxImages = effectiveMaxImages
         var loaded: [BugReportImage] = []
         loaded.reserveCapacity(min(invocationAttachments.count + configuredImages.count, Self.maxAttachments))
+        var loadedImageCount = 0
+        var loadedVideoCount = 0
         for attachment in invocationAttachments + configuredImages {
             guard loaded.count < Self.maxAttachments else { break }
             if let image = BugReportImage(attachment: attachment) {
+                if image.isVideo {
+                    guard loadedVideoCount < Self.maxVideoAttachments else { continue }
+                    loadedVideoCount += 1
+                } else {
+                    guard loadedImageCount < activeMaxImages else { continue }
+                    loadedImageCount += 1
+                }
                 loaded.append(image)
             }
         }
@@ -310,8 +341,12 @@ final class BugReportDraft {
     /// Normalizes and appends `image` to the draft if the attachment cap has not been reached.
     @discardableResult
     func addImage(_ image: UIImage, title: String? = nil) -> Bool {
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments else {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
+            return false
+        }
+        guard canAddMoreImages else {
+            attachmentStatusMessage = "You can attach up to \(effectiveMaxImages) images per report."
             return false
         }
         let resolvedTitle: String
@@ -339,8 +374,12 @@ final class BugReportDraft {
     /// Downsamples `data` off the main actor before appending the resulting image to the draft.
     @discardableResult
     func addImageDataOffMainActor(_ data: Data, title: String? = nil) async -> Bool {
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments else {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
+            return false
+        }
+        guard canAddMoreImages else {
+            attachmentStatusMessage = "You can attach up to \(effectiveMaxImages) images per report."
             return false
         }
         let generation = photoLoadGeneration
@@ -365,7 +404,7 @@ final class BugReportDraft {
     @discardableResult
     func addVideo(from sourceURL: URL, title: String? = nil) async -> Bool {
         let generation = photoLoadGeneration
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments else {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
             return false
         }
@@ -462,7 +501,7 @@ final class BugReportDraft {
             try? FileManager.default.removeItem(at: finalURL)
             return false
         }
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments else {
             try? FileManager.default.removeItem(at: finalURL)
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
             return false
@@ -568,7 +607,7 @@ final class BugReportDraft {
             return 0
         }
 
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments, canAddMoreImages || canAddMoreVideos else {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) attachments per report."
             return 0
         }
@@ -593,7 +632,7 @@ final class BugReportDraft {
             guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
                 return addedCount
             }
-            guard canAddMoreImages else {
+            guard images.count < Self.maxAttachments, canAddMoreImages || canAddMoreVideos else {
                 attachmentStatusMessage = "Attached \(addedCount) attachment\(addedCount == 1 ? "" : "s") (maximum \(Self.maxAttachments) per report)."
                 return addedCount
             }
@@ -970,6 +1009,21 @@ final class BugReportDraft {
             }
 
             let trimmedComment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !audioOnly,
+               trimmedComment.utf16.count > SpeechCaptureController.maxCommentCharacters
+                || trimmedComment.count > SpeechCaptureController.maxCommentCharacters {
+                submissionError = "Comments must be \(SpeechCaptureController.maxCommentCharacters) characters or fewer."
+                SubmissionHaptics.notifyError()
+                return
+            }
+            if !audioOnly {
+                let activeMaxImages = effectiveMaxImages
+                if imageCount > activeMaxImages {
+                    submissionError = "You can attach up to \(activeMaxImages) images per report."
+                    SubmissionHaptics.notifyError()
+                    return
+                }
+            }
             let normalizedComment = trimmedComment.isEmpty ? nil : trimmedComment
             let attachmentsToUpload = audioOnly ? [] : imageAttachments()
             let transcriptToSubmit = speechCapture.transcript
@@ -1068,8 +1122,9 @@ final class BugReportDraft {
     /// Converts draft `BugReportImage` items into size-bounded `HollerKitAttachment` payloads.
     func imageAttachments() -> [HollerKitAttachment] {
         #if canImport(UIKit)
+        let maxImageBytes = effectiveMaxImageBytes
         return Array(images.prefix(Self.maxAttachments)).enumerated().compactMap { index, image in
-            image.encodedAttachment(index: index)
+            image.encodedAttachment(index: index, maxBytes: maxImageBytes)
         }
         #else
         return []

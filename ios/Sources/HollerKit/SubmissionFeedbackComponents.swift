@@ -148,26 +148,35 @@ struct SubmissionFeedbackOverlayView: View {
                             .accessibilityIdentifier("HollerKitSubmissionReceiptText")
 
                     case .queued(_, let reason, let isAuthenticationError):
-                        let isAuthFailure = isAuthenticationError || Self.isAuthenticationFailureReason(reason)
-                        Image(systemName: isAuthFailure ? "person.badge.key.fill" : "tray.and.arrow.up.fill")
+                        let isAuthorizationFailure = Self.isAuthorizationFailureReason(reason)
+                        let isAuthFailure = !isAuthorizationFailure && (isAuthenticationError || Self.isAuthenticationFailureReason(reason))
+                        Image(
+                            systemName: isAuthorizationFailure
+                                ? "lock.shield.fill"
+                                : (isAuthFailure ? "person.badge.key.fill" : "tray.and.arrow.up.fill")
+                        )
                             .font(.system(size: 50))
                             .foregroundStyle(.orange)
                             .scaleEffect(animateBadge ? 1.0 : 0.72)
                             .animation(.spring(response: 0.35, dampingFraction: 0.6), value: animateBadge)
 
                         Text(
-                            isAuthFailure
-                                ? "Saved to outbox — sign in to finish sending"
-                                : "Saved to outbox — will send when online"
+                            isAuthorizationFailure
+                                ? "Saved to outbox — check permissions to finish sending"
+                                : (isAuthFailure
+                                    ? "Saved to outbox — sign in to finish sending"
+                                    : "Saved to outbox — will send when online")
                         )
                         .font(.headline)
                         .multilineTextAlignment(.center)
                         .accessibilityIdentifier("HollerKitSubmissionQueuedTitle")
 
                         Text(
-                            isAuthFailure
-                                ? "Your feedback is stored on this device. Sign in, then reopen the app or submit again to finish sending."
-                                : "Your feedback is stored on this device and will send automatically when your connection returns."
+                            isAuthorizationFailure
+                                ? "Your feedback is stored on this device. Update your account permissions or API key scope, then reopen the app or submit again to finish sending."
+                                : (isAuthFailure
+                                    ? "Your feedback is stored on this device. Sign in, then reopen the app or submit again to finish sending."
+                                    : "Your feedback is stored on this device and will send automatically when your connection returns.")
                         )
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -221,13 +230,21 @@ struct SubmissionFeedbackOverlayView: View {
         .accessibilityIdentifier("HollerKitSubmissionConfirmationOverlay")
     }
 
-    /// Returns `true` when `reason` indicates a missing or rejected authentication token.
-    static func isAuthenticationFailureReason(_ reason: String?) -> Bool {
+    /// Returns `true` when `reason` indicates a missing or rejected authentication token (401).
+    nonisolated static func isAuthenticationFailureReason(_ reason: String?) -> Bool {
         guard let lower = reason?.lowercased() else { return false }
         return lower.contains("authentication token")
             || lower.contains("unauthorized")
-            || lower.contains("forbidden")
             || lower.contains("401")
+    }
+
+    /// Returns `true` when `reason` indicates valid credentials lacking required scope or permissions (403).
+    nonisolated static func isAuthorizationFailureReason(_ reason: String?) -> Bool {
+        guard let lower = reason?.lowercased() else { return false }
+        return lower.contains("forbidden")
             || lower.contains("403")
+            || lower.contains("scope")
+            || lower.contains("permission")
+            || lower.contains("not authorized")
     }
 }

@@ -87,14 +87,27 @@ final class QuestResultDraft {
     @ObservationIgnored
     private var autoDismissTask: Task<Void, Never>?
 
-    /// Returns `true` when additional image attachments can be added to the draft.
-    var canAddMoreImages: Bool {
-        images.count < Self.maxAttachments
+    /// Returns the number of image (non-video) attachments currently in the draft.
+    var imageCount: Int {
+        images.filter { !$0.isVideo }.count
     }
 
-    /// Returns the number of remaining attachment slots before hitting `maxAttachments`.
+    /// Returns the effective maximum number of image attachments allowed per quest run, preferring the server-advertised `maxImages` limit.
+    var effectiveMaxImages: Int {
+        if let serverLimit = HollerKit.quests.serverMaxImages, serverLimit > 0 {
+            return min(serverLimit, Self.maxAttachments)
+        }
+        return Self.maxAttachments
+    }
+
+    /// Returns `true` when additional image attachments can be added to the draft.
+    var canAddMoreImages: Bool {
+        images.count < Self.maxAttachments && imageCount < effectiveMaxImages
+    }
+
+    /// Returns the number of remaining attachment slots before hitting `effectiveMaxImages` or `maxAttachments`.
     var remainingImageSlots: Int {
-        max(0, Self.maxAttachments - images.count)
+        min(max(0, Self.maxAttachments - images.count), max(0, effectiveMaxImages - imageCount))
     }
 
     /// Returns the number of video attachments currently in the draft.
@@ -104,7 +117,15 @@ final class QuestResultDraft {
 
     /// Returns `true` when additional video attachments can be added (fewer than 3 videos and fewer than 12 total attachments).
     var canAddMoreVideos: Bool {
-        canAddMoreImages && videoCount < Self.maxVideoAttachments
+        images.count < Self.maxAttachments && videoCount < Self.maxVideoAttachments
+    }
+
+    /// Returns the effective maximum image size in bytes, preferring the server-reported limit before falling back to 10 MB.
+    var effectiveMaxImageBytes: Int {
+        if let serverLimit = HollerKit.quests.serverMaxImageBytes, serverLimit > 0 {
+            return serverLimit
+        }
+        return Self.maxAttachmentBytes
     }
 
     /// Returns the effective maximum video size in bytes, preferring any test override or server-reported limit before falling back to 50 MB.
@@ -266,7 +287,7 @@ final class QuestResultDraft {
     @discardableResult
     func addVideo(from sourceURL: URL, title: String? = nil) async -> Bool {
         let generation = photoLoadGeneration
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments else {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per quest."
             return false
         }
@@ -363,7 +384,7 @@ final class QuestResultDraft {
             try? FileManager.default.removeItem(at: finalURL)
             return false
         }
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments else {
             try? FileManager.default.removeItem(at: finalURL)
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per quest."
             return false
@@ -460,7 +481,7 @@ final class QuestResultDraft {
             return 0
         }
 
-        guard canAddMoreImages else {
+        guard images.count < Self.maxAttachments, canAddMoreImages || canAddMoreVideos else {
             attachmentStatusMessage = "You can attach up to \(Self.maxAttachments) photos per quest."
             return 0
         }
@@ -485,7 +506,7 @@ final class QuestResultDraft {
             guard photoLoadGeneration == generation, !isSubmitting, submissionOutcome == nil else {
                 return addedCount
             }
-            guard canAddMoreImages else {
+            guard images.count < Self.maxAttachments, canAddMoreImages || canAddMoreVideos else {
                 attachmentStatusMessage = "Attached \(addedCount) photo\(addedCount == 1 ? "" : "s") (maximum \(Self.maxAttachments) per quest)."
                 return addedCount
             }
@@ -618,8 +639,9 @@ final class QuestResultDraft {
     /// Converts draft `BugReportImage` items into size-bounded `HollerKitAttachment` payloads.
     func imageAttachments() -> [HollerKitAttachment] {
         #if canImport(UIKit)
-        return Array(images.prefix(Self.maxAttachments)).enumerated().compactMap { index, image in
-            image.encodedAttachment(index: index)
+        let maxImageBytes = effectiveMaxImageBytes
+        return images.enumerated().compactMap { index, image in
+            image.encodedAttachment(index: index, maxBytes: maxImageBytes)
         }
         #else
         return []
@@ -665,13 +687,30 @@ final class QuestResultDraft {
             let userAttachments = imageAttachments()
             let markCount = session.marks.filter { !$0.imageData.isEmpty }.count
             let totalAttachmentCount = markCount + userAttachments.count
+            let userImageCount = userAttachments.filter { $0.kind != "video" }.count
+            let maxImagesLimit = effectiveMaxImages
+            if totalAttachmentCount > Self.maxAttachments || (markCount + userImageCount) > maxImagesLimit {
+                submissionError = "You can attach up to \(maxImagesLimit) images (including captured marks) per quest."
+                SubmissionHaptics.notifyError()
+                return
+            }
             submissionStage = totalAttachmentCount > 0
                 ? .uploadingAttachments(count: totalAttachmentCount)
                 : .sending
 
             let trimmedComment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedComment.utf16.count > SpeechCaptureController.maxCommentCharacters
+                || trimmedComment.count > SpeechCaptureController.maxCommentCharacters {
+                submissionError = "Comments must be \(SpeechCaptureController.maxCommentCharacters) characters or fewer."
+                SubmissionHaptics.notifyError()
+                return
+            }
             let commentToSubmit = trimmedComment.isEmpty ? nil : trimmedComment
             let transcriptToSubmit = speechCapture.transcript
+
+            guard questState.activeQuest?.id == session.id else {
+                return
+            }
 
             let outcome = try await questState.submitActiveQuest(
                 result: selectedResult,
