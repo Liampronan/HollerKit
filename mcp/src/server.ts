@@ -529,7 +529,14 @@ async function fetchFeedbackImageBlocks(
     .slice(0, maxImages)
 
   const blocks: McpImageContent[] = []
+  const deadlineMs = Date.now() + resolved.timeoutMs
+
   for (const att of candidates) {
+    const remainingMs = deadlineMs - Date.now()
+    if (remainingMs <= 0) {
+      break
+    }
+
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
@@ -537,7 +544,7 @@ async function fetchFeedbackImageBlocks(
         timer = setTimeout(() => {
           controller.abort()
           reject(new Error('Attachment fetch timed out'))
-        }, resolved.timeoutMs)
+        }, remainingMs)
       })
       const fetchAndRead = (async () => {
         const response = await resolved.fetchFn(att.url, {
@@ -545,19 +552,34 @@ async function fetchFeedbackImageBlocks(
           signal: controller.signal,
         })
         if (!response.ok) {
+          await response.body?.cancel().catch(() => {})
+          return null
+        }
+        const rawContentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase()
+        if (
+          rawContentType &&
+          rawContentType !== 'application/octet-stream' &&
+          rawContentType !== 'binary/octet-stream' &&
+          !rawContentType.startsWith('image/')
+        ) {
+          await response.body?.cancel().catch(() => {})
           return null
         }
         const bytes = await readBoundedBytesFromResponse(response, resolved.maxResponseBytes)
         if (bytes.byteLength === 0) {
           return null
         }
-        const contentType = response.headers.get('content-type')?.split(';')[0]?.trim()
-        const mimeType =
-          contentType && contentType.startsWith('image/')
-            ? contentType
-            : att.mimeType && att.mimeType.startsWith('image/')
-              ? att.mimeType
-              : 'image/png'
+        const sniffedMime = sniffImageMimeType(bytes)
+        let mimeType: string | null = null
+        if (rawContentType && rawContentType.startsWith('image/')) {
+          mimeType = rawContentType
+        } else if (sniffedMime) {
+          const attMime = att.mimeType?.trim().toLowerCase()
+          mimeType = attMime && attMime.startsWith('image/') ? attMime : sniffedMime
+        }
+        if (!mimeType) {
+          return null
+        }
         return {
           type: 'image' as const,
           data: Buffer.from(bytes).toString('base64'),
@@ -578,6 +600,68 @@ async function fetchFeedbackImageBlocks(
     }
   }
   return blocks
+}
+
+/**
+ * Inspects leading magic bytes of a buffer to identify common image formats.
+ */
+function sniffImageMimeType(bytes: Uint8Array): string | null {
+  if (
+    bytes.byteLength >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return 'image/png'
+  }
+  if (bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg'
+  }
+  if (
+    bytes.byteLength >= 6 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
+    return 'image/gif'
+  }
+  if (
+    bytes.byteLength >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp'
+  }
+  if (
+    bytes.byteLength >= 12 &&
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  ) {
+    const brand = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!)
+    if (brand === 'heic' || brand === 'heix' || brand === 'mif1' || brand === 'msf1') {
+      return 'image/heic'
+    }
+    if (brand === 'avif' || brand === 'avis') {
+      return 'image/avif'
+    }
+  }
+  return null
 }
 
 /**

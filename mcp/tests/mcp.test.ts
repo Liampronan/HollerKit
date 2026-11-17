@@ -1212,4 +1212,26 @@ test('feedback_get with includeImages=true gracefully skips failed or oversized 
   assert.equal(res.content.length, 1)
   assert.equal(res.content[0]?.type, 'text')
   assert.equal(res.structuredContent.ok, true)
+
+  // Verify explicit non-image Content-Type (e.g. text/html) is skipped even if attachment metadata says image/png
+  const htmlMcp = createHollerKitMcpServer({
+    baseUrl: BASE_URL,
+    apiKey: harness.agentFullKey,
+    fetch: async (input, init) => {
+      const req = new Request(input, init)
+      if (req.url.startsWith('https://storage.hollerkit.test/read/')) {
+        return new Response('<html>Error page</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        })
+      }
+      return harness.inProcessFetch(input, init)
+    },
+  })
+  const htmlRes = await htmlMcp.callTool('feedback_get', {
+    id: harness.failedQuestFeedbackId,
+    includeImages: true,
+  })
+  assert.equal(htmlRes.isError, false)
+  assert.equal(htmlRes.content.length, 1)
 })
