@@ -1046,31 +1046,105 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
       const groupBy = filter.groupBy && filter.groupBy !== 'none' ? filter.groupBy : null
       const limit = Math.min(Math.max(filter.limit ?? 100, 1), 500)
 
-      const summaryRows = await sql<any[]>`
-        WITH filtered AS (
-          SELECT *
-          FROM hollerkit.values
-          WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
-            AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
-            AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
-            AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
-            AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
-            AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
-            AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
-            AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
-            AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
-        )
-        SELECT
-          COUNT(value)::int AS n,
-          MIN(value) AS min,
-          MAX(value) AS max,
-          percentile_cont(0.5) WITHIN GROUP (ORDER BY value) AS median,
-          percentile_cont(0.9) WITHIN GROUP (ORDER BY value) AS p90,
-          COUNT(DISTINCT unit)::int AS unit_count,
-          MIN(unit) AS single_unit,
-          (SELECT unit FROM filtered ORDER BY created_at DESC, id DESC LIMIT 1) AS first_unit
-        FROM filtered
-      `
+      const { summaryRows, groupRows, valueRows } = await sql.begin(
+        'isolation level repeatable read read only',
+        async (tx) => {
+          const db = tx as unknown as Sql
+          const summaryRows = await db<any[]>`
+            WITH filtered AS (
+              SELECT *
+              FROM hollerkit.values
+              WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
+                AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
+                AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
+                AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
+                AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
+                AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
+                AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
+                AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
+                AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
+            )
+            SELECT
+              COUNT(value)::int AS n,
+              MIN(value) AS min,
+              MAX(value) AS max,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY value) AS median,
+              percentile_cont(0.9) WITHIN GROUP (ORDER BY value) AS p90,
+              COUNT(DISTINCT unit)::int AS unit_count,
+              MIN(unit) AS single_unit,
+              (SELECT unit FROM filtered ORDER BY created_at DESC, id DESC LIMIT 1) AS first_unit
+            FROM filtered
+          `
+
+          const groupRows = await db<any[]>`
+            WITH filtered AS (
+              SELECT
+                *,
+                CASE ${groupBy}::text
+                  WHEN 'build' THEN build
+                  WHEN 'version' THEN quest_version::text
+                  WHEN 'appVersion' THEN COALESCE(app_version, 'unknown')
+                  WHEN 'device' THEN COALESCE(device, 'unknown')
+                  WHEN 'os' THEN COALESCE(os, 'unknown')
+                  WHEN 'label' THEN label
+                  ELSE quest_id || ':' || label
+                END AS group_bucket
+              FROM hollerkit.values
+              WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
+                AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
+                AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
+                AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
+                AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
+                AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
+                AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
+                AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
+                AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
+            )
+            SELECT
+              group_bucket,
+              COUNT(value)::int AS n,
+              MIN(value) AS min,
+              MAX(value) AS max,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY value) AS median,
+              percentile_cont(0.9) WITHIN GROUP (ORDER BY value) AS p90,
+              COUNT(DISTINCT unit)::int AS unit_count,
+              MIN(unit) AS single_unit,
+              (ARRAY_AGG(unit ORDER BY created_at DESC, id DESC))[1] AS first_unit,
+              COUNT(DISTINCT quest_id)::int AS quest_count,
+              MIN(quest_id) AS single_quest_id,
+              (ARRAY_AGG(quest_id ORDER BY created_at DESC, id DESC))[1] AS first_quest_id,
+              COUNT(DISTINCT label)::int AS label_count,
+              MIN(label) AS single_label,
+              (ARRAY_AGG(label ORDER BY created_at DESC, id DESC))[1] AS first_label,
+              (ARRAY_AGG(app_version ORDER BY created_at DESC, id DESC))[1] AS first_app_version,
+              (ARRAY_AGG(device ORDER BY created_at DESC, id DESC))[1] AS first_device,
+              (ARRAY_AGG(os ORDER BY created_at DESC, id DESC))[1] AS first_os,
+              MAX(created_at) AS latest_created_at,
+              MAX(id) AS latest_id
+            FROM filtered
+            GROUP BY group_bucket
+            ORDER BY latest_created_at DESC, latest_id DESC
+          `
+
+          const valueRows = await db<any[]>`
+            SELECT *
+            FROM hollerkit.values
+            WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
+              AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
+              AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
+              AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
+              AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
+              AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
+              AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
+              AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
+              AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
+            ORDER BY created_at DESC, id DESC
+            LIMIT ${limit}
+          `
+
+          return { summaryRows, groupRows, valueRows }
+        },
+      )
 
       const sRow = summaryRows[0]
       const resolvedUnit: QuestCaptureUnit | null =
@@ -1086,56 +1160,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
         max: toRoundedStat(sRow?.max),
         unit: resolvedUnit,
       }
-
-      const groupRows = await sql<any[]>`
-        WITH filtered AS (
-          SELECT
-            *,
-            CASE ${groupBy}::text
-              WHEN 'build' THEN build
-              WHEN 'version' THEN quest_version::text
-              WHEN 'appVersion' THEN COALESCE(app_version, 'unknown')
-              WHEN 'device' THEN COALESCE(device, 'unknown')
-              WHEN 'os' THEN COALESCE(os, 'unknown')
-              WHEN 'label' THEN label
-              ELSE quest_id || ':' || label
-            END AS group_bucket
-          FROM hollerkit.values
-          WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
-            AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
-            AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
-            AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
-            AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
-            AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
-            AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
-            AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
-            AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
-        )
-        SELECT
-          group_bucket,
-          COUNT(value)::int AS n,
-          MIN(value) AS min,
-          MAX(value) AS max,
-          percentile_cont(0.5) WITHIN GROUP (ORDER BY value) AS median,
-          percentile_cont(0.9) WITHIN GROUP (ORDER BY value) AS p90,
-          COUNT(DISTINCT unit)::int AS unit_count,
-          MIN(unit) AS single_unit,
-          (ARRAY_AGG(unit ORDER BY created_at DESC, id DESC))[1] AS first_unit,
-          COUNT(DISTINCT quest_id)::int AS quest_count,
-          MIN(quest_id) AS single_quest_id,
-          (ARRAY_AGG(quest_id ORDER BY created_at DESC, id DESC))[1] AS first_quest_id,
-          COUNT(DISTINCT label)::int AS label_count,
-          MIN(label) AS single_label,
-          (ARRAY_AGG(label ORDER BY created_at DESC, id DESC))[1] AS first_label,
-          (ARRAY_AGG(app_version ORDER BY created_at DESC, id DESC))[1] AS first_app_version,
-          (ARRAY_AGG(device ORDER BY created_at DESC, id DESC))[1] AS first_device,
-          (ARRAY_AGG(os ORDER BY created_at DESC, id DESC))[1] AS first_os,
-          MAX(created_at) AS latest_created_at,
-          MAX(id) AS latest_id
-        FROM filtered
-        GROUP BY group_bucket
-        ORDER BY latest_created_at DESC, latest_id DESC
-      `
 
       const groups: ValueGroupSummary[] = []
       if (groupBy) {
@@ -1187,22 +1211,6 @@ export function postgresStore(options: PostgresStoreOptions): PostgresHollerKitS
           })
         }
       }
-
-      const valueRows = await sql<any[]>`
-        SELECT *
-        FROM hollerkit.values
-        WHERE (${targetQuestId}::text IS NULL OR quest_id = ${targetQuestId})
-          AND (${filter.version ?? null}::int IS NULL OR quest_version = ${filter.version ?? null}::int)
-          AND (${filter.label ?? null}::text IS NULL OR label = ${filter.label ?? null})
-          AND (${filter.build ?? null}::text IS NULL OR build = ${filter.build ?? null})
-          AND (${filter.appVersion ?? null}::text IS NULL OR app_version = ${filter.appVersion ?? null})
-          AND (${filter.device ?? null}::text IS NULL OR device = ${filter.device ?? null})
-          AND (${filter.os ?? null}::text IS NULL OR os = ${filter.os ?? null})
-          AND (${filter.source ?? null}::text IS NULL OR source = ${filter.source ?? null})
-          AND (${filter.since ?? null}::timestamptz IS NULL OR created_at >= ${filter.since ?? null}::timestamptz)
-        ORDER BY created_at DESC, id DESC
-        LIMIT ${limit}
-      `
 
       return {
         quest: targetQuestId,
