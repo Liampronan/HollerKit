@@ -1025,8 +1025,21 @@ final class BugReportDraft {
                 }
             }
             let normalizedComment = trimmedComment.isEmpty ? nil : trimmedComment
+            if !audioOnly {
+                guard await prepareVideoAttachmentsForSubmission() else {
+                    SubmissionHaptics.notifyError()
+                    return
+                }
+            }
             let attachmentsToUpload = audioOnly ? [] : imageAttachments()
             let transcriptToSubmit = speechCapture.transcript
+            if let transcriptText = transcriptToSubmit?.text,
+               transcriptText.utf16.count > SpeechCaptureController.maxCommentCharacters
+                || transcriptText.count > SpeechCaptureController.maxCommentCharacters {
+                submissionError = "Voice note transcripts must be \(SpeechCaptureController.maxCommentCharacters) characters or fewer."
+                SubmissionHaptics.notifyError()
+                return
+            }
 
             if audioOnly {
                 guard transcriptToSubmit != nil else { return }
@@ -1119,12 +1132,96 @@ final class BugReportDraft {
         return false
     }
 
+    /// Validates and prepares any video attachments (such as preloaded videos) against the active duration and byte limits before encoding.
+    private func prepareVideoAttachmentsForSubmission() async -> Bool {
+        #if canImport(UIKit)
+        let maxBytes = effectiveMaxVideoBytes
+        for index in images.indices where images[index].isVideo {
+            guard let sourceURL = images[index].videoFileURL,
+                  FileManager.default.fileExists(atPath: sourceURL.path),
+                  let sourceAttrs = try? FileManager.default.attributesOfItem(atPath: sourceURL.path),
+                  let currentSize = (sourceAttrs[.size] as? NSNumber)?.intValue,
+                  currentSize > 0 else {
+                submissionError = "Could not load the attached video."
+                return false
+            }
+
+            let durationSeconds: TimeInterval
+            if let existingDuration = images[index].videoDurationSeconds, existingDuration.isFinite, existingDuration > 0 {
+                durationSeconds = existingDuration
+            } else {
+                do {
+                    durationSeconds = try await videoDurationInspector(sourceURL)
+                } catch {
+                    submissionError = "Could not load the attached video."
+                    return false
+                }
+            }
+            guard durationSeconds.isFinite, durationSeconds > 0 else {
+                submissionError = "Could not load the attached video."
+                return false
+            }
+            if durationSeconds > Self.maxVideoDurationSeconds {
+                submissionError = "Videos must be 1 minute or shorter."
+                return false
+            }
+            images[index].videoDurationSeconds = durationSeconds
+
+            if currentSize > maxBytes {
+                do {
+                    try FileManager.default.createDirectory(at: tempDirectoryURL, withIntermediateDirectories: true)
+                    let ext = Self.normalizedVideoExtension(for: sourceURL)
+                    let workingURL = tempDirectoryURL.appendingPathComponent("video-\(UUID().uuidString).\(ext)", isDirectory: false)
+                    if FileManager.default.fileExists(atPath: workingURL.path) {
+                        try? FileManager.default.removeItem(at: workingURL)
+                    }
+                    try FileManager.default.copyItem(at: sourceURL, to: workingURL)
+                    transcodeInvocationCount += 1
+                    do {
+                        let transcodedURL = try await videoTranscoder(workingURL, tempDirectoryURL, maxBytes)
+                        if transcodedURL.standardizedFileURL != workingURL.standardizedFileURL {
+                            try? FileManager.default.removeItem(at: workingURL)
+                        }
+                        guard let transcodedAttrs = try? FileManager.default.attributesOfItem(atPath: transcodedURL.path),
+                              let transcodedSize = (transcodedAttrs[.size] as? NSNumber)?.intValue,
+                              transcodedSize > 0 else {
+                            try? FileManager.default.removeItem(at: transcodedURL)
+                            submissionError = "Could not compress the selected video."
+                            return false
+                        }
+                        if transcodedSize > maxBytes {
+                            try? FileManager.default.removeItem(at: transcodedURL)
+                            submissionError = "Video exceeds the maximum size limit even after compression."
+                            return false
+                        }
+                        if isDraftOwned(sourceURL) && sourceURL.standardizedFileURL != transcodedURL.standardizedFileURL {
+                            try? FileManager.default.removeItem(at: sourceURL)
+                        }
+                        images[index].videoFileURL = transcodedURL
+                        images[index].videoFileSize = transcodedSize
+                        images[index].videoMimeType = Self.mimeTypeForVideoExtension(transcodedURL.pathExtension)
+                    } catch {
+                        try? FileManager.default.removeItem(at: workingURL)
+                        submissionError = "Could not compress the selected video."
+                        return false
+                    }
+                } catch {
+                    submissionError = "Could not load the attached video."
+                    return false
+                }
+            }
+        }
+        #endif
+        return true
+    }
+
     /// Converts draft `BugReportImage` items into size-bounded `HollerKitAttachment` payloads.
     func imageAttachments() -> [HollerKitAttachment] {
         #if canImport(UIKit)
         let maxImageBytes = effectiveMaxImageBytes
+        let maxVideoBytes = effectiveMaxVideoBytes
         return Array(images.prefix(Self.maxAttachments)).enumerated().compactMap { index, image in
-            image.encodedAttachment(index: index, maxBytes: maxImageBytes)
+            image.encodedAttachment(index: index, maxBytes: maxImageBytes, maxVideoBytes: maxVideoBytes)
         }
         #else
         return []

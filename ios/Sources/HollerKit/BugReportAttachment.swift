@@ -65,7 +65,10 @@ struct BugReportAttachment: Identifiable, Hashable {
     }
 
     /// Creates a bug report attachment from a `HollerKitAttachment` (image or video).
-    init?(attachment: HollerKitAttachment) {
+    init?(
+        attachment: HollerKitAttachment,
+        maxVideoDurationSeconds: TimeInterval = BugReportDraft.maxVideoDurationSeconds
+    ) {
         if attachment.kind == "video" || attachment.mimeType.lowercased().hasPrefix("video/") {
             guard let fileURL = attachment.fileURL,
                   FileManager.default.fileExists(atPath: fileURL.path) else {
@@ -73,12 +76,18 @@ struct BugReportAttachment: Identifiable, Hashable {
             }
             let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
             let size = (attrs?[.size] as? NSNumber)?.intValue ?? attachment.data.count
+            guard size > 0 else { return nil }
+            if let duration = attachment.durationSeconds {
+                guard duration.isFinite, duration > 0, duration <= maxVideoDurationSeconds else {
+                    return nil
+                }
+            }
             self.title = attachment.filename
             self.kind = .video
             self.image = Self.placeholderVideoThumbnail()
             self.videoFileURL = fileURL
             self.videoMimeType = attachment.mimeType
-            self.videoDurationSeconds = attachment.durationSeconds ?? 1
+            self.videoDurationSeconds = attachment.durationSeconds
             self.videoFileSize = size
             return
         }
@@ -246,12 +255,17 @@ struct BugReportAttachment: Identifiable, Hashable {
     func encodedAttachment(
         index: Int,
         maxBytes: Int = BugReportDraft.maxAttachmentBytes,
+        maxVideoBytes: Int = BugReportDraft.defaultMaxVideoBytes,
         preferredPNGMaxBytes: Int = BugReportDraft.preferredPNGMaxBytes,
         maxPixelDimension: CGFloat = BugReportDraft.maxPixelDimension
     ) -> HollerKitAttachment? {
         if isVideo {
             guard let fileURL = videoFileURL,
-                  FileManager.default.fileExists(atPath: fileURL.path) else {
+                  FileManager.default.fileExists(atPath: fileURL.path),
+                  let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+                  let fileSize = (attrs[.size] as? NSNumber)?.intValue,
+                  fileSize > 0,
+                  fileSize <= maxVideoBytes else {
                 return nil
             }
             let ext = fileURL.pathExtension.lowercased() == "mp4" ? "mp4" : "mov"
@@ -262,7 +276,7 @@ struct BugReportAttachment: Identifiable, Hashable {
                 data: Data(),
                 fileURL: fileURL,
                 kind: "video",
-                durationSeconds: videoDurationSeconds
+                durationSeconds: videoDurationSeconds ?? 1
             )
         }
 

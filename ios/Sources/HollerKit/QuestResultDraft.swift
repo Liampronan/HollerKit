@@ -640,8 +640,9 @@ final class QuestResultDraft {
     func imageAttachments() -> [HollerKitAttachment] {
         #if canImport(UIKit)
         let maxImageBytes = effectiveMaxImageBytes
+        let maxVideoBytes = effectiveMaxVideoBytes
         return images.enumerated().compactMap { index, image in
-            image.encodedAttachment(index: index, maxBytes: maxImageBytes)
+            image.encodedAttachment(index: index, maxBytes: maxImageBytes, maxVideoBytes: maxVideoBytes)
         }
         #else
         return []
@@ -707,6 +708,13 @@ final class QuestResultDraft {
             }
             let commentToSubmit = trimmedComment.isEmpty ? nil : trimmedComment
             let transcriptToSubmit = speechCapture.transcript
+            if let transcriptText = transcriptToSubmit?.text,
+               transcriptText.utf16.count > SpeechCaptureController.maxCommentCharacters
+                || transcriptText.count > SpeechCaptureController.maxCommentCharacters {
+                submissionError = "Voice note transcripts must be \(SpeechCaptureController.maxCommentCharacters) characters or fewer."
+                SubmissionHaptics.notifyError()
+                return
+            }
 
             guard questState.activeQuest?.id == session.id else {
                 return

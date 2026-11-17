@@ -148,8 +148,8 @@ struct SubmissionFeedbackOverlayView: View {
                             .accessibilityIdentifier("HollerKitSubmissionReceiptText")
 
                     case .queued(_, let reason, let isAuthenticationError):
-                        let isAuthorizationFailure = Self.isAuthorizationFailureReason(reason)
-                        let isAuthFailure = !isAuthorizationFailure && (isAuthenticationError || Self.isAuthenticationFailureReason(reason))
+                        let isAuthFailure = isAuthenticationError || Self.isAuthenticationFailureReason(reason)
+                        let isAuthorizationFailure = !isAuthFailure && Self.isAuthorizationFailureReason(reason)
                         Image(
                             systemName: isAuthorizationFailure
                                 ? "lock.shield.fill"
@@ -241,10 +241,13 @@ struct SubmissionFeedbackOverlayView: View {
     /// Returns `true` when `reason` indicates valid credentials lacking required scope or permissions (403).
     nonisolated static func isAuthorizationFailureReason(_ reason: String?) -> Bool {
         guard let lower = reason?.lowercased() else { return false }
-        return lower.contains("forbidden")
-            || lower.contains("403")
-            || lower.contains("scope")
-            || lower.contains("permission")
-            || lower.contains("not authorized")
+        return lower.contains("forbidden (403)")
+            || lower.contains("http error 403")
+            || lower.contains("status 403")
+            || lower.contains("required scope")
+            || lower.contains("missing scope")
+            || lower.contains("insufficient scope")
+            || lower.contains("tester scope")
+            || lower.contains("forbidden")
     }
 }
