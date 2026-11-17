@@ -3,7 +3,17 @@ import type {
   HollerKitPromptName,
   McpGetPromptResult,
   McpPromptDefinition,
+  ValueGroupBy,
 } from './types.js'
+
+const VALID_PROMPT_GROUP_BY = new Set<ValueGroupBy>([
+  'build',
+  'appVersion',
+  'device',
+  'os',
+  'version',
+  'label',
+])
 
 export const HOLLERKIT_MCP_PROMPTS: readonly McpPromptDefinition[] = [
   {
@@ -192,7 +202,7 @@ function buildPromptMessages(
                 `- ${startHint}`,
                 '- Set `record` to `"optional"`, `"suggested"`, or `"required"` depending on whether visual mark capture is needed.',
                 '- If the code emits timed spans (`HollerKit.begin(...)`) or structured breadcrumbs (`HollerKit.breadcrumb(..., fields: ...)`), add a `capture` array with `{ "event", "value", "unit", "label", "min", "max" }` to automatically verify latency or metric thresholds.',
-                '- Validate the updated manifest with `npx hollerkit quests validate hollerkit-quests.json`.',
+                '- Validate the updated manifest with `npx hollerkit-server quests validate hollerkit-quests.json`.',
               ].join('\n'),
             },
           },
@@ -213,7 +223,8 @@ function buildPromptMessages(
                 `Retire completed QA quests from \`hollerkit-quests.json\`:`,
                 `1. Call \`quests_retirable\`${areaFilter} to list active quests that have at least one passing run on their current content version.`,
                 '2. Check `counts.fail` and `counts.unsure` on each returned quest. If a quest has unresolved failures, inspect them via `feedback_inbox` before retiring.',
-                '3. Remove the verified passing quest entries from `hollerkit-quests.json` and run `npx hollerkit quests validate hollerkit-quests.json`.',
+                '3. Run `npx hollerkit-server quests validate hollerkit-quests.json` to compute the local canonical content hash for each quest in `hollerkit-quests.json`, and remove an entry only if its local canonical content hash matches the returned `contentHash` (preserve any entry whose functional content has changed since verification).',
+                '4. Re-run `npx hollerkit-server quests validate hollerkit-quests.json` to confirm the updated manifest is valid.',
               ].join('\n'),
             },
           },
@@ -225,7 +236,16 @@ function buildPromptMessages(
       const quest = args.quest!
       const queryParts = [`quest: ${JSON.stringify(quest)}`]
       if (args.label) queryParts.push(`label: ${JSON.stringify(args.label)}`)
-      if (args.groupBy) queryParts.push(`groupBy: ${JSON.stringify(args.groupBy)}`)
+      if (args.groupBy) {
+        if (!VALID_PROMPT_GROUP_BY.has(args.groupBy as ValueGroupBy)) {
+          throw new HollerKitMcpError(
+            400,
+            'invalid_arguments',
+            'groupBy must be one of build, appVersion, device, os, version, label.',
+          )
+        }
+        queryParts.push(`groupBy: ${JSON.stringify(args.groupBy)}`)
+      }
       return {
         description,
         messages: [

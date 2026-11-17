@@ -79,7 +79,7 @@ When shipping a user-facing iOS feature or bug fix that needs real-device verifi
 Always validate the manifest after editing:
 
 ```sh
-npx hollerkit quests validate hollerkit-quests.json
+npx hollerkit-server quests validate hollerkit-quests.json
 ```
 
 ---
@@ -101,7 +101,8 @@ npx hollerkit quests validate hollerkit-quests.json
 
 1. Call `quests_retirable` (optionally filtered by `area`) to find active quests where `passedOnCurrentVersion` is `true`.
 2. Verify `counts.fail` and `counts.unsure` have been resolved or triaged.
-3. Remove the passed quest definitions from `hollerkit-quests.json` in a cleanup commit/PR so testers only see active unverified quests.
+3. Run `npx hollerkit-server quests validate hollerkit-quests.json` to check the local canonical content hash of each quest in `hollerkit-quests.json`, and remove an entry only when its local canonical content hash matches the returned `contentHash` (preserve any entry whose functional content has been modified since verification).
+4. Re-run `npx hollerkit-server quests validate hollerkit-quests.json` after editing to confirm the manifest remains valid.
 
 ---
 

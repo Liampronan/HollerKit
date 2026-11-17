@@ -1331,4 +1331,20 @@ test('exposes MCP prompts capability (prompts/list and prompts/get) and validate
   })) as JsonRpcErrorResponse
   assert.equal(unknownPromptRpc.error.code, -32602)
   assert.match(unknownPromptRpc.error.message, /Unknown MCP prompt/)
+
+  // 5. Unsupported groupBy in analyze-values returns -32602
+  const invalidGroupByRpc = (await mcp.handleJsonRpc({
+    jsonrpc: '2.0',
+    id: 6,
+    method: 'prompts/get',
+    params: {
+      name: 'analyze-values',
+      arguments: {
+        quest: 'feed-scroll-restore',
+        groupBy: 'devices',
+      },
+    },
+  })) as JsonRpcErrorResponse
+  assert.equal(invalidGroupByRpc.error.code, -32602)
+  assert.match(invalidGroupByRpc.error.message, /groupBy must be one of/)
 })
